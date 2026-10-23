@@ -26,6 +26,7 @@ usage:
   kirikae testgen <out.nro>                             write the built-in test program
   kirikae dev simd-cases <out> <count> [seed]           random SIMD/FP cases for tools/simd_oracle.py
   kirikae dev simd-check <cases> <results>              compare the oracle's results with kirikae
+  kirikae dev extract <dump> <dir>                   write <dir>/exefs and <dir>/romfs
   kirikae dev module-dump <file> <module> <out>         write a module's loaded image
   kirikae dev syms <file> [pattern]                     list exported functions
 
@@ -328,6 +329,49 @@ fn cmd_dev(args: &[String]) -> Result<ExitCode, String> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        Some("romfs-find") => {
+            let exe = kirikae_loader::open(Path::new(args.get(1).ok_or("missing input")?)).map_err(|e| e.to_string())?;
+            let romfs = exe.romfs.ok_or("this executable has no RomFS")?;
+            let mut r = kirikae_loader::romfs::Reader::open(&romfs).map_err(|e| e.to_string())?;
+            for path in &args[2..] {
+                match kirikae_loader::romfs::lookup(&mut r, path).map_err(|e| e.to_string())? {
+                    Some(f) => println!("{:>12} at {:#x}  {}", f.size, f.offset, f.path),
+                    None => println!("{:>12}  {path}", "not found"),
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Some("extract") => {
+            let input = Path::new(args.get(1).ok_or("missing input")?);
+            let out = Path::new(args.get(2).ok_or("missing output folder")?);
+            let source = kirikae_loader::package::read_source(input).map_err(|e| e.to_string())?;
+            let kirikae_loader::Source::ExeFs(files, _, romfs) = source else { return Err("not a game dump with an ExeFS".into()) };
+            let exefs = out.join("exefs");
+            std::fs::create_dir_all(&exefs).map_err(|e| format!("{}: {e}", exefs.display()))?;
+            for (name, bytes) in &files {
+                std::fs::write(exefs.join(name), bytes).map_err(|e| format!("{name}: {e}"))?;
+            }
+            let mut count = 0;
+            if let Some(romfs) = romfs {
+                let mut r = kirikae_loader::romfs::Reader::open(&romfs).map_err(|e| e.to_string())?;
+                for f in kirikae_loader::romfs::list(&mut r, usize::MAX).map_err(|e| e.to_string())? {
+                    let dest = out.join("romfs").join(f.path.trim_start_matches('/'));
+                    std::fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
+                    let mut w = std::io::BufWriter::new(std::fs::File::create(&dest).map_err(|e| format!("{}: {e}", dest.display()))?);
+                    let mut buf = vec![0u8; 1 << 20];
+                    let mut done = 0;
+                    while done < f.size {
+                        let n = (f.size - done).min(buf.len() as u64) as usize;
+                        r.read_at(f.offset + done, &mut buf[..n]).map_err(|e| e.to_string())?;
+                        std::io::Write::write_all(&mut w, &buf[..n]).map_err(|e| e.to_string())?;
+                        done += n as u64;
+                    }
+                    count += 1;
+                }
+            }
+            println!("kirikae: wrote {} ExeFS files and {count} RomFS files to {}", files.len(), out.display());
+            Ok(ExitCode::SUCCESS)
+        }
         Some("module-dump") => {
             let exe = kirikae_loader::open(Path::new(args.get(1).ok_or("missing input")?)).map_err(|e| e.to_string())?;
             let name = args.get(2).ok_or("missing module name")?;
@@ -352,6 +396,6 @@ fn cmd_dev(args: &[String]) -> Result<ExitCode, String> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        _ => Err("dev commands: simd-cases, simd-check, romfs-ls, module-dump, syms".into()),
+        _ => Err("dev commands: simd-cases, simd-check, romfs-ls, romfs-find, extract, module-dump, syms".into()),
     }
 }

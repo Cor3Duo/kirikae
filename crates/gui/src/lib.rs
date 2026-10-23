@@ -106,7 +106,7 @@ impl App {
 
     fn accepts(&self, p: &Path) -> bool {
         if p.is_dir() {
-            return p.join("main").is_file();
+            return p.join("main").is_file() || p.join("exefs").join("main").is_file();
         }
         let ext = extension(p);
         INPUTS.contains(&ext.as_str()) || self.options.converters.iter().any(|c| c.extensions.contains(&ext.as_str()))
@@ -284,7 +284,7 @@ impl eframe::App for App {
                         self.add(files);
                     }
                 }
-                if ui.add_enabled(!busy, egui::Button::new("Add ExeFS folder...")).clicked()
+                if ui.add_enabled(!busy, egui::Button::new("Add game folder...")).clicked()
                     && let Some(dir) = rfd::FileDialog::new().pick_folder()
                 {
                     self.add([dir]);
@@ -294,7 +294,7 @@ impl eframe::App for App {
                 }
             });
             let accepted = self.extensions().iter().map(|e| format!(".{e}")).collect::<Vec<_>>().join(", ");
-            ui.weak(format!("Drop files here: {accepted}, or an extracted ExeFS folder."));
+            ui.weak(format!("Drop files here: {accepted}, or a game folder (exefs/ and romfs/)."));
             let mut remove = None;
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.set_min_height(60.0);
