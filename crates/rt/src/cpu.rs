@@ -148,9 +148,14 @@ impl Cpu {
         }
         // SAFETY: inside the guest reservation, aligned.
         let word = unsafe { AtomicU32::from_ptr(self.host(addr).cast()) };
-        match word.fetch_update(SeqCst, SeqCst, f) {
-            Ok(old) | Err(old) => old,
+        let mut old = word.load(SeqCst);
+        while let Some(new) = f(old) {
+            match word.compare_exchange_weak(old, new, SeqCst, SeqCst) {
+                Ok(_) => break,
+                Err(current) => old = current,
+            }
         }
+        old
     }
 
     pub fn sysreg(&self, r: SysReg) -> u64 {
