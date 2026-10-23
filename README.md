@@ -13,6 +13,7 @@
 [![Platform: Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0078D6)](#requirements)
 [![Vulkan 1.3](https://img.shields.io/badge/Vulkan-1.3-AC162C?logo=vulkan)](#requirements)
 [![Codegen: Cranelift](https://img.shields.io/badge/codegen-Cranelift-4b32c3)](https://cranelift.dev)
+[![Latest release](https://img.shields.io/github/v/release/Cor3Duo/kirikae?label=release)](https://github.com/Cor3Duo/kirikae/releases/latest)
 [![Made in Brazil](https://img.shields.io/badge/made%20in-Brazil%20%F0%9F%87%A7%F0%9F%87%B7-009c3b)](#about)
 
 [![Horizon services](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Cor3Duo/kirikae/main/docs/progress/badges/services.json)](docs/progress/index.html)
@@ -103,6 +104,13 @@ command processor on top of Vulkan, with shaders translated to SPIR-V), audio an
   extracted ExeFS folder (with `romfs.bin` next to it, if the game has one), an `.nso` or an `.nro`.
 
 ## Getting started
+
+### Download
+
+Grab the latest `kirikae-<version>-windows-x64.zip` from [Releases](https://github.com/Cor3Duo/kirikae/releases/latest)
+and extract it anywhere: it holds `kirikae-gui.exe`, `kirikae.exe` and the `runtime/` sources games are
+compiled against (keep them together). You still need Rust and the MSVC build tools, see
+[Requirements](#requirements). To build from source instead, see [Command line](#command-line).
 
 ### Graphical interface
 
