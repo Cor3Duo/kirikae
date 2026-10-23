@@ -169,6 +169,7 @@ pub fn hello_nro() -> Vec<u8> {
     a.emit(asm::mul(0, 0, 0)).emit(asm::ret());
 
     a.label("classify");
+    a.emit(asm::cmp_imm(0, 3)).bcond_to(cond::HI, "case_other");
     a.addr_of(9, "jtable");
     a.emit(asm::ldst_reg(2, 2, 10, 9, 0, 3, true));
     a.emit(asm::add_reg(9, 9, 10)).emit(asm::br(9));
@@ -176,6 +177,8 @@ pub fn hello_nro() -> Vec<u8> {
         a.label(&format!("case{i}"));
         a.emit(asm::movz(true, 0, *ch as u32, 0)).emit(asm::ret());
     }
+    a.label("case_other");
+    a.emit(asm::movz(true, 0, b'?' as u32, 0)).emit(asm::ret());
 
     a.label("fib");
     a.emit(asm::ldstp(2, 3, false, FP, LR, SP, -32));
@@ -195,6 +198,21 @@ pub fn hello_nro() -> Vec<u8> {
         let off = (a.label_addr(&format!("case{i}")) as i64 - jtable as i64) as i32;
         p.ro[jtable_off + 4 * i..jtable_off + 4 * i + 4].copy_from_slice(&off.to_le_bytes());
     }
+    p.finish(PAGE)
+}
+
+pub fn unguarded_jump_nro() -> Vec<u8> {
+    let mut p = Program::new();
+    let table_off = p.ro.len();
+    p.string("table", &[0u8; 4]);
+    p.a.label("start");
+    p.a.addr_of(9, "table");
+    p.a.emit(asm::ldst_reg(2, 2, 10, 9, 0, 3, true));
+    p.a.emit(asm::add_reg(9, 9, 10)).emit(asm::br(9));
+    p.a.label("target");
+    p.a.emit(asm::ret());
+    let rel = (p.a.label_addr("target") as i64 - p.a.label_addr("table") as i64) as i32;
+    p.ro[table_off..table_off + 4].copy_from_slice(&rel.to_le_bytes());
     p.finish(PAGE)
 }
 

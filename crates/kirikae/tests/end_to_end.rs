@@ -38,7 +38,7 @@ fn check_hello(backend: Backend, fast_regs: bool, name: &str) {
     assert_eq!(report.functions, 5);
     assert_eq!(String::from_utf8_lossy(&run.stdout), HELLO_EXPECTED);
     let stats = String::from_utf8_lossy(&run.stderr);
-    assert!(stats.contains(" 8 interpreted instructions"), "{stats}");
+    assert!(stats.contains(" 0 interpreted instructions"), "{stats}");
     let _ = std::fs::remove_dir_all(report.executable.parent().unwrap());
 }
 
