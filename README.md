@@ -224,7 +224,7 @@ driver with a direct Vulkan implementation.
 | `KIRIKAE_GPU_TIME=frame` or `live` | what GPU timestamp reports write: one time per frame (the last presented one) or the current time (default) |
 | `KIRIKAE_NO_FRAME_LIMIT=1` | ignores the swap interval the game asks for and lets it run past 60 fps (games whose world advances by frame speed up) |
 | `KIRIKAE_KEEP_NOOP_DRAWS=1` | keeps draws that write nothing (all color masked, no depth, stencil or memory writes), skipped by default |
-| `KIRIKAE_NVN=trace` / `shadow` | NVN call counting / host model checked against the command processor (see [Features](#features); slower) |
+| `KIRIKAE_NVN=trace` / `shadow` / `encode` | NVN call counting / host model checked against the command processor (see [Features](#features); slower) / also predicts the 3D registers of every draw from the model and reports the mismatches and the registers not predicted yet |
 | `KIRIKAE_NO_CHECKED=1` | re-checks every constant buffer and vertex stream on each draw instead of reusing checks within a batch |
 | `KIRIKAE_NO_BUFFER_CACHE=1` | copies vertex, index and constant buffers on every draw, without the GPU-side cache |
 | `KIRIKAE_SAVES=<folder>` | save folder; each game uses `<folder>\<title id>` (default `%APPDATA%\kirikae\saves`) |

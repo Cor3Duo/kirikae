@@ -1,3 +1,4 @@
+pub mod encode;
 pub mod resources;
 pub mod shadow;
 pub mod state;
@@ -23,6 +24,10 @@ pub fn install(p: &'static Process) {
     let shadow = match crate::env_var!("KIRIKAE_NVN").and_then(|v| v.to_str()) {
         Some("trace") => false,
         Some("shadow") => true,
+        Some("encode") => {
+            encode::ON.store(true, Ordering::Relaxed);
+            true
+        }
         _ => return,
     };
     let Some(boot) = p.symbol("nvnBootstrapLoader") else {
@@ -91,6 +96,7 @@ fn wrap(p: &'static Process, trace: &Arc<Trace>, name: &str, real: u64) -> u64 {
 pub fn report(frames: u64) {
     let Some(trace) = TRACE.get() else { return };
     shadow::report();
+    encode::report();
     static LAST: Mutex<Vec<u64>> = Mutex::new(Vec::new());
     let functions = trace.functions.lock().unwrap();
     let mut last = LAST.lock().unwrap();

@@ -254,6 +254,9 @@ impl Gpu {
         if crate::nvn::shadow::ON.load(Ordering::Relaxed) {
             crate::nvn::shadow::cp_draw(regs, cbs, &|va, len| self.read(mem, va, len), &draw);
         }
+        if crate::nvn::encode::ON.load(Ordering::Relaxed) {
+            crate::nvn::encode::observe(regs);
+        }
         self.with_renderer(|r| r.draw(self, mem, regs, cbs, draw));
     }
 

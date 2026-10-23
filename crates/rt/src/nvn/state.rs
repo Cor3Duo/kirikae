@@ -36,6 +36,8 @@ pub enum Kind {
     Scissor,
     TargetFormat,
     BlendRegister,
+    AttribCount,
+    StreamCount,
 }
 
 #[derive(Default)]
@@ -258,7 +260,7 @@ impl Objects {
     }
 
     pub fn attribs(&mut self, base: u64, count: u64) -> Vec<(Field, u64)> {
-        let mut out = Vec::new();
+        let mut out = vec![(Field(Kind::AttribCount, 0), count.min(32))];
         for i in 0..count.min(32) {
             match self.attrib.get(&(base + i * ATTRIB_SIZE)).copied() {
                 Some(v) => out.extend([(Kind::AttribFormat, v[0]), (Kind::AttribOffset, v[1]), (Kind::AttribStream, v[2])].map(|(k, x)| (Field(k, i as u8), x))),
@@ -269,7 +271,7 @@ impl Objects {
     }
 
     pub fn streams(&mut self, base: u64, count: u64) -> Vec<(Field, u64)> {
-        let mut out = Vec::new();
+        let mut out = vec![(Field(Kind::StreamCount, 0), count.min(16))];
         for i in 0..count.min(16) {
             match self.stream.get(&(base + i * STREAM_SIZE)).copied() {
                 Some(v) => out.extend([(Kind::StreamStride, v[0]), (Kind::StreamDivisor, v[1])].map(|(k, x)| (Field(k, i as u8), x))),
@@ -385,6 +387,10 @@ pub struct Learned {
 }
 
 impl Learned {
+    pub fn usual(&self, kind: Kind, value: u64) -> Option<u64> {
+        self.tables.get(&kind)?.get(&value)?.iter().max_by_key(|e| *e.1).map(|e| *e.0)
+    }
+
     pub fn add(&mut self, model: &[(Field, u64)], regs: &[(Field, u64)]) -> Vec<(Field, u64, u64, u64)> {
         let mut bad = Vec::new();
         for &(f, v) in model {

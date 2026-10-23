@@ -37,6 +37,8 @@ pub struct Draw {
     pub textures: Vec<((u8, u16), u64)>,
     pub state: Vec<(Field, u64)>,
     pub texture_addresses: Vec<((u8, u16), u64)>,
+    pub vertex_sizes: Vec<(u8, u64)>,
+    pub index_type: u8,
 }
 
 impl Draw {
@@ -49,7 +51,7 @@ impl Draw {
 enum Cmd {
     Program(Arc<Vec<u64>>),
     Uniform { stage: u8, index: u8, range: (u64, u64) },
-    Vertex { index: u8, address: u64 },
+    Vertex { index: u8, address: u64, size: u64 },
     Texture { stage: u8, index: u16, handle: u64 },
     State(Vec<(Field, u64)>),
     Targets([u64; 9]),
@@ -68,6 +70,7 @@ struct Model {
     targets: [u64; 9],
     uniforms: std::collections::BTreeMap<(u8, u8), (u64, u64)>,
     vertex: std::collections::BTreeMap<u8, u64>,
+    vertex_sizes: std::collections::BTreeMap<u8, u64>,
     textures: std::collections::BTreeMap<(u8, u16), u64>,
     state: std::collections::BTreeMap<Field, u64>,
     objects: state::Objects,
@@ -331,7 +334,7 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
                 _ => (a[5] as i32, a[7] as u32),
             };
             let _ = index_size(a[2]);
-            record(Cmd::Draw(Draw { indexed: true, count: a[3] as u32, start: a[4], base_vertex, instances, ..Default::default() }));
+            record(Cmd::Draw(Draw { indexed: true, count: a[3] as u32, start: a[4], base_vertex, instances, index_type: a[2] as u8, ..Default::default() }));
         }
         Hook::DrawArrays | Hook::DrawArraysInstanced => {
             let instances = if matches!(hook, Hook::DrawArrays) { 1 } else { a[5] as u32 };
@@ -339,7 +342,7 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
         }
         Hook::DispatchCompute => record(Cmd::Dispatch([a[1] as u32, a[2] as u32, a[3] as u32])),
         Hook::BindUniformBuffer => record(Cmd::Uniform { stage: a[1] as u8, index: a[2] as u8, range: (a[3], a[4]) }),
-        Hook::BindVertexBuffer => record(Cmd::Vertex { index: a[1] as u8, address: a[2] }),
+        Hook::BindVertexBuffer => record(Cmd::Vertex { index: a[1] as u8, address: a[2], size: a[3] }),
         Hook::BindTexture => record(Cmd::Texture { stage: a[1] as u8, index: a[2] as u16, handle: a[3] }),
         Hook::Setter(s) => with(|m| m.objects.set(s, &a)),
         Hook::BindChannelMaskState => record(Cmd::State(with(|m| m.objects.channel_mask(a[1])))),
@@ -377,8 +380,9 @@ impl Model {
                         self.uniforms.insert((g, index + 3), *range);
                     }
                 }
-                Cmd::Vertex { index, address } => {
+                Cmd::Vertex { index, address, size } => {
                     self.vertex.insert(*index, *address);
+                    self.vertex_sizes.insert(*index, *size);
                 }
                 Cmd::Texture { stage, index, handle } => {
                     if let Some(g) = stage_group(*stage) {
@@ -397,6 +401,7 @@ impl Model {
                         targets: [self.targets[0], self.targets[8]],
                         uniforms: self.uniforms.iter().map(|(k, v)| (*k, *v)).collect(),
                         vertex: self.vertex.iter().map(|(k, v)| (*k, *v)).collect(),
+                        vertex_sizes: self.vertex_sizes.iter().map(|(k, v)| (*k, *v)).collect(),
                         textures: self.textures.iter().map(|(k, v)| (*k, *v)).collect(),
                         state: self.state.iter().map(|(k, v)| (*k, *v)).collect(),
                         ..d.clone()
@@ -411,6 +416,15 @@ impl Model {
                 }
                 Cmd::Call(_) => {}
             }
+        }
+    }
+
+    fn pending_draw(&self, d: &Draw, instance: u32) -> Option<&Draw> {
+        let continues = self.held.as_ref().is_some_and(|h| instance > 0 && instance == h.instances && (Draw { instances: h.instances, ..d.clone() }) == *h);
+        let at = (self.held.is_some() && !continues) as usize;
+        match self.expected.get(at) {
+            Some(Work::Draw(e)) if (e.indexed, e.count, e.start, e.base_vertex) == (d.indexed, d.count, d.start, d.base_vertex) => Some(e),
+            _ => None,
         }
     }
 
@@ -649,8 +663,14 @@ pub fn cp_draw(regs: &[u32], cbs: &[[Option<(u64, u32)>; crate::gpu::threed::CB_
     }
     let vertex: Vec<(u8, u64)> = (0..16u8).map(|s| (s, address(regs, reg::VERTEX_STREAM + 4 * s as usize + 1))).collect();
     let state = state::from_registers(regs);
-    let d = Draw { indexed: draw.index_size.is_some(), count: draw.count, start, base_vertex, instances: 1, programs, targets: [color, depth], uniforms, vertex, textures, state, texture_addresses };
-    with(|m| m.decoded(Work::Draw(d), draw.instance));
+    let d = Draw { indexed: draw.index_size.is_some(), count: draw.count, start, base_vertex, instances: 1, programs, targets: [color, depth], uniforms, vertex, textures, state, texture_addresses, ..Default::default() };
+    with(|m| {
+        if super::encode::ON.load(Ordering::Relaxed) {
+            let prediction = m.pending_draw(&d, draw.instance).map(|e| super::encode::predict(e, &m.learned, regs, read));
+            super::encode::check(prediction, regs);
+        }
+        m.decoded(Work::Draw(d), draw.instance)
+    });
 }
 
 pub fn cp_dispatch(grid: [u32; 3]) {
