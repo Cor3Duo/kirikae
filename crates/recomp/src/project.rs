@@ -52,6 +52,8 @@ pub struct BuildReport {
 
 const FUNCTIONS_PER_OBJECT: usize = 1024;
 
+const COMPILER_STACK: usize = 256 << 20;
+
 pub fn runtime_path() -> PathBuf {
     if let Some(dir) = std::env::var_os("KIRIKAE_RUNTIME") {
         return PathBuf::from(dir);
@@ -226,7 +228,11 @@ pub fn build(source: &Source, opts: &BuildOptions) -> Result<BuildReport, String
         None => project.join("target"),
     });
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = Command::new(cargo)
+    let mut command = Command::new(cargo);
+    if std::env::var_os("RUST_MIN_STACK").is_none() {
+        command.env("RUST_MIN_STACK", COMPILER_STACK.to_string());
+    }
+    let status = command
         .arg("build")
         .arg("--release")
         .arg("--manifest-path")
@@ -236,7 +242,8 @@ pub fn build(source: &Source, opts: &BuildOptions) -> Result<BuildReport, String
         .status()
         .map_err(|e| format!("could not run cargo: {e}"))?;
     if !status.success() {
-        return Err(format!("cargo build failed ({status})"));
+        let rustc = Command::new("rustc").arg("--version").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+        return Err(format!("cargo build failed ({status}; {rustc}). If the Rust toolchain is old, `rustup update` may help."));
     }
 
     let exe_name = format!("{name}{}", std::env::consts::EXE_SUFFIX);
