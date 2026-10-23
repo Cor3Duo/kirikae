@@ -109,6 +109,12 @@ command processor on top of Vulkan, with shaders translated to SPIR-V), audio an
   dependencies through Cargo.
 - A **decrypted** dump of a game you own (see [Preparing a game](#preparing-a-game)).
 
+Linux x64 also works (X11 or Wayland), with Rust, a C toolchain and the ALSA and udev headers
+(Fedora: `sudo dnf install gcc pkgconf-pkg-config alsa-lib-devel systemd-devel vulkan-loader`;
+Debian/Ubuntu: `sudo apt install build-essential pkg-config libasound2-dev libudev-dev libvulkan1`).
+Gamepads are read through evdev, so your user needs access to `/dev/input` (the default on desktop
+distributions).
+
 ## Preparing a game
 
 Kirikae never decrypts anything, so it needs the game's files already extracted. A homebrew dumper

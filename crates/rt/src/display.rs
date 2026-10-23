@@ -50,14 +50,45 @@ pub enum Shown {
 
 static PROXY: OnceLock<Option<Mutex<EventLoopProxy<Shown>>>> = OnceLock::new();
 
-static WINDOW: OnceLock<(isize, isize)> = OnceLock::new();
+#[derive(Clone, Copy, Debug)]
+pub enum WindowHandle {
+    Win32 { hwnd: isize, hinstance: isize },
+    Xlib { display: usize, window: u64 },
+    Xcb { connection: usize, window: u32 },
+    Wayland { display: usize, surface: usize },
+}
+
+static WINDOW: OnceLock<WindowHandle> = OnceLock::new();
+static WINDOW_SIZE: AtomicU64 = AtomicU64::new(0);
 
 pub fn headless() -> bool {
     crate::env_var!("KIRIKAE_HEADLESS").is_some()
 }
 
-pub fn window_handle() -> Option<(isize, isize)> {
+pub fn window_handle() -> Option<WindowHandle> {
     WINDOW.get().copied()
+}
+
+pub fn window_size() -> Option<(u32, u32)> {
+    let s = WINDOW_SIZE.load(Ordering::Relaxed);
+    (s != 0).then_some(((s >> 32) as u32, s as u32))
+}
+
+fn set_window_size(size: winit::dpi::PhysicalSize<u32>) {
+    WINDOW_SIZE.store((size.width as u64) << 32 | size.height as u64, Ordering::Relaxed);
+}
+
+fn native_handle(window: &Window) -> Option<WindowHandle> {
+    use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle as D, RawWindowHandle as W};
+    let w = window.window_handle().ok()?.as_raw();
+    let d = window.display_handle().ok()?.as_raw();
+    match (w, d) {
+        (W::Win32(h), _) => Some(WindowHandle::Win32 { hwnd: h.hwnd.get(), hinstance: h.hinstance.map_or(0, |i| i.get()) }),
+        (W::Xlib(h), D::Xlib(d)) => Some(WindowHandle::Xlib { display: d.display?.as_ptr() as usize, window: h.window as u64 }),
+        (W::Xcb(h), D::Xcb(d)) => Some(WindowHandle::Xcb { connection: d.connection?.as_ptr() as usize, window: h.window.get() }),
+        (W::Wayland(h), D::Wayland(d)) => Some(WindowHandle::Wayland { display: d.display.as_ptr() as usize, surface: h.surface.as_ptr() as usize }),
+        _ => None,
+    }
 }
 
 pub fn dump_due() -> bool {
@@ -112,6 +143,11 @@ pub fn start(p: &'static Process, title: String) {
             let mut builder = EventLoop::<Shown>::with_user_event();
             #[cfg(windows)]
             winit::platform::windows::EventLoopBuilderExtWindows::with_any_thread(&mut builder, true);
+            #[cfg(target_os = "linux")]
+            {
+                winit::platform::x11::EventLoopBuilderExtX11::with_any_thread(&mut builder, true);
+                winit::platform::wayland::EventLoopBuilderExtWayland::with_any_thread(&mut builder, true);
+            }
             let event_loop = match builder.build() {
                 Ok(l) => l,
                 Err(e) => {
@@ -182,12 +218,13 @@ impl ApplicationHandler<Shown> for App {
                 return;
             }
         };
-        #[cfg(windows)]
-        if let Ok(h) = winit::raw_window_handle::HasWindowHandle::window_handle(&*window)
-            && let winit::raw_window_handle::RawWindowHandle::Win32(h) = h.as_raw()
-        {
-            let _ = WINDOW.set((h.hwnd.get(), h.hinstance.map_or(0, |i| i.get())));
+        match native_handle(&window) {
+            Some(h) => {
+                let _ = WINDOW.set(h);
+            }
+            None => self.p.warn_once("display: unsupported window system; frames are read back instead".to_string()),
         }
+        set_window_size(window.inner_size());
         self.window = Some(window);
     }
 
@@ -222,7 +259,8 @@ impl ApplicationHandler<Shown> for App {
                 }
             }
             WindowEvent::Focused(false) => crate::input::release_all(),
-            WindowEvent::Resized(_) => {
+            WindowEvent::Resized(size) => {
+                set_window_size(size);
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }

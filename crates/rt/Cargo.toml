@@ -25,5 +25,8 @@ h264 = ["dep:openh264"]
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(not(windows))'.dependencies]
+gilrs = "0.11"
+
 [dev-dependencies]
 kirikae-testkit.workspace = true
