@@ -196,6 +196,25 @@ impl Gpu {
         Some(m.cpu + (va - start))
     }
 
+    fn pieces(&self, va: u64, len: u64) -> Option<Vec<(u64, u64)>> {
+        let maps = self.maps.lock().unwrap();
+        let mut out: Vec<(u64, u64)> = Vec::new();
+        let mut at = va;
+        while at < va + len {
+            let (&start, &m) = maps.range(..=at).next_back()?;
+            if at >= start + m.size {
+                return None;
+            }
+            let n = (start + m.size - at).min(va + len - at);
+            match out.last_mut() {
+                Some((cpu, size)) if *cpu + *size == m.cpu + (at - start) => *size += n,
+                _ => out.push((m.cpu + (at - start), n)),
+            }
+            at += n;
+        }
+        Some(out)
+    }
+
     pub fn gpu_addresses_of(&self, cpu: u64) -> Vec<u64> {
         let maps = self.maps.lock().unwrap();
         maps.iter().filter(|(_, m)| m.cpu == cpu).map(|(va, _)| *va).collect()
@@ -216,11 +235,18 @@ impl Gpu {
 
     fn write(&self, mem: &GuestMemory, va: u64, bytes: &[u8]) -> bool {
         self.cpu_access(va, bytes.len() as u64);
-        let Some(a) = self.translate(va) else { return false };
-        if let Some(r) = self.renderer.lock().unwrap().0.as_mut() {
-            r.note_write(a, bytes.len() as u64);
+        let Some(pieces) = self.pieces(va, bytes.len() as u64) else { return false };
+        let mut done = 0;
+        for (cpu, n) in pieces {
+            if let Some(r) = self.renderer.lock().unwrap().0.as_mut() {
+                r.note_write(cpu, n);
+            }
+            if !mem.write(cpu, &bytes[done..done + n as usize]) {
+                return false;
+            }
+            done += n as usize;
         }
-        mem.write(a, bytes)
+        true
     }
 
     fn cpu_access(&self, va: u64, len: u64) {
@@ -740,5 +766,20 @@ mod tests {
         assert_eq!(gpu.translate(0x15_0000), Some(0x5005_0000));
         assert_eq!(gpu.translate(0x1f_ffff), Some(0x500f_ffff));
         assert_eq!(gpu.translate(0x20_0000), None);
+    }
+
+    #[test]
+    fn writes_split_at_mappings() {
+        let mem = GuestMemory::new().unwrap();
+        mem.map(0x1000_0000, 0x2000).unwrap();
+        mem.map(0x2000_0000, 0x1000).unwrap();
+        let gpu = Gpu::default();
+        gpu.map(0x5_0000_0000, 0x1000_0000, 0x1000);
+        gpu.map(0x5_0000_1000, 0x2000_0000, 0x1000);
+        assert!(gpu.write(&mem, 0x5_0000_0ff0, &[0xaa; 0x20]));
+        assert_eq!(mem.read(0x1000_0ff0, 0x10).unwrap(), [0xaa; 0x10]);
+        assert_eq!(mem.read(0x2000_0000, 0x10).unwrap(), [0xaa; 0x10]);
+        assert_eq!(mem.read(0x1000_1000, 0x10).unwrap(), [0; 0x10]);
+        assert!(!gpu.write(&mem, 0x5_0000_1ff0, &[0xaa; 0x20]));
     }
 }
