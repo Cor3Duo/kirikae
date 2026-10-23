@@ -3211,7 +3211,8 @@ impl Renderer {
         };
         self.lap(16, &mut sub);
         let img = &self.images[&key];
-        let key = if (key.width, key.height) != (header.width, header.height) && img.levels == 1 && img.layers == 1 && view_type == vk::ImageViewType::TYPE_2D {
+        let flat = view_type == vk::ImageViewType::TYPE_2D || (view_type == vk::ImageViewType::TYPE_2D_ARRAY && layers == 1);
+        let key = if (key.width, key.height) != (header.width, header.height) && img.levels == 1 && img.layers == 1 && flat {
             entry.crop = Some(key);
             self.crop(key, header.width, header.height)?
         } else {
