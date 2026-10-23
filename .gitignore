@@ -1,0 +1,45 @@
+/target
+**/target/
+*-build/
+
+# Game files and keys never belong in this repository.
+*.nro
+*.nso
+*.nsp
+*.nsz
+*.ncz
+*.xci
+*.xcz
+*.nca
+*.dnsp
+*.tik
+*.keys
+prod.keys
+title.keys
+
+# What running a recompiled game produces: the executable, its debug
+# symbols, profiles, saves, frame and memory dumps. They contain or derive
+# from the game, so they stay on the player's machine.
+*.exe
+*.pdb
+*.profile
+*.ppm
+*.bin
+*.dump
+saves/
+dumps/
+frames/
+# Coverage records of played games: the list of what the game used, with
+# screenshots and copies of its saves at each event.
+*.coverage.json
+*.coverage.json.*
+*-coverage/
+docs/progress-jogos/
+
+# Local tooling.
+__pycache__/
+*.pyc
+.venv/
+side-session-notes/
+.claude/
+dist/
