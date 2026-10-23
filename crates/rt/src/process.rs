@@ -401,10 +401,10 @@ fn print_times(last: &mut HashMap<String, [u64; crate::prof::CATS]>, frames: u64
         })
         .filter(|s| s.0 > 0)
         .collect();
-    svcs.sort_by(|a, b| b.0.cmp(&a.0));
+    svcs.sort_by_key(|r| std::cmp::Reverse(r.0));
     let line: Vec<String> = svcs.iter().take(8).map(|(ns, i, n)| format!("{i:#x} {:.1} ms ({:.0} calls)", per(*ns), *n as f64 / frames.max(1) as f64)).collect();
     eprintln!("kirikae:           SVCs per frame: {}", line.join(", "));
-    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.0));
     for (busy, name, d, simd, ops) in rows.iter().take(6) {
         if *busy == 0 {
             break;

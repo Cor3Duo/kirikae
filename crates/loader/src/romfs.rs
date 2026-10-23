@@ -209,7 +209,7 @@ fn table_size(entries: usize) -> usize {
         return entries | 1;
     }
     let mut n = entries;
-    while [2, 3, 5, 7, 11, 13, 17].iter().any(|p| n % p == 0) {
+    while [2, 3, 5, 7, 11, 13, 17].iter().any(|p| n.is_multiple_of(*p)) {
         n += 1;
     }
     n

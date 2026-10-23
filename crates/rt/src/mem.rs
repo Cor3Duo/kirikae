@@ -67,8 +67,10 @@ pub struct GuestMemory {
     unmaps: AtomicU64,
 }
 
+type MappedHit = (usize, u64, Range<u64>);
+
 thread_local! {
-    static LAST_MAPPED: std::cell::RefCell<[Option<(usize, u64, Range<u64>)>; 4]> = const { std::cell::RefCell::new([None, None, None, None]) };
+    static LAST_MAPPED: std::cell::RefCell<[Option<MappedHit>; 4]> = const { std::cell::RefCell::new([None, None, None, None]) };
 }
 
 unsafe impl Send for GuestMemory {}

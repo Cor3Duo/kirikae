@@ -2417,8 +2417,6 @@ impl<'a> Translator<'a> {
         if output && matches!(which, BuiltIn::Position) {
             self.b.decorate(var, Decoration::Invariant, []);
         }
-        if !output && self.opts.stage == Stage::Fragment && matches!(which, BuiltIn::FrontFacing) {
-        }
         self.interface.push(var);
         self.builtins.insert(key, var);
         var

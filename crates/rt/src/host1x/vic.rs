@@ -217,7 +217,7 @@ impl Vic {
 }
 
 fn to_nv12(yuva: &[u8], width: usize, height: usize, chroma: (usize, usize)) -> (Vec<u8>, Vec<u8>) {
-    let y: Vec<u8> = yuva.chunks_exact(4).map(|p| p[0]).collect();
+    let y: Vec<u8> = yuva.as_chunks::<4>().0.iter().map(|p| p[0]).collect();
     let (cw, ch) = chroma;
     let mut uv = vec![0u8; cw * ch * 2];
     for cy in 0..ch {

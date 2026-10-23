@@ -482,7 +482,7 @@ fn movi_bytes(out: &mut Vec<Stmt>, w: u32) {
 fn elem(n: u32, i: u32, es: u32) -> Expr {
     let bit = i * es;
     let half = if bit >= 64 { vhi(n) } else { vlo(n) };
-    let v = if bit % 64 == 0 { half } else { op2(Op::Lsr64, half, c((bit % 64) as u64)) };
+    let v = if bit.is_multiple_of(64) { half } else { op2(Op::Lsr64, half, c((bit % 64) as u64)) };
     match es {
         8 => op1(Op::Zext8, v),
         16 => op1(Op::Zext16, v),
@@ -897,10 +897,10 @@ mod tests {
         fn state(&mut self) -> State {
             let mut s = State { x: [0; 32], v: [0; 32], nzcv: (self.next() >> 60) << 28, fpcr: 0, fpsr: 0 };
             for i in 0..32 {
-                s.x[i] = if self.next() % 2 == 0 { self.next() } else { self.f32() };
-                let (a, b) = (self.f32() | self.f32() << 32, if self.next() % 3 == 0 { self.f64() } else { self.f32() | self.f32() << 32 });
+                s.x[i] = if self.next().is_multiple_of(2) { self.next() } else { self.f32() };
+                let (a, b) = (self.f32() | self.f32() << 32, if self.next().is_multiple_of(3) { self.f64() } else { self.f32() | self.f32() << 32 });
                 s.v[i] = a as u128 | (b as u128) << 64;
-                if self.next() % 4 == 0 {
+                if self.next().is_multiple_of(4) {
                     s.v[i] = self.f64() as u128 | (self.f64() as u128) << 64;
                 }
             }

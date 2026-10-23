@@ -26,6 +26,8 @@ const STORAGE_OFFSET: u32 = 18;
 const TEXTURE_OFFSET: u32 = 40;
 const IMAGE_OFFSET: u32 = 104;
 
+type TargetAsk = (u64, vk::Format, u32, u32, u64);
+
 pub struct Renderer {
     _entry: ash::Entry,
     instance: ash::Instance,
@@ -103,7 +105,7 @@ pub struct Renderer {
     tex_cache: HashMap<TexKey, TexEntry>,
     tex_at: std::collections::BTreeMap<u64, Vec<TexKey>>,
     newest: HashMap<u64, ImageKey>,
-    target_memo: [((u64, vk::Format, u32, u32, u64), ImageKey); 4],
+    target_memo: [(TargetAsk, ImageKey); 4],
     generation: u64,
     volumes: HashMap<(u64, vk::Format), Volume>,
     retired: Vec<ImageKey>,
@@ -1813,7 +1815,7 @@ impl Renderer {
 
     fn present_image(&mut self, key: ImageKey, width: u32, height: u32, flip_h: bool, flip_v: bool) -> Presented {
         let srgb = matches!(key.format, vk::Format::R8G8B8A8_SRGB | vk::Format::B8G8R8A8_SRGB | vk::Format::A8B8G8R8_SRGB_PACK32);
-        let dump = crate::env_var!("KIRIKAE_PRESENT_DUMP").filter(|_| self.stats.presents % 60 == 0);
+        let dump = crate::env_var!("KIRIKAE_PRESENT_DUMP").filter(|_| self.stats.presents.is_multiple_of(60));
         let readback = match (&dump, &self.swapchain) {
             (Some(_), Some(sc)) if sc.extent.width > 0 => self.readback_buffer(sc.extent.width as u64 * sc.extent.height as u64 * 4).map(|(b, _)| b),
             _ => None,
@@ -4322,6 +4324,16 @@ fn read_levels(gpu: &Gpu, mem: &GuestMemory, h: &TextureHeader, f: &TexFormat, l
     }
 }
 
+fn border_color(border: &[u32; 4]) -> vk::BorderColor {
+    let [r, g, b, a] = border.map(f32::from_bits);
+    let rgb = (r + g + b) / 3.0;
+    match (rgb >= 0.5, a >= 0.5) {
+        (true, _) => vk::BorderColor::FLOAT_OPAQUE_WHITE,
+        (false, true) => vk::BorderColor::FLOAT_OPAQUE_BLACK,
+        (false, false) => vk::BorderColor::FLOAT_TRANSPARENT_BLACK,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4414,15 +4426,5 @@ mod tests {
         data[16] = 8;
         assert!(!pipeline_cache_matches(&data, &props));
         assert!(!pipeline_cache_matches(&data[..20], &props));
-    }
-}
-
-fn border_color(border: &[u32; 4]) -> vk::BorderColor {
-    let [r, g, b, a] = border.map(f32::from_bits);
-    let rgb = (r + g + b) / 3.0;
-    match (rgb >= 0.5, a >= 0.5) {
-        (true, _) => vk::BorderColor::FLOAT_OPAQUE_WHITE,
-        (false, true) => vk::BorderColor::FLOAT_OPAQUE_BLACK,
-        (false, false) => vk::BorderColor::FLOAT_TRANSPARENT_BLACK,
     }
 }

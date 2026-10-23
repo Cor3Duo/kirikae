@@ -831,10 +831,10 @@ impl Lower<'_, '_> {
             }
             Op::FCvtSD | Op::FCvtDS => {
                 let widen = op == Op::FCvtSD;
-                let f = self.to_float(v[0], !widen);
+                let f = self.bits_as_float(v[0], !widen);
                 let r = if widen { self.b.ins().fpromote(types::F64, f) } else { self.b.ins().fdemote(types::F32, f) };
                 let ordered = self.b.ins().fcmp(FloatCC::Ordered, r, r);
-                let bits = self.from_float(r, widen);
+                let bits = self.float_as_bits(r, widen);
                 let input_ok = self.flush_free(&[v[0]], None, !widen);
                 let fz_ok = if widen {
                     input_ok
@@ -858,7 +858,7 @@ impl Lower<'_, '_> {
         }
     }
 
-    fn to_float(&mut self, v: Value, double: bool) -> Value {
+    fn bits_as_float(&mut self, v: Value, double: bool) -> Value {
         if double {
             self.b.ins().bitcast(types::F64, MemFlagsData::new(), v)
         } else {
@@ -867,7 +867,7 @@ impl Lower<'_, '_> {
         }
     }
 
-    fn from_float(&mut self, f: Value, double: bool) -> Value {
+    fn float_as_bits(&mut self, f: Value, double: bool) -> Value {
         if double {
             self.b.ins().bitcast(I64, MemFlagsData::new(), f)
         } else {
@@ -916,7 +916,7 @@ impl Lower<'_, '_> {
     fn fp_scalar(&mut self, op: Op, v: &[Value]) -> (Value, Option<Value>) {
         let double = fp_double(op);
         let n = fp_inputs(op);
-        let f: Vec<Value> = v[..n].iter().map(|&x| self.to_float(x, double)).collect();
+        let f: Vec<Value> = v[..n].iter().map(|&x| self.bits_as_float(x, double)).collect();
         let r = match op {
             Op::FAdd32 | Op::FAdd64 => self.b.ins().fadd(f[0], f[1]),
             Op::FSub32 | Op::FSub64 => self.b.ins().fsub(f[0], f[1]),
@@ -937,7 +937,7 @@ impl Lower<'_, '_> {
             }
         };
         let ordered = self.b.ins().fcmp(FloatCC::Ordered, r, r);
-        (self.from_float(r, double), Some(ordered))
+        (self.float_as_bits(r, double), Some(ordered))
     }
 
     fn fp_or_call(&mut self, op: Op, v: &[Value], fast: Value, ok: Value) -> Value {
@@ -960,7 +960,7 @@ impl Lower<'_, '_> {
                 if mode & 7 != 4 {
                     return None;
                 }
-                let f = self.to_float(x, op == Op::FToInt64);
+                let f = self.bits_as_float(x, op == Op::FToInt64);
                 let r = if signed { self.b.ins().fcvt_to_sint_sat(int, f) } else { self.b.ins().fcvt_to_uint_sat(int, f) };
                 if width == 64 { r } else { self.z64(r) }
             }
@@ -969,7 +969,7 @@ impl Lower<'_, '_> {
                 let i = if width == 64 { x } else { self.r32(x) };
                 let ty = if double { types::F64 } else { types::F32 };
                 let f = if signed { self.b.ins().fcvt_from_sint(ty, i) } else { self.b.ins().fcvt_from_uint(ty, i) };
-                self.from_float(f, double)
+                self.float_as_bits(f, double)
             }
         })
     }

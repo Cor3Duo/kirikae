@@ -258,8 +258,8 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
         Hook::ClearColor => {
             let words = c.process().memory.read(a[2], 16).unwrap_or_default();
             let mut values = [0u32; 4];
-            for (v, w) in values.iter_mut().zip(words.chunks_exact(4)) {
-                *v = u32::from_le_bytes(w.try_into().unwrap());
+            for (v, w) in values.iter_mut().zip(words.as_chunks::<4>().0) {
+                *v = u32::from_le_bytes(*w);
             }
             let what = (a[3] as u32 & 0xf) << 2 | (a[1] as u32 & 0xf) << 6;
             if what & 0x3c != 0 {
@@ -632,15 +632,15 @@ pub fn cp_draw(regs: &[u32], cbs: &[[Option<(u64, u32)>; crate::gpu::threed::CB_
         if let Some((addr, size)) = cbs[g as usize].get(bindless).copied().flatten()
             && let Some(bytes) = read(addr + TEXTURE_HANDLES, (size as u64).saturating_sub(TEXTURE_HANDLES).min(8 * 32))
         {
-            for (i, w) in bytes.chunks_exact(8).enumerate() {
+            for (i, w) in bytes.as_chunks::<8>().0.iter().enumerate() {
                 let handle = u32::from_le_bytes(w[..4].try_into().unwrap());
                 textures.push(((g, i as u16), handle as u64));
                 if handle != 0
                     && let Some(tic) = read(pool + 32 * (handle & 0xfffff) as u64, 32)
                 {
                     let mut words = [0u32; 8];
-                    for (w, b) in words.iter_mut().zip(tic.chunks_exact(4)) {
-                        *w = u32::from_le_bytes(b.try_into().unwrap());
+                    for (w, b) in words.iter_mut().zip(tic.as_chunks::<4>().0) {
+                        *w = u32::from_le_bytes(*b);
                     }
                     texture_addresses.push(((g, i as u16), crate::gpu::tic::texture_header(&words).address));
                 }

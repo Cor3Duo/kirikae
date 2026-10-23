@@ -15,6 +15,7 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -23,11 +24,16 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
         run: cargo build --release --workspace
+
+      - name: Clippy
+        run: cargo clippy --release --workspace --all-targets -- -D warnings
 
       - name: Test
         run: cargo test --release --workspace -- --skip register_operands

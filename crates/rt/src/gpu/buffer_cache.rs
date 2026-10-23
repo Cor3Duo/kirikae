@@ -30,12 +30,14 @@ struct Arena {
     used: u64,
 }
 
+type IndexRange = (Option<u32>, Option<(u32, u32)>);
+
 struct Entry {
     shadow: Vec<u8>,
     stable: u32,
     resident: Option<Block>,
     used: u64,
-    range: Option<(Option<u32>, Option<(u32, u32)>)>,
+    range: Option<IndexRange>,
 }
 
 #[derive(Default)]

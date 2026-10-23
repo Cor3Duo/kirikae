@@ -155,7 +155,7 @@ pub fn write_simd_hist() {
         Some(h) => h.iter().map(|(w, n)| (*w, *n)).collect(),
         None => return,
     };
-    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.1));
     let text: String = rows.iter().map(|(w, n)| format!("{w:08x} {n}
 ")).collect();
     let _ = std::fs::write(path, text);
@@ -177,7 +177,7 @@ static SIMD_HIST_ON: AtomicBool = AtomicBool::new(false);
 
 pub fn op_hist() -> Vec<(usize, u64)> {
     let mut rows: Vec<(usize, u64)> = OP_HIST.iter().enumerate().map(|(i, n)| (i, n.load(Ordering::Relaxed))).filter(|r| r.1 > 0).collect();
-    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.1));
     rows
 }
 

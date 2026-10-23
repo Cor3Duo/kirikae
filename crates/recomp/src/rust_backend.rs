@@ -47,8 +47,6 @@ impl Emitter<'_> {
                 self.line(indent, "if c.poll() { return; }");
             }
             self.line(indent, &format!("bb = {target:#x}; continue;"));
-        } else if self.prog.entries.contains(&target) {
-            self.line(indent, &format!("c.pc = {target:#x}; return;"));
         } else {
             self.line(indent, &format!("c.pc = {target:#x}; return;"));
         }

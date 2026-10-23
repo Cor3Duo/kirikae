@@ -105,7 +105,7 @@ pub fn report(frames: u64) {
         .collect();
     let total: u64 = rows.iter().map(|r| r.0).sum();
     let used = functions.iter().filter(|f| f.1.load(Ordering::Relaxed) > 0).count();
-    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.0));
     let per = |n: u64| n as f64 / frames.max(1) as f64;
     let top: Vec<String> = rows.iter().take(25).filter(|r| r.0 > 0).map(|(n, name)| format!("{} {:.0}", name.trim_start_matches("nvn"), per(*n))).collect();
     eprintln!("kirikae:         nvn: {:.0} calls per frame, {used} of {} functions used: {}", per(total), functions.len(), top.join(", "));

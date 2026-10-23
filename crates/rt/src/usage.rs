@@ -170,16 +170,15 @@ impl Recorder {
             dirty: true,
             path,
         };
-        match std::fs::read_to_string(&r.path) {
-            Ok(text) => match serde_json::from_str::<Value>(&text) {
+        if let Ok(text) = std::fs::read_to_string(&r.path) {
+            match serde_json::from_str::<Value>(&text) {
                 Ok(v) if v["format"].as_u64() == Some(FORMAT) => r.load(&v),
                 _ => {
                     let bad = r.path.with_extension("json.bad");
                     eprintln!("kirikae: {} is not a coverage file this kirikae reads; moved to {}", r.path.display(), bad.display());
                     let _ = std::fs::rename(&r.path, bad);
                 }
-            },
-            Err(_) => {}
+            }
         }
         r
     }
@@ -222,6 +221,7 @@ impl Recorder {
         self.events.len() as u32
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn record(
         &mut self,
         section: Section,
@@ -439,7 +439,7 @@ pub fn backtrace(c: &Cpu) -> Vec<String> {
 
 pub fn scale(width: u32, height: u32, pixels: &[u32]) -> (u32, u32, Vec<u8>) {
     let (w, h) = (width as usize, height as usize);
-    let dw = (width.min(SHOT_WIDTH)).max(1) as usize;
+    let dw = width.clamp(1, SHOT_WIDTH) as usize;
     let dh = ((h * dw).div_ceil(w.max(1))).max(1);
     let mut out = Vec::with_capacity(dw * dh * 3);
     for dy in 0..dh {
