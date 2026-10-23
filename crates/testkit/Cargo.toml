@@ -1,0 +1,10 @@
+[package]
+name = "kirikae-testkit"
+description = "Synthetic Switch executables for testing kirikae without game files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kirikae-a64.workspace = true
+kirikae-loader.workspace = true

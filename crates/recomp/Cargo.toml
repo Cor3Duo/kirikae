@@ -1,0 +1,21 @@
+[package]
+name = "kirikae-recomp"
+description = "Static recompiler: function discovery, CFG building and code generation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kirikae-a64.workspace = true
+kirikae-loader.workspace = true
+kirikae-rt.workspace = true
+cranelift-codegen = "0.136"
+cranelift-frontend = "0.136"
+cranelift-module = "0.136"
+cranelift-object = "0.136"
+cranelift-native = "0.136"
+
+[dev-dependencies]
+kirikae-testkit.workspace = true
+cranelift-jit = "0.136"
+
