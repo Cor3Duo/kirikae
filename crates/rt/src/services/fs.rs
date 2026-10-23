@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
@@ -51,6 +52,16 @@ impl Service for FsProxy {
         let p = c.process();
         match req.cmd {
             1 => Reply::ok(),
+            2 => match &p.romfs {
+                Some(romfs) => match kirikae_loader::romfs::list(&mut romfs.lock().unwrap(), usize::MAX) {
+                    Ok(files) => Reply::ok().object(Arc::new(RomFileSystem::new(files))),
+                    Err(e) => {
+                        p.warn_once(format!("RomFS listing failed: {e}"));
+                        Reply::err(TARGET_NOT_FOUND)
+                    }
+                },
+                None => Reply::err(TARGET_NOT_FOUND),
+            },
             18 => {
                 let root = saves_root(p.title_id).join("sdcard");
                 Reply::ok().object(Arc::new(HostFs::new(root)))
@@ -105,6 +116,130 @@ impl Service for RomStorage {
             }
             4 => Reply::ok().u64(romfs.lock().unwrap().size()),
             _ => unimplemented("fs/IStorage(RomFS)", c, req),
+        }
+    }
+}
+
+fn rom_path(c: &Cpu, x: Option<&Buf>) -> Option<String> {
+    let b = x?;
+    let raw = c.process().memory.read(b.addr, b.size.min(0x301))?;
+    let s = String::from_utf8_lossy(raw.split(|&b| b == 0).next()?).into_owned();
+    Some(s.split('/').filter(|p| !p.is_empty() && *p != ".").collect::<Vec<_>>().join("/"))
+}
+
+struct RomFileSystem {
+    files: HashMap<String, (u64, u64)>,
+    dirs: HashMap<String, Vec<(String, u8, u64)>>,
+}
+
+impl RomFileSystem {
+    fn new(list: Vec<kirikae_loader::romfs::FileEntry>) -> RomFileSystem {
+        let mut files = HashMap::new();
+        let mut dirs: HashMap<String, Vec<(String, u8, u64)>> = HashMap::from([(String::new(), Vec::new())]);
+        for f in list {
+            let key = f.path.trim_start_matches('/').to_string();
+            let mut parent = String::new();
+            let parts: Vec<&str> = key.split('/').collect();
+            for (i, part) in parts.iter().enumerate() {
+                let path = if parent.is_empty() { part.to_string() } else { format!("{parent}/{part}") };
+                if i + 1 == parts.len() {
+                    dirs.entry(parent.clone()).or_default().push((part.to_string(), ENTRY_FILE, f.size));
+                } else if !dirs.contains_key(&path) {
+                    dirs.insert(path.clone(), Vec::new());
+                    dirs.entry(parent.clone()).or_default().push((part.to_string(), ENTRY_DIRECTORY, 0));
+                }
+                parent = path;
+            }
+            files.insert(key, (f.offset, f.size));
+        }
+        for entries in dirs.values_mut() {
+            entries.sort();
+        }
+        RomFileSystem { files, dirs }
+    }
+
+    fn lookup(&self, req: &Request, path: &str) -> Reply {
+        match req.cmd {
+            7 => {
+                if self.files.contains_key(path) {
+                    Reply::ok().u32(ENTRY_FILE as u32)
+                } else if self.dirs.contains_key(path) {
+                    Reply::ok().u32(ENTRY_DIRECTORY as u32)
+                } else {
+                    Reply::err(PATH_NOT_FOUND)
+                }
+            }
+            8 => match self.files.get(path) {
+                Some(&(offset, size)) => Reply::ok().object(Arc::new(RomFile { offset, size })),
+                None => Reply::err(PATH_NOT_FOUND),
+            },
+            _ => {
+                let filter = req.u32(0);
+                let Some(all) = self.dirs.get(path) else { return Reply::err(PATH_NOT_FOUND) };
+                let entries = all
+                    .iter()
+                    .filter(|(_, kind, _)| if *kind == ENTRY_DIRECTORY { filter & 1 != 0 } else { filter & 2 != 0 })
+                    .cloned()
+                    .collect();
+                Reply::ok().object(Arc::new(HostDir { entries, next: Mutex::new(0) }))
+            }
+        }
+    }
+}
+
+impl Service for RomFileSystem {
+    fn name(&self) -> String {
+        "fs/IFileSystem(RomFS)".into()
+    }
+
+    fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
+        match req.cmd {
+            7..=9 => match rom_path(c, req.x.first()) {
+                Some(path) => self.lookup(req, &path),
+                None => Reply::err(PATH_NOT_FOUND),
+            },
+            10 => Reply::ok(),
+            11 => Reply::ok().u64(0),
+            12 => Reply::ok().u64(c.process().romfs.as_ref().map_or(0, |r| r.lock().unwrap().size())),
+            14 => Reply::ok().bytes(&[0u8; 0x20]),
+            _ => unimplemented("fs/IFileSystem(RomFS)", c, req),
+        }
+    }
+}
+
+struct RomFile {
+    offset: u64,
+    size: u64,
+}
+
+impl Service for RomFile {
+    fn name(&self) -> String {
+        "fs/IFile(RomFS)".into()
+    }
+
+    fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
+        let p = c.process();
+        let Some(romfs) = &p.romfs else { return Reply::err(TARGET_NOT_FOUND) };
+        match req.cmd {
+            0 => {
+                let (offset, size) = (req.u64(8), req.u64(16));
+                let Some(b) = req.b.first() else { return Reply::err(OUT_OF_RANGE) };
+                let len = size.min(b.size).min(self.size.saturating_sub(offset));
+                let mut buf = vec![0u8; len as usize];
+                match romfs.lock().unwrap().read_at(self.offset + offset, &mut buf) {
+                    Ok(n) => {
+                        p.memory.write(b.addr, &buf[..n]);
+                        Reply::ok().u64(n as u64)
+                    }
+                    Err(e) => {
+                        p.warn_once(format!("RomFS read failed: {e}"));
+                        Reply::err(OUT_OF_RANGE)
+                    }
+                }
+            }
+            2 => Reply::ok(),
+            4 => Reply::ok().u64(self.size),
+            _ => unimplemented("fs/IFile(RomFS)", c, req),
         }
     }
 }
@@ -304,5 +439,48 @@ impl Service for HostDir {
             1 => Reply::ok().u64(self.entries.len() as u64),
             _ => unimplemented("fs/IDirectory", c, req),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kirikae_loader::romfs;
+
+    #[test]
+    fn serves_a_built_romfs() {
+        let dir = std::env::temp_dir().join(format!("kirikae-fs-romfs-{}", std::process::id()));
+        let src = dir.join("romfs");
+        fs::create_dir_all(src.join("Model/Sub")).unwrap();
+        fs::write(src.join("top.txt"), b"top level").unwrap();
+        fs::write(src.join("Model/a.bin"), vec![7u8; 1000]).unwrap();
+        fs::write(src.join("Model/Sub/b.txt"), b"nested file").unwrap();
+        let image = dir.join("romfs.bin");
+        let size = romfs::build(&src, &image).unwrap();
+        let mut r = romfs::Reader::open(&romfs::RomFs { path: image, offset: 0, size, compression: None }).unwrap();
+        let rom = RomFileSystem::new(romfs::list(&mut r, usize::MAX).unwrap());
+
+        let req = |cmd: u32, filter: u32| Request { cmd, data: filter.to_le_bytes().to_vec(), ..Default::default() };
+        let kind = |path: &str| {
+            let reply = rom.lookup(&req(7, 0), path);
+            (reply.result, reply.data)
+        };
+        assert_eq!(kind("top.txt"), (0, vec![ENTRY_FILE, 0, 0, 0]));
+        assert_eq!(kind("Model/Sub"), (0, vec![ENTRY_DIRECTORY, 0, 0, 0]));
+        assert_eq!(kind(""), (0, vec![ENTRY_DIRECTORY, 0, 0, 0]));
+        assert_eq!(kind("Model/missing").0, PATH_NOT_FOUND);
+
+        assert_eq!(rom.lookup(&req(8, 0), "Model/Sub/b.txt").objects.len(), 1);
+        assert_eq!(rom.lookup(&req(8, 0), "Model").result, PATH_NOT_FOUND);
+        assert_eq!(rom.lookup(&req(9, 3), "Model").objects.len(), 1);
+        assert_eq!(rom.lookup(&req(9, 3), "top.txt").result, PATH_NOT_FOUND);
+
+        assert_eq!(rom.dirs[""], [("Model".to_string(), ENTRY_DIRECTORY, 0), ("top.txt".to_string(), ENTRY_FILE, 9)]);
+        assert_eq!(rom.dirs["Model"], [("Sub".to_string(), ENTRY_DIRECTORY, 0), ("a.bin".to_string(), ENTRY_FILE, 1000)]);
+        let (offset, size) = rom.files["Model/Sub/b.txt"];
+        let mut got = vec![0u8; size as usize];
+        r.read_at(offset, &mut got).unwrap();
+        assert_eq!(got, b"nested file");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

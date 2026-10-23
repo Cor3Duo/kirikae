@@ -45,7 +45,7 @@ NV_MAGIC = {
     "/dev/nvhost-nvdec": 0x00,
     "/dev/nvhost-vic": 0x00,
 }
-ALIASES = {"fs/IStorage(RomFS)": "fs/IStorage"}
+ALIASES = {"fs/IStorage(RomFS)": "fs/IStorage", "fs/IFileSystem(RomFS)": "fs/IFileSystem", "fs/IFile(RomFS)": "fs/IFile"}
 NV_SHORT = {
     "/dev/nvmap": "nvmap",
     "/dev/nvhost-as-gpu": "as-gpu",
