@@ -1,7 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use kirikae_a64::{lift, Control, Insn};
+use kirikae_a64::{lift, Control, Expr, Insn, Stmt};
 use kirikae_loader::Image;
+
+const MAX_RUN: u64 = 24;
+const MAX_CASES: u64 = 4096;
+const MAX_SPAN: u64 = 1 << 20;
 
 #[derive(Debug)]
 pub struct Block {
@@ -69,6 +73,106 @@ impl<'a> CodeSpace<'a> {
     pub fn words(&self) -> u64 {
         self.images.iter().map(|m| (m.text.end - m.text.start) / 4).sum()
     }
+
+    fn read_ro(&self, addr: u64, size: u8) -> Option<u64> {
+        let m = self.images.iter().find(|m| m.ro.contains(&addr) && m.ro.contains(&(addr + size as u64 - 1)))?;
+        let at = (addr - m.base) as usize;
+        let bytes = m.memory.get(at..at + size as usize)?;
+        Some(bytes.iter().rev().fold(0, |v, &b| v << 8 | b as u64))
+    }
+}
+
+fn guard(space: &CodeSpace, branch: u64) -> Option<(u8, u64)> {
+    let b = space.word(branch)?;
+    let cmp = space.word(branch.checked_sub(4)?)?;
+    if b & 0xff00_0010 != 0x5400_0000 || cmp & 0x7fc0_001f != 0x7100_001f {
+        return None;
+    }
+    let (index, imm) = (((cmp >> 5) & 31) as u8, ((cmp >> 10) & 0xfff) as u64);
+    let count = match b & 0xf {
+        8 => imm + 1,
+        2 => imm,
+        _ => return None,
+    };
+    (index < 31 && count > 0 && count <= MAX_CASES).then_some((index, count))
+}
+
+fn subst(e: &Expr, regs: &[Expr], tmp: &[Option<Expr>]) -> Option<Expr> {
+    Some(match e {
+        Expr::Reg(n) => regs[*n as usize].clone(),
+        Expr::Tmp(n) => tmp.get(*n as usize)?.clone()?,
+        Expr::Op(op, args) => Expr::Op(*op, args.iter().map(|a| subst(a, regs, tmp)).collect::<Option<_>>()?),
+        Expr::Load { size, addr } => Expr::Load { size: *size, addr: Box::new(subst(addr, regs, tmp)?) },
+        other => other.clone(),
+    })
+}
+
+fn eval(space: &CodeSpace, e: &Expr, index: u8, value: u64) -> Option<u64> {
+    match e {
+        Expr::Const(v) => Some(*v),
+        Expr::Reg(n) if *n == index => Some(value),
+        Expr::Op(op, args) => {
+            let vals: Vec<u64> = args.iter().map(|a| eval(space, a, index, value)).collect::<Option<_>>()?;
+            Some(op.eval(&vals))
+        }
+        Expr::Load { size, addr } => space.read_ro(eval(space, addr, index, value)?, *size),
+        _ => None,
+    }
+}
+
+fn constants(e: &Expr, out: &mut Vec<u64>) -> bool {
+    match e {
+        Expr::Const(v) => out.push(*v),
+        Expr::Op(_, args) => return args.iter().fold(false, |load, a| constants(a, out) | load),
+        Expr::Load { addr, .. } => {
+            constants(addr, out);
+            return true;
+        }
+        _ => {}
+    }
+    false
+}
+
+fn jump_table(space: &CodeSpace, br: u64) -> Option<(Vec<u64>, Vec<u64>)> {
+    let mut start = br;
+    let (index, count) = loop {
+        let prev = start.checked_sub(4)?;
+        if br - prev > 4 * MAX_RUN {
+            return None;
+        }
+        match space.lift(prev)?.control() {
+            Control::Fallthrough => start = prev,
+            Control::JumpIf(_) => break guard(space, prev)?,
+            _ => return None,
+        }
+    };
+    let mut regs: Vec<Expr> = (0..31).map(Expr::Reg).collect();
+    let mut target = None;
+    for addr in (start..=br).step_by(4) {
+        let insn = space.lift(addr)?;
+        let mut tmp: Vec<Option<Expr>> = vec![None; 8];
+        for s in &insn.stmts {
+            match s {
+                Stmt::Let(n, e) => *tmp.get_mut(*n as usize)? = Some(subst(e, &regs, &tmp)?),
+                Stmt::SetReg(n, e) => regs[*n as usize] = subst(e, &regs, &tmp)?,
+                Stmt::JumpIndirect(e) if addr == br => target = Some(subst(e, &regs, &tmp)?),
+                Stmt::SetSp(_) | Stmt::SetNzcv(_) | Stmt::SetV { .. } | Stmt::Store { .. } | Stmt::Simd(_) | Stmt::Fence => {}
+                _ => return None,
+            }
+        }
+    }
+    let target = target?;
+    let mut anchors = Vec::new();
+    if !constants(&target, &mut anchors) || eval(space, &target, index, 0).is_none() {
+        return None;
+    }
+    let mut targets: Vec<u64> = (0..count)
+        .map(|i| eval(space, &target, index, i).filter(|t| space.is_code(*t) && t.abs_diff(br) <= MAX_SPAN))
+        .collect::<Option<_>>()?;
+    targets.sort_unstable();
+    targets.dedup();
+    anchors.retain(|a| space.is_code(*a));
+    Some((targets, anchors))
 }
 
 fn adr_target(insn: &Insn) -> Option<u64> {
@@ -119,6 +223,7 @@ impl Seen {
 
 pub fn find_entries(space: &CodeSpace, seeds: &[u64]) -> (BTreeSet<u64>, u64) {
     let mut entries: BTreeSet<u64> = seeds.iter().copied().filter(|a| space.is_code(*a)).collect();
+    let (mut calls, mut cases) = (BTreeSet::new(), BTreeSet::<u64>::new());
     let mut seen = Seen::new(space);
     let mut work: Vec<u64> = entries.iter().copied().collect();
     while let Some(addr) = work.pop() {
@@ -138,12 +243,20 @@ pub fn find_entries(space: &CodeSpace, seeds: &[u64]) -> (BTreeSet<u64>, u64) {
             Control::Call(t) => {
                 if space.is_code(t) {
                     entries.insert(t);
+                    calls.insert(t);
                 }
                 work.extend([t, insn.next()]);
             }
-            Control::JumpIndirect | Control::Return | Control::Undefined => {}
+            Control::JumpIndirect => {
+                if let Some((targets, anchors)) = jump_table(space, addr) {
+                    cases.extend(anchors.iter().chain(&targets));
+                    work.extend(targets);
+                }
+            }
+            Control::Return | Control::Undefined => {}
         }
     }
+    entries.retain(|e| calls.contains(e) || !cases.contains(e));
     (entries, seen.count())
 }
 
@@ -184,7 +297,15 @@ pub fn build_function(space: &CodeSpace, entry: u64, entries: &BTreeSet<u64>) ->
                 leaders.insert(insn.next());
                 work.push(insn.next());
             }
-            Control::JumpIndirect | Control::Return | Control::Undefined => {}
+            Control::JumpIndirect => {
+                for t in jump_table(space, addr).map_or_else(Vec::new, |(targets, _)| targets) {
+                    if internal(t) {
+                        leaders.insert(t);
+                        work.push(t);
+                    }
+                }
+            }
+            Control::Return | Control::Undefined => {}
         }
         insns.insert(addr, insn);
     }
@@ -216,7 +337,17 @@ mod tests {
         assert_eq!(prog.entries.len(), 5, "{:x?}", prog.entries);
         let entry = &prog.functions[0];
         assert_eq!(entry.entry, LOAD_BASE);
-        let classify = prog.functions.iter().find(|f| f.insn_count() == 5).expect("classify");
-        assert!(matches!(classify.blocks.last().unwrap().last().control(), Control::JumpIndirect));
+        let classify = prog.functions.iter().find(|f| f.blocks.iter().any(|b| b.last().control() == Control::JumpIndirect)).expect("classify");
+        assert_eq!(classify.blocks.len(), 7, "guard, table jump, four cases and the default: {classify:x?}");
+    }
+
+    #[test]
+    fn unguarded_indirect_jumps_are_not_tables() {
+        let image = kirikae_loader::load(&kirikae_testkit::unguarded_jump_nro(), LOAD_BASE).unwrap();
+        let prog = discover(&image);
+        let f = &prog.functions[0];
+        let jump = f.blocks.last().unwrap();
+        assert_eq!(jump.last().control(), Control::JumpIndirect);
+        assert!(!f.has_block(jump.next), "{f:x?}");
     }
 }
