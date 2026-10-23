@@ -29,7 +29,7 @@ const IMAGE_OFFSET: u32 = 104;
 type TargetAsk = (u64, vk::Format, u32, u32, u64);
 
 pub struct Renderer {
-    _entry: ash::Entry,
+    entry: ash::Entry,
     instance: ash::Instance,
     device: ash::Device,
     queue: vk::Queue,
@@ -56,8 +56,7 @@ pub struct Renderer {
     submit_wait: Option<vk::Semaphore>,
     submit_signal: Option<vk::Semaphore>,
     surface_fn: Option<ash::khr::surface::Instance>,
-    #[cfg(windows)]
-    win32_fn: Option<ash::khr::win32_surface::Instance>,
+    platforms: Vec<&'static CStr>,
     swapchain_fn: Option<ash::khr::swapchain::Device>,
     swapchain: Option<Swapchain>,
     family: u32,
@@ -790,15 +789,17 @@ impl Renderer {
         }
         let instance_available = unsafe { entry.enumerate_instance_extension_properties(None)? };
         let instance_has = |n: &CStr| instance_available.iter().any(|e| unsafe { CStr::from_ptr(e.extension_name.as_ptr()) } == n);
-        #[cfg(windows)]
-        let surfaces = !crate::display::headless() && instance_has(ash::khr::surface::NAME) && instance_has(ash::khr::win32_surface::NAME);
-        #[cfg(not(windows))]
-        let surfaces = { let _ = instance_has; false };
+        let candidates: &[&'static CStr] = if cfg!(windows) {
+            &[ash::khr::win32_surface::NAME]
+        } else {
+            &[ash::khr::xlib_surface::NAME, ash::khr::xcb_surface::NAME, ash::khr::wayland_surface::NAME]
+        };
+        let platforms: Vec<&'static CStr> = candidates.iter().copied().filter(|n| instance_has(n)).collect();
+        let surfaces = !crate::display::headless() && instance_has(ash::khr::surface::NAME) && !platforms.is_empty();
         let mut instance_extensions = Vec::new();
         if surfaces {
             instance_extensions.push(ash::khr::surface::NAME.as_ptr());
-            #[cfg(windows)]
-            instance_extensions.push(ash::khr::win32_surface::NAME.as_ptr());
+            instance_extensions.extend(platforms.iter().map(|n| n.as_ptr()));
         }
         let instance = unsafe {
             entry.create_instance(&vk::InstanceCreateInfo::default().application_info(&app).enabled_layer_names(&layers).enabled_extension_names(&instance_extensions), None)?
@@ -851,8 +852,7 @@ impl Renderer {
         let push = push_supported.then(|| ash::khr::push_descriptor::Device::new(&instance, &device));
         let swapchain_fn = swapchains.then(|| ash::khr::swapchain::Device::new(&instance, &device));
         let surface_fn = surfaces.then(|| ash::khr::surface::Instance::new(&entry, &instance));
-        #[cfg(windows)]
-        let win32_fn = surfaces.then(|| ash::khr::win32_surface::Instance::new(&entry, &instance));
+        let platforms = if surfaces { platforms } else { Vec::new() };
         let pool = unsafe { device.create_command_pool(&vk::CommandPoolCreateInfo::default().queue_family_index(family).flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER), None)? };
         let cmds = unsafe { device.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(pool).command_buffer_count(IN_FLIGHT as u32))? };
         let timestamps = if unsafe { instance.get_physical_device_queue_family_properties(physical) }[family as usize].timestamp_valid_bits > 0 {
@@ -908,7 +908,7 @@ impl Renderer {
         let compiler = PipelineCompiler::new(&device, pipeline_cache);
 
         Ok(Renderer {
-            _entry: entry,
+            entry,
             instance,
             device,
             queue,
@@ -935,8 +935,7 @@ impl Renderer {
             submit_wait: None,
             submit_signal: None,
             surface_fn,
-            #[cfg(windows)]
-            win32_fn,
+            platforms,
             swapchain_fn,
             swapchain: None,
             family,
@@ -1953,8 +1952,15 @@ impl Renderer {
             }
         };
         let caps = unsafe { surface_fn.get_physical_device_surface_capabilities(self.physical, surface) }.ok()?;
-        let extent = caps.current_extent;
-        if extent.width == 0 || extent.height == 0 || extent.width == u32::MAX {
+        let mut extent = caps.current_extent;
+        if extent.width == u32::MAX {
+            let (w, h) = crate::display::window_size()?;
+            extent = vk::Extent2D {
+                width: w.clamp(caps.min_image_extent.width, caps.max_image_extent.width),
+                height: h.clamp(caps.min_image_extent.height, caps.max_image_extent.height),
+            };
+        }
+        if extent.width == 0 || extent.height == 0 {
             return None;
         }
         let sc = self.swapchain.as_ref()?;
@@ -2044,11 +2050,37 @@ impl Renderer {
         }
     }
 
-    #[cfg(windows)]
     fn create_surface(&mut self) -> Option<vk::SurfaceKHR> {
-        let (hwnd, hinstance) = crate::display::window_handle()?;
-        let info = vk::Win32SurfaceCreateInfoKHR::default().hwnd(hwnd).hinstance(hinstance);
-        match unsafe { self.win32_fn.as_ref()?.create_win32_surface(&info, None) } {
+        use crate::display::WindowHandle as W;
+        let handle = crate::display::window_handle()?;
+        let needed = match handle {
+            W::Win32 { .. } => ash::khr::win32_surface::NAME,
+            W::Xlib { .. } => ash::khr::xlib_surface::NAME,
+            W::Xcb { .. } => ash::khr::xcb_surface::NAME,
+            W::Wayland { .. } => ash::khr::wayland_surface::NAME,
+        };
+        if !self.platforms.contains(&needed) {
+            eprintln!("kirikae: the Vulkan driver lacks {}; frames are read back instead", needed.to_string_lossy());
+            self.present_failed = true;
+            return None;
+        }
+        let (entry, instance) = (&self.entry, &self.instance);
+        // SAFETY: the handles come from the live winit window, which stays open for the whole run.
+        let made = unsafe {
+            match handle {
+                W::Win32 { hwnd, hinstance } => ash::khr::win32_surface::Instance::new(entry, instance)
+                    .create_win32_surface(&vk::Win32SurfaceCreateInfoKHR::default().hwnd(hwnd).hinstance(hinstance), None),
+                W::Xlib { display, window } => ash::khr::xlib_surface::Instance::new(entry, instance)
+                    .create_xlib_surface(&vk::XlibSurfaceCreateInfoKHR::default().dpy(display as *mut vk::Display).window(window as vk::Window), None),
+                W::Xcb { connection, window } => ash::khr::xcb_surface::Instance::new(entry, instance)
+                    .create_xcb_surface(&vk::XcbSurfaceCreateInfoKHR::default().connection(connection as *mut vk::xcb_connection_t).window(window), None),
+                W::Wayland { display, surface } => ash::khr::wayland_surface::Instance::new(entry, instance).create_wayland_surface(
+                    &vk::WaylandSurfaceCreateInfoKHR::default().display(display as *mut vk::wl_display).surface(surface as *mut vk::wl_surface),
+                    None,
+                ),
+            }
+        };
+        match made {
             Ok(s) => Some(s),
             Err(e) => {
                 eprintln!("kirikae: cannot make a Vulkan surface for the window ({e:?}); frames are read back instead");
@@ -2056,11 +2088,6 @@ impl Renderer {
                 None
             }
         }
-    }
-
-    #[cfg(not(windows))]
-    fn create_surface(&mut self) -> Option<vk::SurfaceKHR> {
-        None
     }
 
     pub fn rendered(&self, cpu: u64, width: u32, height: u32) -> bool {

@@ -331,8 +331,65 @@ mod gamepad {
 
 #[cfg(not(windows))]
 mod gamepad {
-    pub fn poll() -> Option<super::PadState> {
-        None
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Duration;
+
+    use gilrs::{Axis, Button, Gilrs};
+
+    use super::{button, PadState, STICK_MAX};
+
+    static STATE: Mutex<Option<PadState>> = Mutex::new(None);
+
+    fn axis(v: f32, dead: f32) -> i32 {
+        if v.abs() < dead { 0 } else { (v.clamp(-1.0, 1.0) * STICK_MAX as f32) as i32 }
+    }
+
+    fn read(gilrs: &Gilrs) -> Option<PadState> {
+        const MAP: [(Button, u64); 16] = [
+            (Button::DPadUp, button::UP),
+            (Button::DPadDown, button::DOWN),
+            (Button::DPadLeft, button::LEFT),
+            (Button::DPadRight, button::RIGHT),
+            (Button::Start, button::PLUS),
+            (Button::Select, button::MINUS),
+            (Button::LeftThumb, button::STICK_L),
+            (Button::RightThumb, button::STICK_R),
+            (Button::LeftTrigger, button::L),
+            (Button::RightTrigger, button::R),
+            (Button::LeftTrigger2, button::ZL),
+            (Button::RightTrigger2, button::ZR),
+            (Button::South, button::B),
+            (Button::East, button::A),
+            (Button::West, button::Y),
+            (Button::North, button::X),
+        ];
+        let (_, pad) = gilrs.gamepads().find(|(_, g)| g.is_connected())?;
+        let buttons = MAP.iter().filter(|(b, _)| pad.is_pressed(*b)).fold(0, |acc, (_, n)| acc | n);
+        let stick = |x: Axis, y: Axis| (axis(pad.value(x), 0.24), axis(pad.value(y), 0.24));
+        Some(PadState { buttons, left: stick(Axis::LeftStickX, Axis::LeftStickY), right: stick(Axis::RightStickX, Axis::RightStickY) })
+    }
+
+    fn run() {
+        let mut gilrs = match Gilrs::new() {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("kirikae: gamepads unavailable ({e})");
+                return;
+            }
+        };
+        loop {
+            gilrs.next_event_blocking(Some(Duration::from_millis(8)));
+            while gilrs.next_event().is_some() {}
+            *STATE.lock().unwrap() = read(&gilrs);
+        }
+    }
+
+    pub fn poll() -> Option<PadState> {
+        static STARTED: OnceLock<()> = OnceLock::new();
+        STARTED.get_or_init(|| {
+            let _ = std::thread::Builder::new().name("kirikae-gamepad".into()).spawn(run);
+        });
+        *STATE.lock().unwrap()
     }
 }
 
