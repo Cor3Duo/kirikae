@@ -1,0 +1,1694 @@
+# Documented Horizon IPC commands, kernel SVCs and nvdrv ioctls.
+# Source: switchbrew.org (CC BY-SA); command IDs and names only. Retrieved 2026-10-18.
+
+[service sm:]
+# nn::sm::detail::IUserInterface — https://switchbrew.org/wiki/Services_API
+0 RegisterClient
+1 GetServiceHandle
+2 RegisterService
+3 UnregisterService
+4 DetachClient
+
+[service lm]
+# nn::lm::ILogService — https://switchbrew.org/wiki/Log_services
+0 OpenLogger
+
+[service lm/ILogger]
+# nn::lm::ILogger — https://switchbrew.org/wiki/Log_services
+0 Log
+1 SetDestination
+2 TransmitHashedLog
+3 DevNotify
+11 OpenSharedMemoryAccessorForHashedLog
+
+[service apm]
+# nn::apm::IManager — https://switchbrew.org/wiki/PPC_services
+# merged with https://switchbrew.org/wiki/Applet_Manager_services (section apm)
+0 OpenSession
+1 GetPerformanceMode
+6 IsCpuOverclockEnabled
+
+[service apm/ISession]
+# nn::apm::ISession — https://switchbrew.org/wiki/PPC_services
+# merged with https://switchbrew.org/wiki/Applet_Manager_services (section apm > ISession)
+0 SetPerformanceConfiguration
+1 GetPerformanceConfiguration
+2 SetCpuOverclockEnabled
+
+[service appletOE]
+# nn::am::service::IApplicationProxyService — https://switchbrew.org/wiki/Applet_Manager_services
+0 OpenApplicationProxy
+# [Switch 2 only] 10 OpenApplicationProxy2
+# [Switch 2 only] 2000 OpenCompatApplicationFunctions
+
+[service am/IApplicationProxy]
+# nn::am::service::IApplicationProxy — https://switchbrew.org/wiki/Applet_Manager_services
+0 GetCommonStateGetter
+1 GetSelfController
+2 GetWindowController
+3 GetAudioController
+4 GetDisplayController
+10 GetProcessWindingController
+11 GetLibraryAppletCreator
+20 GetApplicationFunctions
+1000 GetDebugFunctions
+# [Switch 2 only] 40 Unknown
+# [Switch 2 only] 60 Unknown
+
+[service am/ISelfController]
+# nn::am::service::ISelfController — https://switchbrew.org/wiki/Applet_Manager_services
+0 Exit
+1 LockExit
+2 UnlockExit
+3 EnterFatalSection
+4 LeaveFatalSection
+9 GetLibraryAppletLaunchableEvent
+10 SetScreenShotPermission
+11 SetOperationModeChangedNotification
+12 SetPerformanceModeChangedNotification
+13 SetFocusHandlingMode
+14 SetRestartMessageEnabled
+15 SetScreenShotAppletIdentityInfo
+16 SetOutOfFocusSuspendingEnabled
+17 SetControllerFirmwareUpdateSection
+18 SetRequiresCaptureButtonShortPressedMessage
+19 SetAlbumImageOrientation
+20 SetDesirableKeyboardLayout
+21 GetScreenShotProgramId
+22 GetScreenShotAcdIndex
+23 GetScreenShotApparentPlatform
+24 GetScreenShotApplicationProperty
+40 CreateManagedDisplayLayer
+41 IsSystemBufferSharingEnabled
+42 GetSystemSharedLayerHandle
+43 GetSystemSharedBufferHandle
+44 CreateManagedDisplaySeparableLayer
+45 SetManagedDisplayLayerSeparationMode
+46 SetRecordingLayerCompositionEnabled
+50 SetHandlesRequestToDisplay
+51 ApproveToDisplay
+60 OverrideAutoSleepTimeAndDimmingTime
+61 SetMediaPlaybackState
+62 SetIdleTimeDetectionExtension
+63 GetIdleTimeDetectionExtension
+64 SetInputDetectionSourceSet
+65 ReportUserIsActive
+66 GetCurrentIlluminance
+67 IsIlluminanceAvailable
+68 SetAutoSleepDisabled
+69 IsAutoSleepDisabled
+70 ReportMultimediaError
+71 GetCurrentIlluminanceEx
+72 SetInputDetectionPolicy
+73 Unknown
+80 SetWirelessPriorityMode
+90 GetAccumulatedSuspendedTickValue
+91 GetAccumulatedSuspendedTickChangedEvent
+100 SetAlbumImageTakenNotificationEnabled
+110 SetApplicationAlbumUserData
+120 SaveCurrentScreenshot
+130 SetRecordVolumeMuted
+200 Unknown
+210 Unknown
+211 Unknown
+220 Unknown
+221 Unknown
+230 Unknown
+240 Unknown
+1000 GetDebugStorageChannel
+# [Switch 2 only] 2000 GetGraphicsSupervisor
+# [Switch 2 only] 2100 SetRecordingLayerEnabled
+# [Switch 2 only] 2200 SetSharingLayerEnabled
+# [Switch 2 only] 2300 SetCopyrightLayerEnabled
+# [Switch 2 only] 2400 SetRtcScreenSharingAudioEnabled
+# [Switch 2 only] 2401 SetStreamPlayMirroringAudioEnabled
+# [Switch 2 only] 2402 Unknown
+
+[service am/IWindowController]
+# nn::am::service::IWindowController — https://switchbrew.org/wiki/Applet_Manager_services
+0 CreateWindow
+1 GetAppletResourceUserId
+2 GetAppletResourceUserIdOfCallerApplet
+10 AcquireForegroundRights
+11 ReleaseForegroundRights
+12 RejectToChangeIntoBackground
+20 SetAppletWindowVisibility
+21 SetAppletGpuTimeSlice
+
+[service am/ICommonStateGetter]
+# nn::am::service::ICommonStateGetter — https://switchbrew.org/wiki/Applet_Manager_services
+0 GetEventHandle
+1 ReceiveMessage
+2 GetThisAppletKind
+3 AllowToEnterSleep
+4 DisallowToEnterSleep
+5 GetOperationMode
+6 GetPerformanceMode
+7 GetCradleStatus
+8 GetBootMode
+9 GetCurrentFocusState
+10 RequestToAcquireSleepLock
+11 ReleaseSleepLock
+12 ReleaseSleepLockTransiently
+13 GetAcquiredSleepLockEvent
+14 GetWakeupCount
+15 Unknown
+20 PushToGeneralChannel
+30 GetHomeButtonReaderLockAccessor
+31 GetReaderLockAccessorEx
+32 GetWriterLockAccessorEx
+40 GetCradleFwVersion
+50 IsVrModeEnabled
+51 SetVrModeEnabled
+52 SetLcdBacklighOffEnabled
+53 BeginVrModeEx
+54 EndVrModeEx
+55 IsInControllerFirmwareUpdateSection
+59 SetVrPositionForDebug
+60 GetDefaultDisplayResolution
+61 GetDefaultDisplayResolutionChangeEvent
+62 GetHdcpAuthenticationState
+63 GetHdcpAuthenticationStateChangeEvent
+64 SetTvPowerStateMatchingMode
+65 GetApplicationIdByContentActionName
+66 SetCpuBoostMode
+67 CancelCpuBoostMode
+68 GetBuiltInDisplayType
+80 PerformSystemButtonPressingIfInFocus
+90 SetPerformanceConfigurationChangedNotification
+91 GetCurrentPerformanceConfiguration
+100 SetHandlingHomeButtonShortPressedEnabled
+110 OpenMyGpuErrorHandler
+120 GetAppletLaunchedHistory
+130 EnableStartupLogoDisappearedMessage
+200 GetOperationModeSystemInfo
+300 GetSettingsPlatformRegion
+310 Unknown
+320 Unknown
+400 ActivateMigrationService
+401 DeactivateMigrationService
+500 DisableSleepTillShutdown
+501 SuppressDisablingSleepTemporarily
+502 IsSleepEnabled
+503 IsDisablingSleepSuppressed
+600 SetHidInputMagnificationForApplication
+610 Unknown
+611 Unknown
+900 SetRequestExitToLibraryAppletAtExecuteNextProgramEnabled
+910 GetLaunchRequiredTick
+1000 BeginVrMode3d
+1001 EndVrMode3d
+1002 IsVrModeEnabled3d
+1003 GetVrLaboGoggleViewport
+1004 GetPanelPhysicalSizeForSpecificTitle
+1005 GetPanelResolutionForSpecificTitle
+# [Switch 2 only] 650 BeginUsingCameraResource
+# [Switch 2 only] 651 EndUsingCameraResource
+# [Switch 2 only] 2000 SetRtcModeChangedMessageEnabled
+# [Switch 2 only] 2010 GetCurrentDisplayLayoutRatio
+
+[service am/IApplicationFunctions]
+# nn::am::service::IApplicationFunctions — https://switchbrew.org/wiki/Applet_Manager_services
+1 PopLaunchParameter
+10 CreateApplicationAndPushAndRequestToStart
+11 CreateApplicationAndPushAndRequestToStartForQuest
+12 CreateApplicationAndRequestToStart
+13 CreateApplicationAndRequestToStartForQuest
+14 CreateApplicationWithAttributeAndPushAndRequestToStartForQuest
+15 CreateApplicationWithAttributeAndRequestToStartForQuest
+20 EnsureSaveData
+21 GetDesiredLanguage
+22 SetTerminateResult
+23 GetDisplayVersion
+24 GetLaunchStorageInfoForDebug
+25 ExtendSaveData
+26 GetSaveDataSize
+27 CreateCacheStorage
+28 GetSaveDataSizeMax
+29 GetCacheStorageMax
+30 BeginBlockingHomeButtonShortAndLongPressed
+31 EndBlockingHomeButtonShortAndLongPressed
+32 BeginBlockingHomeButton
+33 EndBlockingHomeButton
+34 SelectApplicationLicense
+35 GetDeviceSaveDataSizeMax
+36 GetLimitedApplicationLicense
+37 GetLimitedApplicationLicenseUpgradableEvent
+40 NotifyRunning
+50 GetPseudoDeviceId
+60 SetMediaPlaybackStateForApplication
+65 IsGamePlayRecordingSupported
+66 InitializeGamePlayRecording
+67 SetGamePlayRecordingState
+68 RequestFlushGamePlayingMovieForDebug
+70 RequestToShutdown
+71 RequestToReboot
+72 RequestToSleep
+80 ExitAndRequestToShowThanksMessage
+90 EnableApplicationCrashReport
+100 InitializeApplicationCopyrightFrameBuffer
+101 SetApplicationCopyrightImage
+102 SetApplicationCopyrightVisibility
+110 QueryApplicationPlayStatistics
+111 QueryApplicationPlayStatisticsByUid
+112 Unknown
+113 Unknown
+120 ExecuteProgram
+121 ClearUserChannel
+122 UnpopToUserChannel
+123 GetPreviousProgramIndex
+124 EnableApplicationAllThreadDumpOnCrash
+130 GetGpuErrorDetectedSystemEvent
+131 SetDelayTimeToAbortOnGpuError
+140 GetFriendInvitationStorageChannelEvent
+141 TryPopFromFriendInvitationStorageChannel
+150 GetNotificationStorageChannelEvent
+151 TryPopFromNotificationStorageChannel
+160 GetHealthWarningDisappearedSystemEvent
+170 SetHdcpAuthenticationActivated
+180 GetLaunchRequiredVersion
+181 UpgradeLaunchRequiredVersion
+190 SendServerMaintenanceOverlayNotification
+200 GetLastApplicationExitReason
+210 Unknown
+220 SetAudioOutputPolicy
+300 CreateMovieWriter
+310 RequestExitApplicationAndTryPopMessage
+320 Unknown
+330 IsLanguageSelectionLimited
+500 StartContinuousRecordingFlushForDebug
+1000 CreateMovieMaker
+1001 PrepareForJit
+# [Switch 2 only] 230 IsTensorRtSupported
+# [Switch 2 only] 321 Unknown
+
+[service am/IStorage]
+# nn::am::service::IStorage — https://switchbrew.org/wiki/Applet_Manager_services
+0 Open
+1 OpenTransferStorage
+
+[service am/IStorageAccessor]
+# nn::am::service::IStorageAccessor — https://switchbrew.org/wiki/Applet_Manager_services
+0 GetSize
+10 Write
+11 Read
+
+[service am/IAudioController]
+# nn::am::service::IAudioController — https://switchbrew.org/wiki/Applet_Manager_services
+0 SetExpectedMasterVolume
+1 GetMainAppletExpectedMasterVolume
+2 GetLibraryAppletExpectedMasterVolume
+3 ChangeMainAppletMasterVolume
+4 SetTransparentVolumeRate
+5 Unknown
+
+[service am/IDisplayController]
+# nn::am::service::IDisplayController — https://switchbrew.org/wiki/Applet_Manager_services
+0 GetLastForegroundCaptureImage
+1 UpdateLastForegroundCaptureImage
+2 GetLastApplicationCaptureImage
+3 GetCallerAppletCaptureImage
+4 UpdateCallerAppletCaptureImage
+5 GetLastForegroundCaptureImageEx
+6 GetLastApplicationCaptureImageEx
+7 GetCallerAppletCaptureImageEx
+8 TakeScreenShotOfOwnLayer
+9 CopyBetweenCaptureBuffers
+10 AcquireLastApplicationCaptureBuffer
+11 ReleaseLastApplicationCaptureBuffer
+12 AcquireLastForegroundCaptureBuffer
+13 ReleaseLastForegroundCaptureBuffer
+14 AcquireCallerAppletCaptureBuffer
+15 ReleaseCallerAppletCaptureBuffer
+16 AcquireLastApplicationCaptureBufferEx
+17 AcquireLastForegroundCaptureBufferEx
+18 AcquireCallerAppletCaptureBufferEx
+20 ClearCaptureBuffer
+21 ClearAppletTransitionBuffer
+22 AcquireLastApplicationCaptureSharedBuffer
+23 ReleaseLastApplicationCaptureSharedBuffer
+24 AcquireLastForegroundCaptureSharedBuffer
+25 ReleaseLastForegroundCaptureSharedBuffer
+26 AcquireCallerAppletCaptureSharedBuffer
+27 ReleaseCallerAppletCaptureSharedBuffer
+28 TakeScreenShotOfOwnLayerEx
+
+[service am/ILibraryAppletCreator]
+# nn::am::service::ILibraryAppletCreator — https://switchbrew.org/wiki/Applet_Manager_services
+0 CreateLibraryAppletOld
+1 TerminateAllLibraryApplets
+2 AreAnyLibraryAppletsLeft
+3 CreateLibraryApplet
+10 CreateStorage
+11 CreateTransferMemoryStorage
+12 CreateHandleStorage
+
+[service am/IDebugFunctions]
+# nn::am::service::IDebugFunctions — https://switchbrew.org/wiki/Applet_Manager_services
+0 NotifyMessageToHomeMenuForDebug
+1 OpenMainApplication
+10 PerformSystemButtonPressing
+20 InvalidateTransitionLayer
+30 RequestLaunchApplicationWithUserAndArgumentForDebug
+31 RequestLaunchApplicationByApplicationLaunchInfoForDebug
+40 GetAppletResourceUsageInfo
+50 AddSystemProgramIdAndAppletIdForDebug
+51 AddOperationConfirmedLibraryAppletIdForDebug
+52 GetProgramIdFromAppletIdForDebug
+53 GetProgramIdFromAppletIdAndLibraryAppletModeForDebug
+100 SetCpuBoostModeForApplet
+101 CancelCpuBoostModeForApplet
+110 PushToAppletBoundChannelForDebug
+111 TryPopFromAppletBoundChannelForDebug
+120 AlarmSettingNotificationEnableAppEventReserve
+121 AlarmSettingNotificationDisableAppEventReserve
+122 AlarmSettingNotificationPushAppEventNotify
+130 FriendInvitationSetApplicationParameter
+131 FriendInvitationClearApplicationParameter
+132 FriendInvitationPushApplicationParameter
+140 RestrictPowerOperationForSecureLaunchModeForDebug
+150 Unknown
+200 CreateFloatingLibraryAppletAccepterForDebug
+210 Unknown
+300 TerminateAllRunningApplicationsForDebug
+410 CreateGeneralStorageForDebug
+411 ReadGeneralStorageForDebug
+412 WriteGeneralStorageForDebug
+430 Unknown
+431 Unknown
+900 GetGrcProcessLaunchedSystemEvent
+910 Unknown
+1000 Unknown
+1001 Unknown
+# [Switch 2 only] 400 LaunchDebugAppletForDebug
+# [Switch 2 only] 401 TerminateDebugAppletForDebug
+# [Switch 2 only] 402 IsDebugAppletLaunchedForDebug
+# [Switch 2 only] 403 Unknown
+# [Switch 2 only] 2000 Unknown
+# [Switch 2 only] 10000 Unknown
+
+[service pctl]
+# nn::pctl::detail::ipc::IParentalControlServiceFactory — https://switchbrew.org/wiki/Parental_Control_services
+0 CreateService
+1 CreateServiceWithoutInitialize
+
+[service pctl/IParentalControlService]
+# nn::pctl::detail::ipc::IParentalControlService — https://switchbrew.org/wiki/Parental_Control_services
+1 Initialize
+1001 CheckFreeCommunicationPermission
+1002 ConfirmLaunchApplicationPermission
+1003 ConfirmResumeApplicationPermission
+1004 ConfirmSnsPostPermission
+1005 ConfirmSystemSettingsPermission
+1006 IsRestrictionTemporaryUnlocked
+1007 RevertRestrictionTemporaryUnlocked
+1008 EnterRestrictedSystemSettings
+1009 LeaveRestrictedSystemSettings
+1010 IsRestrictedSystemSettingsEntered
+1011 RevertRestrictedSystemSettingsEntered
+1012 GetRestrictedFeatures
+1013 ConfirmStereoVisionPermission
+1014 ConfirmPlayableApplicationVideoOld
+1015 ConfirmPlayableApplicationVideo
+1016 ConfirmShowNewsPermission
+1017 EndFreeCommunication
+1018 IsFreeCommunicationAvailable
+1019 ConfirmLaunchApplicationPermission
+1020 ConfirmLaunchSharedApplicationPermission
+1021 TryBeginFreeCommunicationForStreamPlay
+1022 EndFreeCommunicationForStreamPlay
+1023 GetRestrictedFeatureFlagSet
+1031 IsRestrictionEnabled
+1032 GetSafetyLevel
+1033 SetSafetyLevel
+1034 GetSafetyLevelSettings
+1035 GetCurrentSettings
+1036 SetCustomSafetyLevelSettings
+1037 GetDefaultRatingOrganization
+1038 SetDefaultRatingOrganization
+1039 GetFreeCommunicationApplicationListCount
+1042 AddToFreeCommunicationApplicationList
+1043 DeleteSettings
+1044 GetFreeCommunicationApplicationList
+1045 UpdateFreeCommunicationApplicationList
+1046 DisableFeaturesForReset
+1047 NotifyApplicationDownloadStartedOld
+1048 NotifyNetworkProfileCreated
+1049 ResetFreeCommunicationApplicationList
+1050 AddToFreeCommunicationApplicationList
+1051 NotifyApplicationDownloadStarted
+1061 ConfirmStereoVisionRestrictionConfigurable
+1062 GetStereoVisionRestriction
+1063 SetStereoVisionRestriction
+1064 ResetConfirmedStereoVisionPermission
+1065 IsStereoVisionPermitted
+1201 UnlockRestrictionTemporarily
+1202 UnlockSystemSettingsRestriction
+1203 SetPinCode
+1204 GenerateInquiryCode
+1205 CheckMasterKey
+1206 GetPinCodeLength
+1207 GetPinCodeChangedEvent
+1208 GetPinCode
+1209 UnlockSystemSettingsRestriction
+1403 IsPairingActive
+1406 GetSettingsLastUpdated
+1411 GetPairingAccountInfo
+1412 GetAllPairingAccountInfos
+1421 GetAccountNickname
+1424 GetAccountState
+1425 RequestPostEvents
+1426 GetPostEventInterval
+1427 SetPostEventInterval
+1432 GetSynchronizationEvent
+1451 StartPlayTimer
+1452 StopPlayTimer
+1453 IsPlayTimerEnabled
+1454 GetPlayTimerRemainingTime
+1455 IsRestrictedByPlayTimer
+1456 GetPlayTimerSettingsOld
+1457 GetPlayTimerEventToRequestSuspension
+1458 IsPlayTimerAlarmDisabled
+1459 GetPlayTimerRemainingTimeDisplayInfo
+1460 GetWatcherStatusDisplayInfo
+1471 NotifyWrongPinCodeInputManyTimes
+1472 CancelNetworkRequest
+1473 GetUnlinkedEvent
+1474 ClearUnlinkedEvent
+1475 GetExtendedPlayTimerEvent
+1501 SetTimerEventEnabled
+1601 DisableAllFeatures
+1602 PostEnableAllFeatures
+1603 IsAllFeaturesDisabled
+1901 DeleteFromFreeCommunicationApplicationListForDebug
+1902 ClearFreeCommunicationApplicationListForDebug
+1903 GetExemptApplicationListCountForDebug
+1904 GetExemptApplicationListForDebug
+1905 UpdateExemptApplicationListForDebug
+1906 AddToExemptApplicationListForDebug
+1907 DeleteFromExemptApplicationListForDebug
+1908 ClearExemptApplicationListForDebug
+1941 DeletePairing
+1951 SetPlayTimerSettingsForDebugOld
+1952 GetPlayTimerSpentTimeForTest
+1953 SetPlayTimerAlarmDisabledForDebug
+1954 IsBedtimeAlarmEnabled
+1955 GetBedtimeAlarmTime
+1956 GetBedtimeAlarmTimeHour
+1957 GetBedtimeAlarmTimeMinute
+1958 GetBedtimeAlarmResetTimeHour
+1959 GetBedtimeAlarmResetTimeMinute
+1960 GetExtraPlayingTimeForDebug
+2001 RequestPairingAsync
+2002 FinishRequestPairing
+2003 AuthorizePairingAsyncOld
+2004 FinishAuthorizePairing
+2005 RetrievePairingInfoAsync
+2006 FinishRetrievePairingInfo
+2007 UnlinkPairingAsync
+2008 FinishUnlinkPairing
+2009 GetAccountMiiImageAsync
+2010 FinishGetAccountMiiImage
+2011 GetAccountMiiImageContentTypeAsync
+2012 FinishGetAccountMiiImageContentType
+2013 SynchronizeParentalControlSettingsAsync
+2014 FinishSynchronizeParentalControlSettings
+2015 FinishSynchronizeParentalControlSettingsWithLastUpdated
+2016 RequestUpdateExemptionListAsync
+2017 AuthorizePairingAsync
+2019 RequestUpdateDeviceUsersBackground
+2021 RequestCopyPairingAsync
+2022 FinishRequestCopyPairing
+2023 IsFromPairingActiveDevice
+2024 RollbackCopyPairing
+2025 DownloadAllAccountMiiImagesAsync
+2026 FinishDownloadAllAccountMiiImagesAsync
+2027 GetPairingAccountChangedEvent
+3001 GetErrorContextChangedEvent
+9401 GetEvents
+9402 GetEventsWithJson
+9403 RequestPostEvents
+9404 GetPostEventInterval
+9405 SetPostEventInterval
+9406 GetDeviceIdForDebug
+9407 PrepareMigrationWithEmulatedOldSaveDataForDebug
+145601 GetPlayTimerSettings
+195101 SetPlayTimerSettingsForDebug
+
+[service fsp-srv]
+# nn::fssrv::sf::IFileSystemProxy — https://switchbrew.org/wiki/Filesystem_services
+0 OpenFileSystem
+1 SetCurrentProcess
+2 OpenDataFileSystemByCurrentProcess
+7 OpenFileSystemWithPatch
+8 OpenFileSystemWithIdObsolete
+9 OpenDataFileSystemByProgramId
+10 OpenFileSystemWithId
+11 OpenBisFileSystem
+12 OpenBisStorage
+13 InvalidateBisCache
+17 OpenHostFileSystem
+18 OpenSdCardFileSystem
+19 FormatSdCardFileSystem
+21 DeleteSaveDataFileSystem
+22 CreateSaveDataFileSystem
+23 CreateSaveDataFileSystemBySystemSaveDataId
+24 RegisterSaveDataFileSystemAtomicDeletion
+25 DeleteSaveDataFileSystemBySaveDataSpaceId
+26 FormatSdCardDryRun
+27 IsExFatSupported
+28 DeleteSaveDataFileSystemBySaveDataAttribute
+29 IsInitializationMode
+30 OpenGameCardStorage
+31 OpenGameCardFileSystem
+32 ExtendSaveDataFileSystem
+33 DeleteCacheStorage
+34 GetCacheStorageSize
+35 CreateSaveDataFileSystemWithHashSalt
+36 OpenHostFileSystemWithOption
+37 CreateSaveDataFileSystemWithCreationInfo2
+38 DetachSdCard
+39 ShutdownStorage
+40 FixSaveDataCertificate
+51 OpenSaveDataFileSystem
+52 OpenSaveDataFileSystemBySystemSaveDataId
+53 OpenReadOnlySaveDataFileSystem
+57 ReadSaveDataFileSystemExtraDataBySaveDataSpaceId
+58 ReadSaveDataFileSystemExtraData
+59 WriteSaveDataFileSystemExtraData
+60 OpenSaveDataInfoReader
+61 OpenSaveDataInfoReaderBySaveDataSpaceId
+62 OpenSaveDataInfoReaderOnlyCacheStorage
+64 OpenSaveDataInternalStorageFileSystem
+65 UpdateSaveDataMacForDebug
+66 WriteSaveDataFileSystemExtraDataWithMask
+67 FindSaveDataWithFilter
+68 OpenSaveDataInfoReaderWithFilter
+69 ReadSaveDataFileSystemExtraDataBySaveDataAttribute
+70 WriteSaveDataFileSystemExtraDataWithMaskBySaveDataAttribute
+71 ReadSaveDataFileSystemExtraDataWithMaskBySaveDataAttribute
+80 OpenSaveDataMetaFile
+81 OpenSaveDataTransferManager
+82 OpenSaveDataTransferManagerVersion2
+83 OpenSaveDataTransferProhibiter
+84 ListAccessibleSaveDataOwnerId
+85 OpenSaveDataTransferManagerForSaveDataRepair
+86 OpenSaveDataMover
+87 OpenSaveDataTransferManagerForRepair
+88 OpenSaveDataTransferManagerForSaveDataRepairWithPolicy
+100 OpenImageDirectoryFileSystem
+101 OpenBaseFileSystem
+102 FormatBaseFileSystem
+110 OpenContentStorageFileSystem
+120 OpenCloudBackupWorkStorageFileSystem
+130 OpenCustomStorageFileSystem
+200 OpenDataStorageByCurrentProcess
+201 OpenDataStorageByProgramId
+202 OpenDataStorageByDataId
+203 OpenPatchDataStorageByCurrentProcess
+204 OpenDataFileSystemWithProgramIndex
+205 OpenDataStorageWithProgramIndex
+206 OpenDataStorageByPath
+207 OpenDataFileSystemByDataId
+210 OpenDataStorageByCurrentProcessForBatchRead
+211 OpenDataStorageByProgramIdForBatchRead
+212 OpenDataStorageWithProgramIndexForBatchRead
+213 OpenDataStorageByPathForBatchRead
+400 OpenDeviceOperator
+500 OpenSdCardDetectionEventNotifier
+501 OpenGameCardDetectionEventNotifier
+502 OpenSdCardAwakenReadyEventNotifier
+503 OpenGameCardAwakenReadyEventNotifier
+510 OpenSystemDataUpdateEventNotifier
+511 NotifySystemDataUpdateEvent
+520 SimulateDeviceDetectionEvent
+600 SetCurrentPosixTime
+601 QuerySaveDataTotalSize
+602 VerifySaveDataFileSystem
+603 CorruptSaveDataFileSystem
+604 CreatePaddingFile
+605 DeleteAllPaddingFiles
+606 GetRightsId
+607 RegisterExternalKey
+608 UnregisterAllExternalKey
+609 GetRightsIdByPath
+610 GetRightsIdAndKeyGenerationByPath
+611 SetCurrentPosixTimeWithTimeDifference
+612 GetFreeSpaceSizeForSaveData
+613 VerifySaveDataFileSystemBySaveDataSpaceId
+614 CorruptSaveDataFileSystemBySaveDataSpaceId
+615 QuerySaveDataInternalStorageTotalSize
+616 GetSaveDataCommitId
+617 UnregisterExternalKey
+618 GetProgramId
+620 SetSdCardEncryptionSeed
+630 SetSdCardAccessibility
+631 IsSdCardAccessible
+632 TestExternalKey
+640 IsSignedSystemPartitionOnSdCardValid
+700 OpenAccessFailureDetectionEventNotifier
+701 GetAccessFailureDetectionEvent
+702 IsAccessFailureDetected
+710 ResolveAccessFailure
+720 AbandonAccessFailure
+800 GetAndClearErrorInfo
+810 RegisterProgramIndexMapInfo
+820 GetContentStorageInfoIndex
+830 EncryptStreamPlaySaveData
+831 DecryptStreamPlaySaveData
+1000 SetBisRootForHost
+1001 SetSaveDataSize
+1002 SetSaveDataRootPath
+1003 DisableAutoSaveDataCreation
+1004 SetGlobalAccessLogMode
+1005 GetGlobalAccessLogMode
+1006 OutputAccessLogToSdCard
+1007 RegisterUpdatePartition
+1008 OpenRegisteredUpdatePartition
+1009 GetAndClearMemoryReportInfo
+1010 SetDataStorageRedirectTarget
+1011 GetProgramIndexForAccessLog
+1012 GetFsStackUsage
+1013 UnsetSaveDataRootPath
+1014 OutputMultiProgramTagAccessLog
+1016 FlushAccessLogOnSdCard
+1017 OutputApplicationInfoAccessLog
+1018 SetDebugOption
+1019 UnsetDebugOption
+1020 OpenMemoryStressor
+1021 GetFsVariant
+1100 OverrideSaveDataTransferTokenSignVerificationKey
+1101 OverrideSaveDataTransferKeyForTest
+1110 CorruptSaveDataFileSystemByOffset
+1200 OpenMultiCommitManager
+1300 OpenBisWiper
+1400 NotifyErrorContextServiceReady
+# [Switch 2 only] 650 RegisterTicketVersionKeys
+# [Switch 2 only] 651 RegisterCpDeviceUniqueKey
+# [Switch 2 only] 660 GetProcessEnvironmentSource
+
+[service fs/IFileSystem]
+# nn::fssrv::sf::IFileSystem — https://switchbrew.org/wiki/Filesystem_services
+0 CreateFile
+1 DeleteFile
+2 CreateDirectory
+3 DeleteDirectory
+4 DeleteDirectoryRecursively
+5 RenameFile
+6 RenameDirectory
+7 GetEntryType
+8 OpenFile
+9 OpenDirectory
+10 Commit
+11 GetFreeSpaceSize
+12 GetTotalSpaceSize
+13 CleanDirectoryRecursively
+14 GetFileTimeStampRaw
+15 QueryEntry
+16 GetFileSystemAttribute
+
+[service fs/IFile]
+# nn::fssrv::sf::IFile — https://switchbrew.org/wiki/Filesystem_services
+0 Read
+1 Write
+2 Flush
+3 SetSize
+4 GetSize
+5 OperateRange
+6 OperateRangeWithBuffer
+
+[service fs/IDirectory]
+# nn::fssrv::sf::IDirectory — https://switchbrew.org/wiki/Filesystem_services
+0 Read
+1 GetEntryCount
+
+[service fs/IStorage]
+# nn::fssrv::sf::IStorage — https://switchbrew.org/wiki/Filesystem_services
+0 Read
+1 Write
+2 Flush
+3 SetSize
+4 GetSize
+5 OperateRange
+
+[service fs/ISaveDataInfoReader]
+# nn::fssrv::sf::ISaveDataInfoReader — https://switchbrew.org/wiki/Filesystem_services
+0 ReadSaveDataInfo
+
+[service hid]
+# nn::hid::IHidServer — https://switchbrew.org/wiki/HID_services
+0 CreateAppletResource
+1 ActivateDebugPad
+11 ActivateTouchScreen
+21 ActivateMouse
+22 AddMouseWheelDelta
+26 ActivateDebugMouse
+31 ActivateKeyboard
+32 SendKeyboardLockKeyEvent
+40 AcquireXpadIdEventHandle
+41 ReleaseXpadIdEventHandle
+51 ActivateXpad
+55 GetXpadIds
+56 ActivateJoyXpad
+58 GetJoyXpadLifoHandle
+59 GetJoyXpadIds
+60 ActivateSixAxisSensor
+61 DeactivateSixAxisSensor
+62 GetSixAxisSensorLifoHandle
+63 ActivateJoySixAxisSensor
+64 DeactivateJoySixAxisSensor
+65 GetJoySixAxisSensorLifoHandle
+66 StartSixAxisSensor
+67 StopSixAxisSensor
+68 IsSixAxisSensorFusionEnabled
+69 EnableSixAxisSensorFusion
+70 SetSixAxisSensorFusionParameters
+71 GetSixAxisSensorFusionParameters
+72 ResetSixAxisSensorFusionParameters
+73 SetAccelerometerParameters
+74 GetAccelerometerParameters
+75 ResetAccelerometerParameters
+76 SetAccelerometerPlayMode
+77 GetAccelerometerPlayMode
+78 ResetAccelerometerPlayMode
+79 SetGyroscopeZeroDriftMode
+80 GetGyroscopeZeroDriftMode
+81 ResetGyroscopeZeroDriftMode
+82 IsSixAxisSensorAtRest
+83 IsFirmwareUpdateAvailableForSixAxisSensor
+84 EnableSixAxisSensorUnalteredPassthrough
+85 IsSixAxisSensorUnalteredPassthroughEnabled
+86 StoreSixAxisSensorCalibrationParameter
+87 LoadSixAxisSensorCalibrationParameter
+88 GetSixAxisSensorIcInformation
+89 ResetIsSixAxisSensorDeviceNewlyAssigned
+91 ActivateGesture
+92 SetGestureOutputRanges
+100 SetSupportedNpadStyleSet
+101 GetSupportedNpadStyleSet
+102 SetSupportedNpadIdType
+103 ActivateNpad
+104 DeactivateNpad
+106 AcquireNpadStyleSetUpdateEventHandle
+107 DisconnectNpad
+108 GetPlayerLedPattern
+109 ActivateNpadWithRevision
+120 SetNpadJoyHoldType
+121 GetNpadJoyHoldType
+122 SetNpadJoyAssignmentModeSingleByDefault
+123 SetNpadJoyAssignmentModeSingle
+124 SetNpadJoyAssignmentModeDual
+125 MergeSingleJoyAsDualJoy
+126 StartLrAssignmentMode
+127 StopLrAssignmentMode
+128 SetNpadHandheldActivationMode
+129 GetNpadHandheldActivationMode
+130 SwapNpadAssignment
+131 IsUnintendedHomeButtonInputProtectionEnabled
+132 EnableUnintendedHomeButtonInputProtection
+133 SetNpadJoyAssignmentModeSingleWithDestination
+134 SetNpadAnalogStickUseCenterClamp
+135 SetNpadCaptureButtonAssignment
+136 ClearNpadCaptureButtonAssignment
+137 SetNpadGcAnalogStick8bitRawValue
+140 IsFirmwareUpdateAvailableForDebug
+150 GetSixAxisSensorIcSettings
+151 SetSixAxisSensorIcSettings
+160 GetSixAxisSensorIcAccelerationOffset
+200 GetVibrationDeviceInfo
+201 SendVibrationValue
+202 GetActualVibrationValue
+203 CreateActiveVibrationDeviceList
+204 PermitVibration
+205 IsVibrationPermitted
+206 SendVibrationValues
+207 SendVibrationGcErmCommand
+208 GetActualVibrationGcErmCommand
+209 BeginPermitVibrationSession
+210 EndPermitVibrationSession
+211 IsVibrationDeviceMounted
+212 SendVibrationValueInBool
+213 SendVibrationValueInMode
+214 SendVibrationValuesInMode
+300 ActivateConsoleSixAxisSensor
+301 StartConsoleSixAxisSensor
+302 StopConsoleSixAxisSensor
+303 ActivateSevenSixAxisSensor
+304 StartSevenSixAxisSensor
+305 StopSevenSixAxisSensor
+306 InitializeSevenSixAxisSensor
+307 FinalizeSevenSixAxisSensor
+308 SetSevenSixAxisSensorFusionStrength
+309 GetSevenSixAxisSensorFusionStrength
+310 ResetSevenSixAxisSensorTimestamp
+311 ForceActivateConsoleSixAxisSensor
+312 ForceDeactivateConsoleSixAxisSensor
+320 EnableNpadImu
+321 DisableNpadImu
+322 SetNpadImuSupportedFeatures
+323 EnableNpadImuHandle
+324 DisableNpadImuHandle
+400 IsUsbFullKeyControllerEnabled
+401 EnableUsbFullKeyController
+402 IsUsbFullKeyControllerConnected
+403 HasBattery
+404 HasLeftRightBattery
+405 GetNpadInterfaceType
+406 GetNpadLeftRightInterfaceType
+407 GetNpadOfHighestBatteryLevel
+408 GetNpadOfHighestBatteryLevelForJoyRight
+500 GetPalmaConnectionHandle
+501 InitializePalma
+502 AcquirePalmaOperationCompleteEvent
+503 GetPalmaOperationInfo
+504 PlayPalmaActivity
+505 SetPalmaFrModeType
+506 ReadPalmaStep
+507 EnablePalmaStep
+508 ResetPalmaStep
+509 ReadPalmaApplicationSection
+510 WritePalmaApplicationSection
+511 ReadPalmaUniqueCode
+512 SetPalmaUniqueCodeInvalid
+513 WritePalmaActivityEntry
+514 WritePalmaRgbLedPatternEntry
+515 WritePalmaWaveEntry
+516 SetPalmaDataBaseIdentificationVersion
+517 GetPalmaDataBaseIdentificationVersion
+518 SuspendPalmaFeature
+519 GetPalmaOperationResult
+520 ReadPalmaPlayLog
+521 ResetPalmaPlayLog
+522 SetIsPalmaAllConnectable
+523 SetIsPalmaPairedConnectable
+524 PairPalma
+525 SetPalmaBoostMode
+526 CancelWritePalmaWaveEntry
+527 EnablePalmaBoostMode
+528 GetPalmaBluetoothAddress
+529 SetDisallowedPalmaConnection
+1000 SetNpadCommunicationMode
+1001 GetNpadCommunicationMode
+1002 SetTouchScreenConfiguration
+1003 IsFirmwareUpdateNeededForNotification
+1004 SetTouchScreenOutputRanges
+1005 EnableNxTouchScreenEmulationForTouchEnter
+2000 ActivateDigitizer
+3000 GetDebugPadGenericPadMap
+3001 SetDebugPadGenericPadMap
+3002 ResetDebugPadGenericPadMap
+3003 GetDebugPadKeyboardMap
+3004 SetDebugPadKeyboardMap
+3005 ResetDebugPadKeyboardMap
+3006 GetFullKeyGenericPadMap
+3007 SetFullKeyGenericPadMap
+3008 ResetFullKeyGenericPadMap
+3009 GetFullKeyKeyboardMap
+3010 SetFullKeyKeyboardMap
+3011 ResetFullKeyKeyboardMap
+3012 GetDebugPadGenericPadMap
+3013 SetDebugPadGenericPadMap
+3014 GetDebugPadKeyboardMap
+3015 SetDebugPadKeyboardMap
+3150 SetMouseLibraryVersion
+# [Switch 2 only] 138 SetSceneIdForPrivateApp
+# [Switch 2 only] 139 GetSceneIdForPrivateApp
+# [Switch 2 only] 220 IsOunceVibrationDeviceMounted
+# [Switch 2 only] 550 GetGlGrButtonConfigState
+# [Switch 2 only] 3110 InitializeJcms
+# [Switch 2 only] 3111 FinalizeJcms
+# [Switch 2 only] 3112 StartJcms
+# [Switch 2 only] 3113 StopJcms
+# [Switch 2 only] 3130 InitializeNmouse
+# [Switch 2 only] 3131 FinalizeNmouse
+# [Switch 2 only] 3132 SetNmousePointerRanges
+# [Switch 2 only] 3133 GetNmousePointerRanges
+# [Switch 2 only] 3135 EnableShowingCursor
+# [Switch 2 only] 3136 SetNmouseButtonConfigJoyLeftJcms
+# [Switch 2 only] 3137 SetNmouseButtonConfigJoyRightJcms
+# [Switch 2 only] 3138 SetMergedNmouseSourceTypes
+# [Switch 2 only] 3139 InitializeNmouse2
+# [Switch 2 only] 3140 SetNmousePointerPosition
+# [Switch 2 only] 3141 EnableNmousePointer
+# [Switch 2 only] 3142 RestrictNmousePointer
+# [Switch 2 only] 3143 Unknown
+
+[service hid/IAppletResource]
+# nn::hid::IAppletResource — https://switchbrew.org/wiki/HID_services
+0 GetSharedMemoryHandle
+
+[service hid/IActiveVibrationDeviceList]
+# nn::hid::IActiveVibrationDeviceList — https://switchbrew.org/wiki/HID_services
+0 ActivateVibrationDevice
+
+[service acc:u0]
+# nn::account::IAccountServiceForApplication — https://switchbrew.org/wiki/Account_services
+# merged with https://switchbrew.org/wiki/NS_services (section acc:u0)
+0 GetUserCount
+1 GetUserExistence
+2 ListAllUsers
+3 ListOpenUsers
+4 GetLastOpenedUser
+5 GetProfile
+6 GetProfileDigest
+50 IsUserRegistrationRequestPermitted
+51 TrySelectUserWithoutInteractionDeprecated
+52 TrySelectUserWithoutInteraction
+60 ListOpenContextStoredUsers
+99 DebugActivateOpenContextRetention
+100 InitializeApplicationInfoV0
+101 GetBaasAccountManagerForApplication
+102 AuthenticateApplicationAsync
+103 CheckNetworkServiceAvailabilityAsync
+110 StoreSaveDataThumbnail
+111 ClearSaveDataThumbnail
+120 CreateGuestLoginRequest
+130 LoadOpenContext
+131 ListOpenContextStoredUsers
+140 InitializeApplicationInfo
+141 ListQualifiedUsers
+150 IsUserAccountSwitchLocked
+160 InitializeApplicationInfoV2
+
+[service acc/IProfile]
+# nn::account::profile::IProfile — https://switchbrew.org/wiki/Account_services
+# merged with https://switchbrew.org/wiki/Account_services (section acc:e > IProfile)
+# merged with https://switchbrew.org/wiki/NS_services (section acc:su > IProfile)
+0 Get
+1 GetBase
+10 GetImageSize
+11 LoadImage
+20 GetLargeImageSize
+21 LoadLargeImage
+30 GetImageId
+40 GetStableUserId
+
+[service acc/IManagerForApplication]
+# nn::account::baas::IManagerForApplication — https://switchbrew.org/wiki/Account_services
+# merged with https://switchbrew.org/wiki/NS_services (section acc:u0 > IManagerForApplication)
+# merged with https://switchbrew.org/wiki/Account_services (section acc:e > IManagerForApplication)
+0 CheckAvailability
+1 GetAccountId
+2 EnsureIdTokenCacheAsync
+3 LoadIdTokenCacheDeprecated
+4 LoadIdTokenCache
+130 GetNintendoAccountUserResourceCacheForApplication
+150 CreateAuthorizationRequest
+160 StoreOpenContext
+170 LoadNetworkServiceLicenseKindAsync
+
+[service time:u]
+# nn::timesrv::detail::service::IStaticService — https://switchbrew.org/wiki/Glue_services
+# merged with https://switchbrew.org/wiki/PCV_services (section time:u, time:a, time:s)
+0 GetStandardUserSystemClock
+1 GetStandardNetworkSystemClock
+2 GetStandardSteadyClock
+3 GetTimeZoneService
+4 GetStandardLocalSystemClock
+5 GetEphemeralNetworkSystemClock
+20 GetSharedMemoryNativeHandle
+30 GetStandardNetworkClockOperationEventReadableHandle
+31 GetEphemeralNetworkClockOperationEventReadableHandle
+50 SetStandardSteadyClockInternalOffset
+51 GetStandardSteadyClockRtcValue
+100 IsStandardUserSystemClockAutomaticCorrectionEnabled
+101 SetStandardUserSystemClockAutomaticCorrectionEnabled
+102 GetStandardUserSystemClockInitialYear
+200 IsStandardNetworkSystemClockAccuracySufficient
+201 GetStandardUserSystemClockAutomaticCorrectionUpdatedTime
+300 CalculateMonotonicSystemClockBaseTimePoint
+400 GetClockSnapshot
+401 GetClockSnapshotFromSystemClockContext
+500 CalculateStandardUserSystemClockDifferenceByUser
+501 CalculateSpanBetween
+600 GetInitialLaunchEndTime
+601 NotifyInitialLaunchSettingsDone
+
+[service time/ISystemClock]
+# nn::timesrv::detail::service::ISystemClock — https://switchbrew.org/wiki/Glue_services
+# merged with https://switchbrew.org/wiki/PCV_services (section time:u, time:a, time:s > ISystemClock)
+0 GetCurrentTime
+1 SetCurrentTime
+2 GetSystemClockContext
+3 SetSystemClockContext
+4 GetOperationEventReadableHandle
+
+[service time/ISteadyClock]
+# nn::timesrv::detail::service::ISteadyClock — https://switchbrew.org/wiki/Glue_services
+# merged with https://switchbrew.org/wiki/PCV_services (section time:u, time:a, time:s > ISteadyClock)
+0 GetCurrentTimePoint
+2 GetTestOffset
+3 SetTestOffset
+100 GetRtcValue
+101 IsRtcResetDetected
+102 GetSetupResultValue
+200 GetInternalOffset
+201 SetInternalOffset
+
+[service time/ITimeZoneService]
+# nn::timesrv::detail::service::ITimeZoneService — https://switchbrew.org/wiki/Glue_services
+# merged with https://switchbrew.org/wiki/PCV_services (section time:u, time:a, time:s > ITimeZoneService)
+0 GetDeviceLocationName
+1 SetDeviceLocationName
+2 GetTotalLocationNameCount
+3 LoadLocationNameList
+4 LoadTimeZoneRule
+5 GetTimeZoneRuleVersion
+6 GetDeviceLocationNameAndUpdatedTime
+7 SetDeviceLocationNameWithTimeZoneRule
+8 ParseTimeZoneBinary
+20 GetDeviceLocationNameOperationEventReadableHandle
+100 ToCalendarTime
+101 ToCalendarTimeWithMyRule
+201 ToPosixTime
+202 ToPosixTimeWithMyRule
+
+[service nvdrv]
+# nns::nvdrv::INvDrvServices — https://switchbrew.org/wiki/NV_services
+0 Open
+1 Ioctl
+2 Close
+3 Initialize
+4 QueryEvent
+5 MapSharedMem
+6 GetStatus
+7 SetAruidWithoutCheck
+8 SetAruid
+9 DumpStatus
+10 InitializeDevtools
+11 Ioctl2
+12 Ioctl3
+13 SetGraphicsFirmwareMemoryMarginEnabled
+
+[service mm:u]
+# nn::mmnv::IRequest — https://switchbrew.org/wiki/Multimedia_services
+0 InitializeOld
+1 FinalizeOld
+2 SetAndWaitOld
+3 GetOld
+4 Initialize
+5 Finalize
+6 SetAndWait
+7 Get
+
+[service audren:u]
+# nn::audio::detail::IAudioRendererManager — https://switchbrew.org/wiki/Audio_services
+0 OpenAudioRenderer
+1 GetWorkBufferSize
+2 GetAudioDeviceService
+3 OpenAudioRendererForManualExecution
+4 GetAudioDeviceServiceWithRevisionInfo
+
+[service audren:u/IAudioRenderer]
+# nn::audio::detail::IAudioRenderer — https://switchbrew.org/wiki/Audio_services
+0 GetSampleRate
+1 GetSampleCount
+2 GetMixBufferCount
+3 GetState
+4 RequestUpdate
+5 Start
+6 Stop
+7 QuerySystemEvent
+8 SetRenderingTimeLimit
+9 GetRenderingTimeLimit
+10 RequestUpdateAuto
+11 ExecuteAudioRendererRendering
+12 SetVoiceDropParameter
+13 GetVoiceDropParameter
+14 SetAsyncMemoryPoolControlEnabled
+
+[service audren:u/IAudioDevice]
+# nn::audio::detail::IAudioDevice — https://switchbrew.org/wiki/Audio_services
+0 ListAudioDeviceName
+1 SetAudioDeviceOutputVolume
+2 GetAudioDeviceOutputVolume
+3 GetActiveAudioDeviceName
+4 QueryAudioDeviceSystemEvent
+5 GetActiveChannelCount
+6 ListAudioDeviceNameAuto
+7 SetAudioDeviceOutputVolumeAuto
+8 GetAudioDeviceOutputVolumeAuto
+10 GetActiveAudioDeviceNameAuto
+11 QueryAudioDeviceInputEvent
+12 QueryAudioDeviceOutputEvent
+13 GetActiveAudioOutputDeviceName
+14 ListAudioOutputDeviceName
+15 AcquireAudioInputDeviceNotification
+16 ReleaseAudioInputDeviceNotification
+17 AcquireAudioOutputDeviceNotification
+18 ReleaseAudioOutputDeviceNotification
+19 SetAudioDeviceOutputVolumeAutoTuneEnabled
+20 IsAudioDeviceOutputVolumeAutoTuneEnabled
+21 IsActiveOutputDeviceEstimatedLowLatency
+
+[service pl:u]
+# nn::pl::sharedresource::detail::IPlatformSharedResourceManager — https://switchbrew.org/wiki/Glue_services
+0 RequestLoad
+1 GetLoadState
+2 GetSize
+3 GetSharedMemoryAddressOffset
+4 GetSharedMemoryNativeHandle
+5 GetSharedFontInOrderOfPriority
+6 GetSharedFontInOrderOfPriorityForSystem
+# [Switch 2 only] 2000 Unknown
+# [Switch 2 only] 2010 Unknown
+# [Switch 2 only] 2020 Unknown
+# [Switch 2 only] 2100 OpenFont
+
+[service vi:m]
+# nn::visrv::sf::IManagerRootService — https://switchbrew.org/wiki/Display_services
+2 GetDisplayService
+3 GetDisplayServiceWithProxyNameExchange
+100 PrepareFatal
+101 ShowFatal
+102 DrawFatalRectangle
+103 DrawFatalText32
+
+[service vi:s]
+# nn::visrv::sf::ISystemRootService — https://switchbrew.org/wiki/Display_services
+1 GetDisplayService
+3 GetDisplayServiceWithProxyNameExchange
+
+[service vi:u]
+# nn::visrv::sf::IApplicationRootService — https://switchbrew.org/wiki/Display_services
+0 GetDisplayService
+1 GetDisplayServiceWithProxyNameExchange
+
+[service vi/IApplicationDisplayService]
+# nn::visrv::sf::IApplicationDisplayService — https://switchbrew.org/wiki/Display_services
+100 GetRelayService
+101 GetSystemDisplayService
+102 GetManagerDisplayService
+103 GetIndirectDisplayTransactionService
+1000 ListDisplays
+1010 OpenDisplay
+1011 OpenDefaultDisplay
+1020 CloseDisplay
+1101 SetDisplayEnabled
+1102 GetDisplayResolution
+2020 OpenLayer
+2021 CloseLayer
+2030 CreateStrayLayer
+2031 DestroyStrayLayer
+2101 SetLayerScalingMode
+2102 ConvertScalingMode
+2103 Unknown
+2450 GetIndirectLayerImageMap
+2451 GetIndirectLayerImageCropMap
+2460 GetIndirectLayerImageRequiredMemoryInfo
+5202 GetDisplayVsyncEvent
+5203 GetDisplayVsyncEventForDebug
+
+[service vi/IHOSBinderDriver]
+# nns::hosbinder::IHOSBinderDriver — https://switchbrew.org/wiki/Nvnflinger_services
+0 TransactParcel
+1 AdjustRefcount
+2 GetNativeHandle
+3 TransactParcelAuto
+
+[service vi/ISystemDisplayService]
+# nn::visrv::sf::ISystemDisplayService — https://switchbrew.org/wiki/Display_services
+1200 GetZOrderCountMin
+1202 GetZOrderCountMax
+1203 GetDisplayLogicalResolution
+1204 SetDisplayMagnification
+2201 SetLayerPosition
+2203 SetLayerSize
+2204 GetLayerZ
+2205 SetLayerZ
+2207 SetLayerVisibility
+2209 SetLayerAlpha
+2210 SetLayerPositionAndSize
+2312 CreateStrayLayer
+2400 OpenIndirectLayer
+2401 CloseIndirectLayer
+2402 FlipIndirectLayer
+3000 ListDisplayModes
+3001 ListDisplayRgbRanges
+3002 ListDisplayContentTypes
+3200 GetDisplayMode
+3201 SetDisplayMode
+3202 GetDisplayUnderscan
+3203 SetDisplayUnderscan
+3204 GetDisplayContentType
+3205 SetDisplayContentType
+3206 GetDisplayRgbRange
+3207 SetDisplayRgbRange
+3208 GetDisplayCmuMode
+3209 SetDisplayCmuMode
+3210 GetDisplayContrastRatio
+3211 SetDisplayContrastRatio
+3214 GetDisplayGamma
+3215 SetDisplayGamma
+3216 GetDisplayCmuLuma
+3217 SetDisplayCmuLuma
+3218 SetDisplayCrcMode
+6013 GetLayerPresentationSubmissionTimestamps
+8225 GetSharedBufferMemoryHandleId
+8250 OpenSharedLayer
+8251 CloseSharedLayer
+8252 ConnectSharedLayer
+8253 DisconnectSharedLayer
+8254 AcquireSharedFrameBuffer
+8255 PresentSharedFrameBuffer
+8256 GetSharedFrameBufferAcquirableEvent
+8257 FillSharedFrameBufferColor
+8258 CancelSharedFrameBuffer
+9000 GetDp2hdmiController
+
+[service vi/IManagerDisplayService]
+# nn::visrv::sf::IManagerDisplayService — https://switchbrew.org/wiki/Display_services
+200 AllocateProcessHeapBlock
+201 FreeProcessHeapBlock
+1102 GetDisplayResolution
+2010 CreateManagedLayer
+2011 DestroyManagedLayer
+2012 CreateStrayLayer
+2050 CreateIndirectLayer
+2051 DestroyIndirectLayer
+2052 CreateIndirectProducerEndPoint
+2053 DestroyIndirectProducerEndPoint
+2054 CreateIndirectConsumerEndPoint
+2055 DestroyIndirectConsumerEndPoint
+2060 CreateWatermarkCompositor
+2062 SetWatermarkText
+2063 SetWatermarkLayerStacks
+2300 AcquireLayerTexturePresentingEvent
+2301 ReleaseLayerTexturePresentingEvent
+2302 GetDisplayHotplugEvent
+2303 GetDisplayModeChangedEvent
+2402 GetDisplayHotplugState
+2501 GetCompositorErrorInfo
+2601 GetDisplayErrorEvent
+2701 GetDisplayFatalErrorEvent
+4201 SetDisplayAlpha
+4203 SetDisplayLayerStack
+4205 SetDisplayPowerState
+4206 SetDefaultDisplay
+4207 ResetDisplayPanel
+4208 SetDisplayFatalErrorEnabled
+4209 IsDisplayPanelOn
+4300 GetInternalPanelId
+6000 AddToLayerStack
+6001 RemoveFromLayerStack
+6002 SetLayerVisibility
+6003 SetLayerConfig
+6004 AttachLayerPresentationTracer
+6005 DetachLayerPresentationTracer
+6006 StartLayerPresentationRecording
+6007 StopLayerPresentationRecording
+6008 StartLayerPresentationFenceWait
+6009 StopLayerPresentationFenceWait
+6010 GetLayerPresentationAllFencesExpiredEvent
+6011 EnableLayerAutoClearTransitionBuffer
+6012 DisableLayerAutoClearTransitionBuffer
+6013 SetLayerOpacity
+6014 AttachLayerWatermarkCompositor
+6015 DetachLayerWatermarkCompositor
+7000 SetContentVisibility
+8000 SetConductorLayer
+8001 SetTimestampTracking
+8100 SetIndirectProducerFlipOffset
+8200 CreateSharedBufferStaticStorage
+8201 CreateSharedBufferTransferMemory
+8202 DestroySharedBuffer
+8203 BindSharedLowLevelLayerToManagedLayer
+8204 BindSharedLowLevelLayerToIndirectLayer
+8207 UnbindSharedLowLevelLayer
+8208 ConnectSharedLowLevelLayerToSharedBuffer
+8209 DisconnectSharedLowLevelLayerFromSharedBuffer
+8210 CreateSharedLayer
+8211 DestroySharedLayer
+8216 AttachSharedLayerToLowLevelLayer
+8217 ForceDetachSharedLayerFromLowLevelLayer
+8218 StartDetachSharedLayerFromLowLevelLayer
+8219 FinishDetachSharedLayerFromLowLevelLayer
+8220 GetSharedLayerDetachReadyEvent
+8221 GetSharedLowLevelLayerSynchronizedEvent
+8222 CheckSharedLowLevelLayerSynchronized
+8223 RegisterSharedBufferImporterAruid
+8224 UnregisterSharedBufferImporterAruid
+8227 CreateSharedBufferProcessHeap
+8228 GetSharedLayerLayerStacks
+8229 SetSharedLayerLayerStacks
+8291 PresentDetachedSharedFrameBufferToLowLevelLayer
+8292 FillDetachedSharedFrameBufferColor
+8293 GetDetachedSharedFrameBufferImage
+8294 SetDetachedSharedFrameBufferImage
+8295 CopyDetachedSharedFrameBufferImage
+8296 SetDetachedSharedFrameBufferSubImage
+8297 GetSharedFrameBufferContentParameter
+8298 ExpandStartupLogoOnSharedFrameBuffer
+
+[service vi/IGraphicBufferProducer]
+# android::IGraphicBufferProducer — https://android.googlesource.com/platform/frameworks/native/+/refs/tags/android-5.0.0_r1/libs/gui/IGraphicBufferProducer.cpp
+# Not documented on switchbrew: binder transaction codes 1-13 from AOSP (Apache-2.0); 14 is the Nintendo addition.
+1 REQUEST_BUFFER
+2 SET_BUFFER_COUNT
+3 DEQUEUE_BUFFER
+4 DETACH_BUFFER
+5 DETACH_NEXT_BUFFER
+6 ATTACH_BUFFER
+7 QUEUE_BUFFER
+8 CANCEL_BUFFER
+9 QUERY
+10 CONNECT
+11 DISCONNECT
+12 SET_SIDEBAND_STREAM
+13 ALLOCATE_BUFFERS
+14 SET_PREALLOCATED_BUFFER
+
+[service aoc:u]
+# nn::aocsrv::detail::IAddOnContentManager — https://switchbrew.org/wiki/NS_services
+0 CountAddOnContentByApplicationId
+1 ListAddOnContentByApplicationId
+2 CountAddOnContent
+3 ListAddOnContent
+4 GetAddOnContentBaseIdByApplicationId
+5 GetAddOnContentBaseId
+6 PrepareAddOnContentByApplicationId
+7 PrepareAddOnContent
+8 GetAddOnContentListChangedEvent
+9 GetAddOnContentLostErrorCode
+10 GetAddOnContentListChangedEventWithProcessId
+11 NotifyMountAddOnContent
+12 NotifyUnmountAddOnContent
+13 IsAddOnContentMountedForDebug
+50 CheckAddOnContentMountStatus
+100 CreateEcPurchasedEventManager
+101 CreatePermanentEcPurchasedEventManager
+110 CreateContentsServiceManager
+200 SetRequiredAddOnContentsOnContentsAvailabilityTransition
+300 SetupHostAddOnContent
+301 GetRegisteredAddOnContentPath
+302 UpdateCachedList
+
+[service ectx:aw]
+# nn::err::context::IWriterForApplication — https://switchbrew.org/wiki/Glue_services
+0 CreateContextRegistrar
+1 CommitContext
+
+[svc]
+# https://switchbrew.org/wiki/SVC
+0x01 SetHeapSize
+0x02 SetMemoryPermission
+0x03 SetMemoryAttribute
+0x04 MapMemory
+0x05 UnmapMemory
+0x06 QueryMemory
+0x07 ExitProcess
+0x08 CreateThread
+0x09 StartThread
+0x0A ExitThread
+0x0B SleepThread
+0x0C GetThreadPriority
+0x0D SetThreadPriority
+0x0E GetThreadCoreMask
+0x0F SetThreadCoreMask
+0x10 GetCurrentProcessorNumber
+0x11 SignalEvent
+0x12 ClearEvent
+0x13 MapSharedMemory
+0x14 UnmapSharedMemory
+0x15 CreateTransferMemory
+0x16 CloseHandle
+0x17 ResetSignal
+0x18 WaitSynchronization
+0x19 CancelSynchronization
+0x1A ArbitrateLock
+0x1B ArbitrateUnlock
+0x1C WaitProcessWideKeyAtomic
+0x1D SignalProcessWideKey
+0x1E GetSystemTick
+0x1F ConnectToNamedPort
+0x20 SendSyncRequestLight
+0x21 SendSyncRequest
+0x22 SendSyncRequestWithUserBuffer
+0x23 SendAsyncRequestWithUserBuffer
+0x24 GetProcessId
+0x25 GetThreadId
+0x26 Break
+0x27 OutputDebugString
+0x28 ReturnFromException
+0x29 GetInfo
+0x2A FlushEntireDataCache
+0x2B FlushDataCache
+0x2C MapPhysicalMemory
+0x2D UnmapPhysicalMemory
+0x2E GetDebugFutureThreadInfo
+0x2F GetLastThreadInfo
+0x30 GetResourceLimitLimitValue
+0x31 GetResourceLimitCurrentValue
+0x32 SetThreadActivity
+0x33 GetThreadContext3
+0x34 WaitForAddress
+0x35 SignalToAddress
+0x36 SynchronizePreemptionState
+0x37 GetResourceLimitPeakValue
+0x39 CreateIoPool
+0x3A CreateIoRegion
+0x3C KernelDebug
+0x3D ChangeKernelTraceState
+0x40 CreateSession
+0x41 AcceptSession
+0x42 ReplyAndReceiveLight
+0x43 ReplyAndReceive
+0x44 ReplyAndReceiveWithUserBuffer
+0x45 CreateEvent
+0x46 MapIoRegion
+0x47 UnmapIoRegion
+0x48 MapPhysicalMemoryUnsafe
+0x49 UnmapPhysicalMemoryUnsafe
+0x4A SetUnsafeLimit
+0x4B CreateCodeMemory
+0x4C ControlCodeMemory
+0x4D SleepSystem
+0x4E ReadWriteRegister
+0x4F SetProcessActivity
+0x50 CreateSharedMemory
+0x51 MapTransferMemory
+0x52 UnmapTransferMemory
+0x53 CreateInterruptEvent
+0x54 QueryPhysicalAddress
+0x55 QueryMemoryMapping
+0x56 CreateDeviceAddressSpace
+0x57 AttachDeviceAddressSpace
+0x58 DetachDeviceAddressSpace
+0x59 MapDeviceAddressSpaceByForce
+0x5A MapDeviceAddressSpaceAligned
+0x5B MapDeviceAddressSpace
+0x5C UnmapDeviceAddressSpace
+0x5D InvalidateProcessDataCache
+0x5E StoreProcessDataCache
+0x5F FlushProcessDataCache
+0x60 DebugActiveProcess
+0x61 BreakDebugProcess
+0x62 TerminateDebugProcess
+0x63 GetDebugEvent
+0x64 ContinueDebugEvent
+0x65 GetProcessList
+0x66 GetThreadList
+0x67 GetDebugThreadContext
+0x68 SetDebugThreadContext
+0x69 QueryDebugProcessMemory
+0x6A ReadDebugProcessMemory
+0x6B WriteDebugProcessMemory
+0x6C SetHardwareBreakPoint
+0x6D GetDebugThreadParam
+0x6F GetSystemInfo
+0x70 CreatePort
+0x71 ManageNamedPort
+0x72 ConnectToPort
+0x73 SetProcessMemoryPermission
+0x74 MapProcessMemory
+0x75 UnmapProcessMemory
+0x76 QueryProcessMemory
+0x77 MapProcessCodeMemory
+0x78 UnmapProcessCodeMemory
+0x79 CreateProcess
+0x7A StartProcess
+0x7B TerminateProcess
+0x7C GetProcessInfo
+0x7D CreateResourceLimit
+0x7E SetResourceLimitLimitValue
+0x7F CallSecureMonitor
+0x90 MapInsecurePhysicalMemory
+0x91 UnmapInsecurePhysicalMemory
+# [Switch 2 only] 0x80 SetGpuMemoryAttribute
+# [Switch 2 only] 0x81 LockGpuSharableMemory
+# [Switch 2 only] 0x82 UnlockGpuSharableMemory
+
+[ioctl /dev/nvmap]
+# https://switchbrew.org/wiki/NV_services
+0xC0080101 NVMAP_IOC_CREATE
+0x00000102 NVMAP_IOC_CLAIM
+0xC0080103 NVMAP_IOC_FROM_ID
+0xC0200104 NVMAP_IOC_ALLOC
+0xC0180105 NVMAP_IOC_FREE
+0xC0280106 NVMAP_IOC_MMAP
+0xC0280107 NVMAP_IOC_WRITE
+0xC0280108 NVMAP_IOC_READ
+0xC00C0109 NVMAP_IOC_PARAM
+0xC010010A NVMAP_IOC_PIN_MULT
+0xC010010B NVMAP_IOC_UNPIN_MULT
+0xC008010C NVMAP_IOC_CACHE
+0xC004010D NVMAP_IOC_GET_IVC_ID
+0xC008010E NVMAP_IOC_GET_ID
+0xC004010F NVMAP_IOC_FROM_IVC_ID
+0x40040110 NVMAP_IOC_SET_ALLOCATION_TAG_LABEL
+0x00000111 NVMAP_IOC_RESERVE
+0x40100112 NVMAP_IOC_EXPORT_FOR_ARUID
+0x40100113 NVMAP_IOC_IS_OWNED_BY_ARUID
+0x40100114 NVMAP_IOC_REMOVE_EXPORT_FOR_ARUID
+
+[ioctl /dev/nvhost-as-gpu]
+# https://switchbrew.org/wiki/NV_services
+0x40044101 NVGPU_AS_IOCTL_BIND_CHANNEL
+0xC0184102 NVGPU_AS_IOCTL_ALLOC_SPACE
+0xC0104103 NVGPU_AS_IOCTL_FREE_SPACE
+0xC0184104 NVGPU_AS_IOCTL_MAP_BUFFER
+0xC0084105 NVGPU_AS_IOCTL_UNMAP_BUFFER
+0xC0284106 NVGPU_AS_IOCTL_MAP_BUFFER_EX
+0x40104107 NVGPU_AS_IOCTL_ALLOC_AS
+0xC0404108 NVGPU_AS_IOCTL_GET_VA_REGIONS
+0x40284109 NVGPU_AS_IOCTL_ALLOC_AS_EX
+0xC038410A NVGPU_AS_IOCTL_MAP_BUFFER_EX2
+0xC0??4114 NVGPU_AS_IOCTL_REMAP
+# [Switch 2 only] 0x8010410B NVGPU_AS_IOCTL_GET_SYNC_RO_MAP
+# [Switch 2 only] 0xC020410C NVGPU_AS_IOCTL_MAPPING_MODIFY
+# [Switch 2 only] 0xC???410D NVGPU_AS_IOCTL_REMAP
+
+[ioctl /dev/nvhost-ctrl]
+# https://switchbrew.org/wiki/NV_services
+0xC0080014 NVHOST_IOCTL_CTRL_SYNCPT_READ
+0x40040015 NVHOST_IOCTL_CTRL_SYNCPT_INCR
+0xC00C0016 NVHOST_IOCTL_CTRL_SYNCPT_WAIT
+0x40080017 NVHOST_IOCTL_CTRL_MODULE_MUTEX
+0xC0180018 NVHOST_IOCTL_CTRL_MODULE_REGRDWR
+0xC0100019 NVHOST_IOCTL_CTRL_SYNCPT_WAITEX
+0xC008001A NVHOST_IOCTL_CTRL_SYNCPT_READ_MAX
+0xC183001B NVHOST_IOCTL_CTRL_GET_CONFIG
+0xC004001C NVHOST_IOCTL_CTRL_SYNCPT_CLEAR_EVENT_WAIT
+0xC010001D NVHOST_IOCTL_CTRL_SYNCPT_WAIT_EVENT
+0xC010001E NVHOST_IOCTL_CTRL_SYNCPT_WAIT_EVENT_EX
+0xC004001F NVHOST_IOCTL_CTRL_SYNCPT_ALLOC_EVENT
+0xC0040020 NVHOST_IOCTL_CTRL_SYNCPT_FREE_EVENT
+0x40080021 NVHOST_IOCTL_CTRL_SYNCPT_FREE_EVENT_BATCH
+0xC0040022 NVHOST_IOCTL_CTRL_SYNCPT_GET_SHIFT
+# [Switch 2 only] 0xC0080027 NVHOST_IOCTL_CTRL_ALLOC_SYNCPT
+# [Switch 2 only] 0x40040028 NVHOST_IOCTL_CTRL_FREE_SYNCPT
+# [Switch 2 only] 0xC010002A NVHOST_IOCTL_CTRL_GET_CHARACTERISTICS
+# [Switch 2 only] 0xC008002B NVHOST_IOCTL_CTRL_CHECK_MODULE_SUPPORT
+
+[ioctl /dev/nvhost-ctrl-gpu]
+# https://switchbrew.org/wiki/NV_services
+0x80044701 NVGPU_GPU_IOCTL_ZCULL_GET_CTX_SIZE
+0x80284702 NVGPU_GPU_IOCTL_ZCULL_GET_INFO
+0x402C4703 NVGPU_GPU_IOCTL_ZBC_SET_TABLE
+0xC0344704 NVGPU_GPU_IOCTL_ZBC_QUERY_TABLE
+0xC0B04705 NVGPU_GPU_IOCTL_GET_CHARACTERISTICS
+0xC0184706 NVGPU_GPU_IOCTL_GET_TPC_MASKS
+0x40084707 NVGPU_GPU_IOCTL_FLUSH_L2
+0x4008470D NVGPU_GPU_IOCTL_INVAL_ICACHE
+0x4008470E NVGPU_GPU_IOCTL_SET_MMU_DEBUG_MODE
+0x4010470F NVGPU_GPU_IOCTL_SET_SM_DEBUG_MODE
+0xC0304710 NVGPU_GPU_IOCTL_WAIT_FOR_PAUSE
+0xC0084710 NVGPU_GPU_IOCTL_WAIT_FOR_PAUSE
+0x80084711 NVGPU_GPU_IOCTL_GET_TPC_EXCEPTION_EN_STATUS
+0x80084712 NVGPU_GPU_IOCTL_NUM_VSMS
+0xC0044713 NVGPU_GPU_IOCTL_VSMS_MAPPING
+0x80084714 NVGPU_GPU_IOCTL_ZBC_GET_ACTIVE_SLOT_MASK
+0x80044715 NVGPU_GPU_IOCTL_PMU_GET_GPU_LOAD
+0x40084716 NVGPU_GPU_IOCTL_SET_CG_CONTROLS
+0xC0084717 NVGPU_GPU_IOCTL_GET_CG_CONTROLS
+0x40084718 NVGPU_GPU_IOCTL_SET_PG_CONTROLS
+0xC0084719 NVGPU_GPU_IOCTL_GET_PG_CONTROLS
+0x8018471A NVGPU_GPU_IOCTL_PMU_GET_ELPG_RESIDENCY_GATING
+0xC008471B NVGPU_GPU_IOCTL_GET_ERROR_CHANNEL_USER_DATA
+0xC010471C NVGPU_GPU_IOCTL_GET_GPU_TIME
+0xC108471D NVGPU_GPU_IOCTL_GET_CPU_TIME_CORRELATION_INFO
+# [Switch 2 only] 0xC0E04705 NVGPU_GPU_IOCTL_GET_CHARACTERISTICS
+# [Switch 2 only] 0xC0084713 NVGPU_GPU_IOCTL_VSMS_MAPPING
+# [Switch 2 only] 0xC010471E NVGPU_GPU_IOCTL_SET_DETERMINISTIC_OPTS
+# [Switch 2 only] 0xC010471F NVGPU_GPU_IOCTL_GET_ENGINE_INFO
+
+[ioctl /dev/nvhost-gpu]
+# https://switchbrew.org/wiki/NV_services  (section "Channels" > "Ioctls")
+0xC0??0001 NVHOST_IOCTL_CHANNEL_SUBMIT
+0xC0080002 NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT
+0xC0080003 NVHOST_IOCTL_CHANNEL_GET_WAITBASE
+0xC0080004 NVHOST_IOCTL_CHANNEL_GET_MODMUTEX
+0x40040007 NVHOST_IOCTL_CHANNEL_SET_SUBMIT_TIMEOUT
+0x40080008 NVHOST_IOCTL_CHANNEL_SET_CLK_RATE
+0xC0??0009 NVHOST_IOCTL_CHANNEL_MAP_CMD_BUFFER
+0xC0??000A NVHOST_IOCTL_CHANNEL_UNMAP_CMD_BUFFER
+0x00000013 NVHOST_IOCTL_CHANNEL_SET_TIMEOUT_EX
+0xC0080023 NVHOST_IOCTL_CHANNEL_GET_CLK_RATE
+0xC0080014 NVHOST_IOCTL_CHANNEL_GET_CLK_RATE
+0xC0??0024 NVHOST_IOCTL_CHANNEL_SUBMIT_EX
+0xC0??0025 NVHOST_IOCTL_CHANNEL_MAP_CMD_BUFFER_EX
+0xC0??0026 NVHOST_IOCTL_CHANNEL_UNMAP_CMD_BUFFER_EX
+0x40044801 NVGPU_IOCTL_CHANNEL_SET_NVMAP_FD
+0x40044803 NVGPU_IOCTL_CHANNEL_SET_TIMEOUT
+0x40084805 NVGPU_IOCTL_CHANNEL_ALLOC_GPFIFO
+0x40184806 NVGPU_IOCTL_CHANNEL_WAIT
+0xC0044807 NVGPU_IOCTL_CHANNEL_CYCLE_STATS
+0xC0??4808 NVGPU_IOCTL_CHANNEL_SUBMIT_GPFIFO
+0xC0104809 NVGPU_IOCTL_CHANNEL_ALLOC_OBJ_CTX
+0x4008480A NVHOST_IOCTL_CHANNEL_FREE_OBJ_CTX
+0xC010480B NVGPU_IOCTL_CHANNEL_ZCULL_BIND
+0xC018480C NVGPU_IOCTL_CHANNEL_SET_ERROR_NOTIFIER
+0x4004480D NVGPU_IOCTL_CHANNEL_SET_PRIORITY
+0x0000480E NVGPU_IOCTL_CHANNEL_ENABLE
+0x0000480F NVGPU_IOCTL_CHANNEL_DISABLE
+0x00004810 NVGPU_IOCTL_CHANNEL_PREEMPT
+0x00004811 NVGPU_IOCTL_CHANNEL_FORCE_RESET
+0x40084812 NVGPU_IOCTL_CHANNEL_EVENT_ID_CONTROL
+0xC0104813 NVGPU_IOCTL_CHANNEL_CYCLE_STATS_SNAPSHOT
+0x40084714 NVGPU_IOCTL_CHANNEL_SET_USER_DATA
+0x80084715 NVGPU_IOCTL_CHANNEL_GET_USER_DATA
+0x80804816 NVGPU_IOCTL_CHANNEL_GET_ERROR_INFO
+0xC0104817 NVGPU_IOCTL_CHANNEL_GET_ERROR_NOTIFICATION
+0x40204818 NVGPU_IOCTL_CHANNEL_ALLOC_GPFIFO_EX
+0xC0??4819 NVGPU_IOCTL_CHANNEL_SUBMIT_GPFIFO_RETRY
+0xC020481A NVGPU_IOCTL_CHANNEL_ALLOC_GPFIFO_EX2
+0xC018481B NVGPU_IOCTL_CHANNEL_SUBMIT_GPFIFO2
+0xC018481C NVGPU_IOCTL_CHANNEL_SUBMIT_GPFIFO2_RETRY
+0xC004481D NVGPU_IOCTL_CHANNEL_SET_TIMESLICE
+# [Switch 2 only] 0x40104812 NVGPU_IOCTL_CHANNEL_EVENT_ID_CONTROL
+# [Switch 2 only] 0xC010481E NVGPU_IOCTL_CHANNEL_GET_USER_SYNCPOINT
+# [Switch 2 only] 0xC008481F NVGPU_IOCTL_CHANNEL_SET_PREEMPTION_MODE
+# [Switch 2 only] 0x40044820 NVGPU_IOCTL_CHANNEL_OPEN
+# [Switch 2 only] 0xC0504821 NVGPU_IOCTL_CHANNEL_SETUP_BIND
+
+[ioctl /dev/nvhost-nvdec]
+# https://switchbrew.org/wiki/NV_services  (section "Channels" > "Ioctls": the host1x channel ioctls)
+0xC0??0001 NVHOST_IOCTL_CHANNEL_SUBMIT
+0xC0080002 NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT
+0xC0080003 NVHOST_IOCTL_CHANNEL_GET_WAITBASE
+0xC0080004 NVHOST_IOCTL_CHANNEL_GET_MODMUTEX
+0x40040007 NVHOST_IOCTL_CHANNEL_SET_SUBMIT_TIMEOUT
+0x40080008 NVHOST_IOCTL_CHANNEL_SET_CLK_RATE
+0xC0??0009 NVHOST_IOCTL_CHANNEL_MAP_CMD_BUFFER
+0xC0??000A NVHOST_IOCTL_CHANNEL_UNMAP_CMD_BUFFER
+0x00000013 NVHOST_IOCTL_CHANNEL_SET_TIMEOUT_EX
+0xC0080023 NVHOST_IOCTL_CHANNEL_GET_CLK_RATE
+0xC0??0024 NVHOST_IOCTL_CHANNEL_SUBMIT_EX
+0xC0??0025 NVHOST_IOCTL_CHANNEL_MAP_CMD_BUFFER_EX
+0xC0??0026 NVHOST_IOCTL_CHANNEL_UNMAP_CMD_BUFFER_EX
+
+[ioctl /dev/nvhost-vic]
+# https://switchbrew.org/wiki/NV_services  (section "Channels" > "Ioctls": the host1x channel ioctls)
+0xC0??0001 NVHOST_IOCTL_CHANNEL_SUBMIT
+0xC0080002 NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT
+0xC0080003 NVHOST_IOCTL_CHANNEL_GET_WAITBASE
+0xC0080004 NVHOST_IOCTL_CHANNEL_GET_MODMUTEX
+0x40040007 NVHOST_IOCTL_CHANNEL_SET_SUBMIT_TIMEOUT
+0x40080008 NVHOST_IOCTL_CHANNEL_SET_CLK_RATE
+0xC0??0009 NVHOST_IOCTL_CHANNEL_MAP_CMD_BUFFER
+0xC0??000A NVHOST_IOCTL_CHANNEL_UNMAP_CMD_BUFFER
+0x00000013 NVHOST_IOCTL_CHANNEL_SET_TIMEOUT_EX
+0xC0080023 NVHOST_IOCTL_CHANNEL_GET_CLK_RATE
+0xC0??0024 NVHOST_IOCTL_CHANNEL_SUBMIT_EX
+0xC0??0025 NVHOST_IOCTL_CHANNEL_MAP_CMD_BUFFER_EX
+0xC0??0026 NVHOST_IOCTL_CHANNEL_UNMAP_CMD_BUFFER_EX

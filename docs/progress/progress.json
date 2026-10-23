@@ -1,0 +1,6183 @@
+{
+ "generated": "2026-10-22",
+ "sections": [
+  {
+   "id": "services",
+   "title": "Serviços do Horizon",
+   "unit": "comandos IPC",
+   "implemented": 360,
+   "total": 1230,
+   "groups": [
+    {
+     "name": "acc/IManagerForApplication",
+     "family": "acc",
+     "official": "nn::account::baas::IManagerForApplication",
+     "url": "https://switchbrew.org/wiki/Account_services",
+     "referenced": true,
+     "implemented": [],
+     "constant": [],
+     "missing": [
+      {
+       "id": 0,
+       "name": "CheckAvailability"
+      },
+      {
+       "id": 1,
+       "name": "GetAccountId"
+      },
+      {
+       "id": 2,
+       "name": "EnsureIdTokenCacheAsync"
+      },
+      {
+       "id": 3,
+       "name": "LoadIdTokenCacheDeprecated"
+      },
+      {
+       "id": 4,
+       "name": "LoadIdTokenCache"
+      },
+      {
+       "id": 130,
+       "name": "GetNintendoAccountUserResourceCacheForApplication"
+      },
+      {
+       "id": 150,
+       "name": "CreateAuthorizationRequest"
+      },
+      {
+       "id": 160,
+       "name": "StoreOpenContext"
+      },
+      {
+       "id": 170,
+       "name": "LoadNetworkServiceLicenseKindAsync"
+      }
+     ],
+     "undocumented": [],
+     "total": 9
+    },
+    {
+     "name": "acc/IProfile",
+     "family": "acc",
+     "official": "nn::account::profile::IProfile",
+     "url": "https://switchbrew.org/wiki/Account_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      1,
+      10,
+      11
+     ],
+     "constant": [
+      10,
+      11
+     ],
+     "missing": [
+      {
+       "id": 20,
+       "name": "GetLargeImageSize"
+      },
+      {
+       "id": 21,
+       "name": "LoadLargeImage"
+      },
+      {
+       "id": 30,
+       "name": "GetImageId"
+      },
+      {
+       "id": 40,
+       "name": "GetStableUserId"
+      }
+     ],
+     "undocumented": [],
+     "total": 8
+    },
+    {
+     "name": "acc:u0",
+     "family": "acc",
+     "official": "nn::account::IAccountServiceForApplication",
+     "url": "https://switchbrew.org/wiki/Account_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      50,
+      51,
+      100,
+      101,
+      140,
+      141,
+      150,
+      160
+     ],
+     "constant": [
+      0,
+      50,
+      100,
+      140,
+      150,
+      160
+     ],
+     "missing": [
+      {
+       "id": 6,
+       "name": "GetProfileDigest"
+      },
+      {
+       "id": 52,
+       "name": "TrySelectUserWithoutInteraction"
+      },
+      {
+       "id": 60,
+       "name": "ListOpenContextStoredUsers"
+      },
+      {
+       "id": 99,
+       "name": "DebugActivateOpenContextRetention"
+      },
+      {
+       "id": 102,
+       "name": "AuthenticateApplicationAsync"
+      },
+      {
+       "id": 103,
+       "name": "CheckNetworkServiceAvailabilityAsync"
+      },
+      {
+       "id": 110,
+       "name": "StoreSaveDataThumbnail"
+      },
+      {
+       "id": 111,
+       "name": "ClearSaveDataThumbnail"
+      },
+      {
+       "id": 120,
+       "name": "CreateGuestLoginRequest"
+      },
+      {
+       "id": 130,
+       "name": "LoadOpenContext"
+      },
+      {
+       "id": 131,
+       "name": "ListOpenContextStoredUsers"
+      }
+     ],
+     "undocumented": [],
+     "total": 25
+    },
+    {
+     "name": "am/IApplicationFunctions",
+     "family": "am",
+     "official": "nn::am::service::IApplicationFunctions",
+     "url": "https://switchbrew.org/wiki/Applet_Manager_services",
+     "referenced": true,
+     "implemented": [
+      1,
+      20,
+      21,
+      22,
+      23,
+      40,
+      50,
+      66,
+      67,
+      90,
+      100,
+      130,
+      140,
+      150,
+      170,
+      210
+     ],
+     "constant": [
+      20,
+      40,
+      66,
+      67,
+      90,
+      100,
+      170
+     ],
+     "missing": [
+      {
+       "id": 10,
+       "name": "CreateApplicationAndPushAndRequestToStart"
+      },
+      {
+       "id": 11,
+       "name": "CreateApplicationAndPushAndRequestToStartForQuest"
+      },
+      {
+       "id": 12,
+       "name": "CreateApplicationAndRequestToStart"
+      },
+      {
+       "id": 13,
+       "name": "CreateApplicationAndRequestToStartForQuest"
+      },
+      {
+       "id": 14,
+       "name": "CreateApplicationWithAttributeAndPushAndRequestToStartForQuest"
+      },
+      {
+       "id": 15,
+       "name": "CreateApplicationWithAttributeAndRequestToStartForQuest"
+      },
+      {
+       "id": 24,
+       "name": "GetLaunchStorageInfoForDebug"
+      },
+      {
+       "id": 25,
+       "name": "ExtendSaveData"
+      },
+      {
+       "id": 26,
+       "name": "GetSaveDataSize"
+      },
+      {
+       "id": 27,
+       "name": "CreateCacheStorage"
+      },
+      {
+       "id": 28,
+       "name": "GetSaveDataSizeMax"
+      },
+      {
+       "id": 29,
+       "name": "GetCacheStorageMax"
+      },
+      {
+       "id": 30,
+       "name": "BeginBlockingHomeButtonShortAndLongPressed"
+      },
+      {
+       "id": 31,
+       "name": "EndBlockingHomeButtonShortAndLongPressed"
+      },
+      {
+       "id": 32,
+       "name": "BeginBlockingHomeButton"
+      },
+      {
+       "id": 33,
+       "name": "EndBlockingHomeButton"
+      },
+      {
+       "id": 34,
+       "name": "SelectApplicationLicense"
+      },
+      {
+       "id": 35,
+       "name": "GetDeviceSaveDataSizeMax"
+      },
+      {
+       "id": 36,
+       "name": "GetLimitedApplicationLicense"
+      },
+      {
+       "id": 37,
+       "name": "GetLimitedApplicationLicenseUpgradableEvent"
+      },
+      {
+       "id": 60,
+       "name": "SetMediaPlaybackStateForApplication"
+      },
+      {
+       "id": 65,
+       "name": "IsGamePlayRecordingSupported"
+      },
+      {
+       "id": 68,
+       "name": "RequestFlushGamePlayingMovieForDebug"
+      },
+      {
+       "id": 70,
+       "name": "RequestToShutdown"
+      },
+      {
+       "id": 71,
+       "name": "RequestToReboot"
+      },
+      {
+       "id": 72,
+       "name": "RequestToSleep"
+      },
+      {
+       "id": 80,
+       "name": "ExitAndRequestToShowThanksMessage"
+      },
+      {
+       "id": 101,
+       "name": "SetApplicationCopyrightImage"
+      },
+      {
+       "id": 102,
+       "name": "SetApplicationCopyrightVisibility"
+      },
+      {
+       "id": 110,
+       "name": "QueryApplicationPlayStatistics"
+      },
+      {
+       "id": 111,
+       "name": "QueryApplicationPlayStatisticsByUid"
+      },
+      {
+       "id": 112,
+       "name": "Unknown"
+      },
+      {
+       "id": 113,
+       "name": "Unknown"
+      },
+      {
+       "id": 120,
+       "name": "ExecuteProgram"
+      },
+      {
+       "id": 121,
+       "name": "ClearUserChannel"
+      },
+      {
+       "id": 122,
+       "name": "UnpopToUserChannel"
+      },
+      {
+       "id": 123,
+       "name": "GetPreviousProgramIndex"
+      },
+      {
+       "id": 124,
+       "name": "EnableApplicationAllThreadDumpOnCrash"
+      },
+      {
+       "id": 131,
+       "name": "SetDelayTimeToAbortOnGpuError"
+      },
+      {
+       "id": 141,
+       "name": "TryPopFromFriendInvitationStorageChannel"
+      },
+      {
+       "id": 151,
+       "name": "TryPopFromNotificationStorageChannel"
+      },
+      {
+       "id": 160,
+       "name": "GetHealthWarningDisappearedSystemEvent"
+      },
+      {
+       "id": 180,
+       "name": "GetLaunchRequiredVersion"
+      },
+      {
+       "id": 181,
+       "name": "UpgradeLaunchRequiredVersion"
+      },
+      {
+       "id": 190,
+       "name": "SendServerMaintenanceOverlayNotification"
+      },
+      {
+       "id": 200,
+       "name": "GetLastApplicationExitReason"
+      },
+      {
+       "id": 220,
+       "name": "SetAudioOutputPolicy"
+      },
+      {
+       "id": 300,
+       "name": "CreateMovieWriter"
+      },
+      {
+       "id": 310,
+       "name": "RequestExitApplicationAndTryPopMessage"
+      },
+      {
+       "id": 320,
+       "name": "Unknown"
+      },
+      {
+       "id": 330,
+       "name": "IsLanguageSelectionLimited"
+      },
+      {
+       "id": 500,
+       "name": "StartContinuousRecordingFlushForDebug"
+      },
+      {
+       "id": 1000,
+       "name": "CreateMovieMaker"
+      },
+      {
+       "id": 1001,
+       "name": "PrepareForJit"
+      }
+     ],
+     "undocumented": [],
+     "total": 70
+    },
+    {
+     "name": "am/IApplicationProxy",
+     "family": "am",
+     "official": "nn::am::service::IApplicationProxy",
+     "url": "https://switchbrew.org/wiki/Applet_Manager_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      10,
+      11,
+      20,
+      1000
+     ],
+     "constant": [],
+     "missing": [],
+     "undocumented": [],
+     "total": 9
+    },
+    {
+     "name": "am/IAudioController",
+     "family": "am",
+     "official": "nn::am::service::IAudioController",
+     "url": "https://switchbrew.org/wiki/Applet_Manager_services",
+     "referenced": true,
+     "implemented": [],
+     "constant": [],
+     "missing": [
+      {
+       "id": 0,
+       "name": "SetExpectedMasterVolume"
+      },
+      {
+       "id": 1,
+       "name": "GetMainAppletExpectedMasterVolume"
+      },
+      {
+       "id": 2,
+       "name": "GetLibraryAppletExpectedMasterVolume"
+      },
+      {
+       "id": 3,
+       "name": "ChangeMainAppletMasterVolume"
+      },
+      {
+       "id": 4,
+       "name": "SetTransparentVolumeRate"
+      },
+      {
+       "id": 5,
+       "name": "Unknown"
+      }
+     ],
+     "undocumented": [],
+     "total": 6
+    },
+    {
+     "name": "am/ICommonStateGetter",
+     "family": "am",
+     "official": "nn::am::service::ICommonStateGetter",
+     "url": "https://switchbrew.org/wiki/Applet_Manager_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      1,
+      5,
+      6,
+      8,
+      9,
+      60,
+      61,
+      66,
+      300
+     ],
+     "constant": [
+      8,
+      9,
+      60,
+      66,
+      300
+     ],
+     "missing": [
+      {
+       "id": 2,
+       "name": "GetThisAppletKind"
+      },
+      {
+       "id": 3,
+       "name": "AllowToEnterSleep"
+      },
+      {
+       "id": 4,
+       "name": "DisallowToEnterSleep"
+      },
+      {
+       "id": 7,
+       "name": "GetCradleStatus"
+      },
+      {
+       "id": 10,
+       "name": "RequestToAcquireSleepLock"
+      },
+      {
+       "id": 11,
+       "name": "ReleaseSleepLock"
+      },
+      {
+       "id": 12,
+       "name": "ReleaseSleepLockTransiently"
+      },
+      {
+       "id": 13,
+       "name": "GetAcquiredSleepLockEvent"
+      },
+      {
+       "id": 14,
+       "name": "GetWakeupCount"
+      },
+      {
+       "id": 15,
+       "name": "Unknown"
+      },
+      {
+       "id": 20,
+       "name": "PushToGeneralChannel"
+      },
+      {
+       "id": 30,
+       "name": "GetHomeButtonReaderLockAccessor"
+      },
+      {
+       "id": 31,
+       "name": "GetReaderLockAccessorEx"
+      },
+      {
+       "id": 32,
+       "name": "GetWriterLockAccessorEx"
+      },
+      {
+       "id": 40,
+       "name": "GetCradleFwVersion"
+      },
+      {
+       "id": 50,
+       "name": "IsVrModeEnabled"
+      },
+      {
+       "id": 51,
+       "name": "SetVrModeEnabled"
+      },
+      {
+       "id": 52,
+       "name": "SetLcdBacklighOffEnabled"
+      },
+      {
+       "id": 53,
+       "name": "BeginVrModeEx"
+      },
+      {
+       "id": 54,
+       "name": "EndVrModeEx"
+      },
+      {
+       "id": 55,
+       "name": "IsInControllerFirmwareUpdateSection"
+      },
+      {
+       "id": 59,
+       "name": "SetVrPositionForDebug"
+      },
+      {
+       "id": 62,
+       "name": "GetHdcpAuthenticationState"
+      },
+      {
+       "id": 63,
+       "name": "GetHdcpAuthenticationStateChangeEvent"
+      },
+      {
+       "id": 64,
+       "name": "SetTvPowerStateMatchingMode"
+      },
+      {
+       "id": 65,
+       "name": "GetApplicationIdByContentActionName"
+      },
+      {
+       "id": 67,
+       "name": "CancelCpuBoostMode"
+      },
+      {
+       "id": 68,
+       "name": "GetBuiltInDisplayType"
+      },
+      {
+       "id": 80,
+       "name": "PerformSystemButtonPressingIfInFocus"
+      },
+      {
+       "id": 90,
+       "name": "SetPerformanceConfigurationChangedNotification"
+      },
+      {
+       "id": 91,
+       "name": "GetCurrentPerformanceConfiguration"
+      },
+      {
+       "id": 100,
+       "name": "SetHandlingHomeButtonShortPressedEnabled"
+      },
+      {
+       "id": 110,
+       "name": "OpenMyGpuErrorHandler"
+      },
+      {
+       "id": 120,
+       "name": "GetAppletLaunchedHistory"
+      },
+      {
+       "id": 130,
+       "name": "EnableStartupLogoDisappearedMessage"
+      },
+      {
+       "id": 200,
+       "name": "GetOperationModeSystemInfo"
+      },
+      {
+       "id": 310,
+       "name": "Unknown"
+      },
+      {
+       "id": 320,
+       "name": "Unknown"
+      },
+      {
+       "id": 400,
+       "name": "ActivateMigrationService"
+      },
+      {
+       "id": 401,
+       "name": "DeactivateMigrationService"
+      },
+      {
+       "id": 500,
+       "name": "DisableSleepTillShutdown"
+      },
+      {
+       "id": 501,
+       "name": "SuppressDisablingSleepTemporarily"
+      },
+      {
+       "id": 502,
+       "name": "IsSleepEnabled"
+      },
+      {
+       "id": 503,
+       "name": "IsDisablingSleepSuppressed"
+      },
+      {
+       "id": 600,
+       "name": "SetHidInputMagnificationForApplication"
+      },
+      {
+       "id": 610,
+       "name": "Unknown"
+      },
+      {
+       "id": 611,
+       "name": "Unknown"
+      },
+      {
+       "id": 900,
+       "name": "SetRequestExitToLibraryAppletAtExecuteNextProgramEnabled"
+      },
+      {
+       "id": 910,
+       "name": "GetLaunchRequiredTick"
+      },
+      {
+       "id": 1000,
+       "name": "BeginVrMode3d"
+      },
+      {
+       "id": 1001,
+       "name": "EndVrMode3d"
+      },
+      {
+       "id": 1002,
+       "name": "IsVrModeEnabled3d"
+      },
+      {
+       "id": 1003,
+       "name": "GetVrLaboGoggleViewport"
+      },
+      {
+       "id": 1004,
+       "name": "GetPanelPhysicalSizeForSpecificTitle"
+      },
+      {
+       "id": 1005,
+       "name": "GetPanelResolutionForSpecificTitle"
+      }
+     ],
+     "undocumented": [],
+     "total": 65
+    },
+    {
+     "name": "am/IDebugFunctions",
+     "family": "am",
+     "official": "nn::am::service::IDebugFunctions",
+     "url": "https://switchbrew.org/wiki/Applet_Manager_services",
+     "referenced": true,
+     "implemented": [],
+     "constant": [],
+     "missing": [
+      {
+       "id": 0,
+       "name": "NotifyMessageToHomeMenuForDebug"
+      },
+      {
+       "id": 1,
+       "name": "OpenMainApplication"
+      },
+      {
+       "id": 10,
+       "name": "PerformSystemButtonPressing"
+      },
+      {
+       "id": 20,
+       "name": "InvalidateTransitionLayer"
+      },
+      {
+       "id": 30,
+       "name": "RequestLaunchApplicationWithUserAndArgumentForDebug"
+      },
+      {
+       "id": 31,
+       "name": "RequestLaunchApplicationByApplicationLaunchInfoForDebug"
+      },
+      {
+       "id": 40,
+       "name": "GetAppletResourceUsageInfo"
+      },
+      {
+       "id": 50,
+       "name": "AddSystemProgramIdAndAppletIdForDebug"
+      },
+      {
+       "id": 51,
+       "name": "AddOperationConfirmedLibraryAppletIdForDebug"
+      },
+      {
+       "id": 52,
+       "name": "GetProgramIdFromAppletIdForDebug"
+      },
+      {
+       "id": 53,
+       "name": "GetProgramIdFromAppletIdAndLibraryAppletModeForDebug"
+      },
+      {
+       "id": 100,
+       "name": "SetCpuBoostModeForApplet"
+      },
+      {
+       "id": 101,
+       "name": "CancelCpuBoostModeForApplet"
+      },
+      {
+       "id": 110,
+       "name": "PushToAppletBoundChannelForDebug"
+      },
+      {
+       "id": 111,
+       "name": "TryPopFromAppletBoundChannelForDebug"
+      },
+      {
+       "id": 120,
+       "name": "AlarmSettingNotificationEnableAppEventReserve"
+      },
+      {
+       "id": 121,
+       "name": "AlarmSettingNotificationDisableAppEventReserve"
+      },
+      {
+       "id": 122,
+       "name": "AlarmSettingNotificationPushAppEventNotify"
+      },
+      {
+       "id": 130,
+       "name": "FriendInvitationSetApplicationParameter"
+      },
+      {
+       "id": 131,
+       "name": "FriendInvitationClearApplicationParameter"
+      },
+      {
+       "id": 132,
+       "name": "FriendInvitationPushApplicationParameter"
+      },
+      {
+       "id": 140,
+       "name": "RestrictPowerOperationForSecureLaunchModeForDebug"
+      },
+      {
+       "id": 150,
+       "name": "Unknown"
+      },
+      {
+       "id": 200,
+       "name": "CreateFloatingLibraryAppletAccepterForDebug"
+      },
+      {
+       "id": 210,
+       "name": "Unknown"
+      },
+      {
+       "id": 300,
+       "name": "TerminateAllRunningApplicationsForDebug"
+      },
+      {
+       "id": 410,
+       "name": "CreateGeneralStorageForDebug"
+      },
+      {
+       "id": 411,
+       "name": "ReadGeneralStorageForDebug"
+      },
+      {
+       "id": 412,
+       "name": "WriteGeneralStorageForDebug"
+      },
+      {
+       "id": 430,
+       "name": "Unknown"
+      },
+      {
+       "id": 431,
+       "name": "Unknown"
+      },
+      {
+       "id": 900,
+       "name": "GetGrcProcessLaunchedSystemEvent"
+      },
+      {
+       "id": 910,
+       "name": "Unknown"
+      },
+      {
+       "id": 1000,
+       "name": "Unknown"
+      },
+      {
+       "id": 1001,
+       "name": "Unknown"
+      }
+     ],
+     "undocumented": [],
+     "total": 35
+    },
+    {
+     "name": "am/IDisplayController",
+     "family": "am",
+     "official": "nn::am::service::IDisplayController",
+     "url": "https://switchbrew.org/wiki/Applet_Manager_services",
+     "referenced": true,
+     "implemented": [],
+     "constant": [],
+     "missing": [
+      {
+       "id": 0,
+       "name": "GetLastForegroundCaptureImage"
+      },
+      {
+       "id": 1,
+       "name": "UpdateLastForegroundCaptureImage"
+      },
+      {
+       "id": 2,
+       "name": "GetLastApplicationCaptureImage"
+      },
+      {
+       "id": 3,
+       "name": "GetCallerAppletCaptureImage"
+      },
+      {
+       "id": 4,
+       "name": "UpdateCallerAppletCaptureImage"
+      },
+      {
+       "id": 5,
+       "name": "GetLastForegroundCaptureImageEx"
+      },
+      {
+       "id": 6,
+       "name": "GetLastApplicationCaptureImageEx"
+      },
+      {
+       "id": 7,
+       "name": "GetCallerAppletCaptureImageEx"
+      },
+      {
+       "id": 8,
+       "name": "TakeScreenShotOfOwnLayer"
+      },
+      {
+       "id": 9,
+       "name": "CopyBetweenCaptureBuffers"
+      },
+      {
+       "id": 10,
+       "name": "AcquireLastApplicationCaptureBuffer"
+      },
+      {
+       "id": 11,
+       "name": "ReleaseLastApplicationCaptureBuffer"
+      },
+      {
+       "id": 12,
+       "name": "AcquireLastForegroundCaptureBuffer"
+      },
+      {
+       "id": 13,
+       "name": "ReleaseLastForegroundCaptureBuffer"
+      },
+      {
+       "id": 14,
+       "name": "AcquireCallerAppletCaptureBuffer"
+      },
+      {
+       "id": 15,
+       "name": "ReleaseCallerAppletCaptureBuffer"
+      },
+      {
+       "id": 16,
+       "name": "AcquireLastApplicationCaptureBufferEx"
+      },
+      {
+       "id": 17,
+       "name": "AcquireLastForegroundCaptureBufferEx"
+      },
+      {
+       "id": 18,
+       "name": "AcquireCallerAppletCaptureBufferEx"
+      },
+      {
+       "id": 20,
+       "name": "ClearCaptureBuffer"
+      },
+      {
+       "id": 21,
+       "name": "ClearAppletTransitionBuffer"
+      },
+      {
+       "id": 22,
+       "name": "AcquireLastApplicationCaptureSharedBuffer"
+      },
+      {
+       "id": 23,
+       "name": "ReleaseLastApplicationCaptureSharedBuffer"
+      },
+      {
+       "id": 24,
+       "name": "AcquireLastForegroundCaptureSharedBuffer"
+      },
+      {
+       "id": 25,
+       "name": "ReleaseLastForegroundCaptureSharedBuffer"
+      },
+      {
+       "id": 26,
+       "name": "AcquireCallerAppletCaptureSharedBuffer"
+      },
+      {
+       "id": 27,
+       "name": "ReleaseCallerAppletCaptureSharedBuffer"
+      },
+      {
+       "id": 28,
+       "name": "TakeScreenShotOfOwnLayerEx"
+      }
+     ],
+     "undocumented": [],
+     "total": 28
+    },
+    {
+     "name": "am/ILibraryAppletAccessor",
+     "family": "am",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [
+      0,
+      1,
+      10,
+      20,
+      25,
+      30,
+      50,
+      60,
+      100,
+      101,
+      105,
+      106,
+      110,
+      150
+     ],
+     "constant": [
+      20,
+      25,
+      30,
+      50,
+      60,
+      100,
+      110,
+      150
+     ],
+     "missing": [],
+     "undocumented": [],
+     "total": 14
+    },
+    {
+     "name": "am/ILibraryAppletCreator",
+     "family": "am",
+     "official": "nn::am::service::ILibraryAppletCreator",
+     "url": "https://switchbrew.org/wiki/Applet_Manager_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      10
+     ],
+     "constant": [],
+     "missing": [
+      {
+       "id": 1,
+       "name": "TerminateAllLibraryApplets"
+      },
+      {
+       "id": 2,
+       "name": "AreAnyLibraryAppletsLeft"
+      },
+      {
+       "id": 3,
+       "name": "CreateLibraryApplet"
+      },
+      {
+       "id": 11,
+       "name": "CreateTransferMemoryStorage"
+      },
+      {
+       "id": 12,
+       "name": "CreateHandleStorage"
+      }
+     ],
+     "undocumented": [],
+     "total": 7
+    },
+    {
+     "name": "am/ISelfController",
+     "family": "am",
+     "official": "nn::am::service::ISelfController",
+     "url": "https://switchbrew.org/wiki/Applet_Manager_services",
+     "referenced": true,
+     "implemented": [
+      1,
+      2,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      40,
+      44,
+      50,
+      62,
+      65,
+      68,
+      69,
+      72,
+      91,
+      100
+     ],
+     "constant": [
+      1,
+      2,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      40,
+      44,
+      50,
+      62,
+      65,
+      68,
+      69,
+      72,
+      100
+     ],
+     "missing": [
+      {
+       "id": 0,
+       "name": "Exit"
+      },
+      {
+       "id": 3,
+       "name": "EnterFatalSection"
+      },
+      {
+       "id": 4,
+       "name": "LeaveFatalSection"
+      },
+      {
+       "id": 20,
+       "name": "SetDesirableKeyboardLayout"
+      },
+      {
+       "id": 21,
+       "name": "GetScreenShotProgramId"
+      },
+      {
+       "id": 22,
+       "name": "GetScreenShotAcdIndex"
+      },
+      {
+       "id": 23,
+       "name": "GetScreenShotApparentPlatform"
+      },
+      {
+       "id": 24,
+       "name": "GetScreenShotApplicationProperty"
+      },
+      {
+       "id": 41,
+       "name": "IsSystemBufferSharingEnabled"
+      },
+      {
+       "id": 42,
+       "name": "GetSystemSharedLayerHandle"
+      },
+      {
+       "id": 43,
+       "name": "GetSystemSharedBufferHandle"
+      },
+      {
+       "id": 45,
+       "name": "SetManagedDisplayLayerSeparationMode"
+      },
+      {
+       "id": 46,
+       "name": "SetRecordingLayerCompositionEnabled"
+      },
+      {
+       "id": 51,
+       "name": "ApproveToDisplay"
+      },
+      {
+       "id": 60,
+       "name": "OverrideAutoSleepTimeAndDimmingTime"
+      },
+      {
+       "id": 61,
+       "name": "SetMediaPlaybackState"
+      },
+      {
+       "id": 63,
+       "name": "GetIdleTimeDetectionExtension"
+      },
+      {
+       "id": 64,
+       "name": "SetInputDetectionSourceSet"
+      },
+      {
+       "id": 66,
+       "name": "GetCurrentIlluminance"
+      },
+      {
+       "id": 67,
+       "name": "IsIlluminanceAvailable"
+      },
+      {
+       "id": 70,
+       "name": "ReportMultimediaError"
+      },
+      {
+       "id": 71,
+       "name": "GetCurrentIlluminanceEx"
+      },
+      {
+       "id": 73,
+       "name": "Unknown"
+      },
+      {
+       "id": 80,
+       "name": "SetWirelessPriorityMode"
+      },
+      {
+       "id": 90,
+       "name": "GetAccumulatedSuspendedTickValue"
+      },
+      {
+       "id": 110,
+       "name": "SetApplicationAlbumUserData"
+      },
+      {
+       "id": 120,
+       "name": "SaveCurrentScreenshot"
+      },
+      {
+       "id": 130,
+       "name": "SetRecordVolumeMuted"
+      },
+      {
+       "id": 200,
+       "name": "Unknown"
+      },
+      {
+       "id": 210,
+       "name": "Unknown"
+      },
+      {
+       "id": 211,
+       "name": "Unknown"
+      },
+      {
+       "id": 220,
+       "name": "Unknown"
+      },
+      {
+       "id": 221,
+       "name": "Unknown"
+      },
+      {
+       "id": 230,
+       "name": "Unknown"
+      },
+      {
+       "id": 240,
+       "name": "Unknown"
+      },
+      {
+       "id": 1000,
+       "name": "GetDebugStorageChannel"
+      }
+     ],
+     "undocumented": [],
+     "total": 59
+    },
+    {
+     "name": "am/IStorage",
+     "family": "am",
+     "official": "nn::am::service::IStorage",
+     "url": "https://switchbrew.org/wiki/Applet_Manager_services",
+     "referenced": true,
+     "implemented": [
+      0
+     ],
+     "constant": [],
+     "missing": [
+      {
+       "id": 1,
+       "name": "OpenTransferStorage"
+      }
+     ],
+     "undocumented": [],
+     "total": 2
+    },
+    {
+     "name": "am/IStorageAccessor",
+     "family": "am",
+     "official": "nn::am::service::IStorageAccessor",
+     "url": "https://switchbrew.org/wiki/Applet_Manager_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      10,
+      11
+     ],
+     "constant": [],
+     "missing": [],
+     "undocumented": [],
+     "total": 3
+    },
+    {
+     "name": "am/IWindowController",
+     "family": "am",
+     "official": "nn::am::service::IWindowController",
+     "url": "https://switchbrew.org/wiki/Applet_Manager_services",
+     "referenced": true,
+     "implemented": [
+      1,
+      10
+     ],
+     "constant": [
+      10
+     ],
+     "missing": [
+      {
+       "id": 0,
+       "name": "CreateWindow"
+      },
+      {
+       "id": 2,
+       "name": "GetAppletResourceUserIdOfCallerApplet"
+      },
+      {
+       "id": 11,
+       "name": "ReleaseForegroundRights"
+      },
+      {
+       "id": 12,
+       "name": "RejectToChangeIntoBackground"
+      },
+      {
+       "id": 20,
+       "name": "SetAppletWindowVisibility"
+      },
+      {
+       "id": 21,
+       "name": "SetAppletGpuTimeSlice"
+      }
+     ],
+     "undocumented": [],
+     "total": 8
+    },
+    {
+     "name": "appletOE",
+     "family": "am",
+     "official": "nn::am::service::IApplicationProxyService",
+     "url": "https://switchbrew.org/wiki/Applet_Manager_services",
+     "referenced": true,
+     "implemented": [
+      0
+     ],
+     "constant": [],
+     "missing": [],
+     "undocumented": [],
+     "total": 1
+    },
+    {
+     "name": "aoc:u",
+     "family": "aoc",
+     "official": "nn::aocsrv::detail::IAddOnContentManager",
+     "url": "https://switchbrew.org/wiki/NS_services",
+     "referenced": true,
+     "implemented": [],
+     "constant": [],
+     "missing": [
+      {
+       "id": 0,
+       "name": "CountAddOnContentByApplicationId"
+      },
+      {
+       "id": 1,
+       "name": "ListAddOnContentByApplicationId"
+      },
+      {
+       "id": 2,
+       "name": "CountAddOnContent"
+      },
+      {
+       "id": 3,
+       "name": "ListAddOnContent"
+      },
+      {
+       "id": 4,
+       "name": "GetAddOnContentBaseIdByApplicationId"
+      },
+      {
+       "id": 5,
+       "name": "GetAddOnContentBaseId"
+      },
+      {
+       "id": 6,
+       "name": "PrepareAddOnContentByApplicationId"
+      },
+      {
+       "id": 7,
+       "name": "PrepareAddOnContent"
+      },
+      {
+       "id": 8,
+       "name": "GetAddOnContentListChangedEvent"
+      },
+      {
+       "id": 9,
+       "name": "GetAddOnContentLostErrorCode"
+      },
+      {
+       "id": 10,
+       "name": "GetAddOnContentListChangedEventWithProcessId"
+      },
+      {
+       "id": 11,
+       "name": "NotifyMountAddOnContent"
+      },
+      {
+       "id": 12,
+       "name": "NotifyUnmountAddOnContent"
+      },
+      {
+       "id": 13,
+       "name": "IsAddOnContentMountedForDebug"
+      },
+      {
+       "id": 50,
+       "name": "CheckAddOnContentMountStatus"
+      },
+      {
+       "id": 100,
+       "name": "CreateEcPurchasedEventManager"
+      },
+      {
+       "id": 101,
+       "name": "CreatePermanentEcPurchasedEventManager"
+      },
+      {
+       "id": 110,
+       "name": "CreateContentsServiceManager"
+      },
+      {
+       "id": 200,
+       "name": "SetRequiredAddOnContentsOnContentsAvailabilityTransition"
+      },
+      {
+       "id": 300,
+       "name": "SetupHostAddOnContent"
+      },
+      {
+       "id": 301,
+       "name": "GetRegisteredAddOnContentPath"
+      },
+      {
+       "id": 302,
+       "name": "UpdateCachedList"
+      }
+     ],
+     "undocumented": [],
+     "total": 22
+    },
+    {
+     "name": "apm",
+     "family": "apm",
+     "official": "nn::apm::IManager",
+     "url": "https://switchbrew.org/wiki/PPC_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      1,
+      6
+     ],
+     "constant": [
+      6
+     ],
+     "missing": [],
+     "undocumented": [],
+     "total": 3
+    },
+    {
+     "name": "apm/ISession",
+     "family": "apm",
+     "official": "nn::apm::ISession",
+     "url": "https://switchbrew.org/wiki/PPC_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      1,
+      2
+     ],
+     "constant": [
+      0,
+      2
+     ],
+     "missing": [],
+     "undocumented": [],
+     "total": 3
+    },
+    {
+     "name": "audren:u",
+     "family": "audren",
+     "official": "nn::audio::detail::IAudioRendererManager",
+     "url": "https://switchbrew.org/wiki/Audio_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      1,
+      2,
+      4
+     ],
+     "constant": [
+      1
+     ],
+     "missing": [
+      {
+       "id": 3,
+       "name": "OpenAudioRendererForManualExecution"
+      }
+     ],
+     "undocumented": [],
+     "total": 5
+    },
+    {
+     "name": "audren:u/IAudioDevice",
+     "family": "audren",
+     "official": "nn::audio::detail::IAudioDevice",
+     "url": "https://switchbrew.org/wiki/Audio_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      10,
+      11,
+      12,
+      13
+     ],
+     "constant": [
+      1,
+      5,
+      7
+     ],
+     "missing": [
+      {
+       "id": 14,
+       "name": "ListAudioOutputDeviceName"
+      },
+      {
+       "id": 15,
+       "name": "AcquireAudioInputDeviceNotification"
+      },
+      {
+       "id": 16,
+       "name": "ReleaseAudioInputDeviceNotification"
+      },
+      {
+       "id": 17,
+       "name": "AcquireAudioOutputDeviceNotification"
+      },
+      {
+       "id": 18,
+       "name": "ReleaseAudioOutputDeviceNotification"
+      },
+      {
+       "id": 19,
+       "name": "SetAudioDeviceOutputVolumeAutoTuneEnabled"
+      },
+      {
+       "id": 20,
+       "name": "IsAudioDeviceOutputVolumeAutoTuneEnabled"
+      },
+      {
+       "id": 21,
+       "name": "IsActiveOutputDeviceEstimatedLowLatency"
+      }
+     ],
+     "undocumented": [],
+     "total": 21
+    },
+    {
+     "name": "audren:u/IAudioRenderer",
+     "family": "audren",
+     "official": "nn::audio::detail::IAudioRenderer",
+     "url": "https://switchbrew.org/wiki/Audio_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+     ],
+     "constant": [
+      8,
+      9
+     ],
+     "missing": [
+      {
+       "id": 11,
+       "name": "ExecuteAudioRendererRendering"
+      },
+      {
+       "id": 12,
+       "name": "SetVoiceDropParameter"
+      },
+      {
+       "id": 13,
+       "name": "GetVoiceDropParameter"
+      },
+      {
+       "id": 14,
+       "name": "SetAsyncMemoryPoolControlEnabled"
+      }
+     ],
+     "undocumented": [],
+     "total": 15
+    },
+    {
+     "name": "ectx:aw",
+     "family": "ectx",
+     "official": "nn::err::context::IWriterForApplication",
+     "url": "https://switchbrew.org/wiki/Glue_services",
+     "referenced": true,
+     "implemented": [],
+     "constant": [],
+     "missing": [
+      {
+       "id": 0,
+       "name": "CreateContextRegistrar"
+      },
+      {
+       "id": 1,
+       "name": "CommitContext"
+      }
+     ],
+     "undocumented": [],
+     "total": 2
+    },
+    {
+     "name": "fs/IDirectory",
+     "family": "fs",
+     "official": "nn::fssrv::sf::IDirectory",
+     "url": "https://switchbrew.org/wiki/Filesystem_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      1
+     ],
+     "constant": [],
+     "missing": [],
+     "undocumented": [],
+     "total": 2
+    },
+    {
+     "name": "fs/IFile",
+     "family": "fs",
+     "official": "nn::fssrv::sf::IFile",
+     "url": "https://switchbrew.org/wiki/Filesystem_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      1,
+      2,
+      3,
+      4
+     ],
+     "constant": [],
+     "missing": [
+      {
+       "id": 5,
+       "name": "OperateRange"
+      },
+      {
+       "id": 6,
+       "name": "OperateRangeWithBuffer"
+      }
+     ],
+     "undocumented": [],
+     "total": 7
+    },
+    {
+     "name": "fs/IFileSystem",
+     "family": "fs",
+     "official": "nn::fssrv::sf::IFileSystem",
+     "url": "https://switchbrew.org/wiki/Filesystem_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+     ],
+     "constant": [
+      10,
+      15
+     ],
+     "missing": [
+      {
+       "id": 16,
+       "name": "GetFileSystemAttribute"
+      }
+     ],
+     "undocumented": [],
+     "total": 17
+    },
+    {
+     "name": "fs/ISaveDataInfoReader",
+     "family": "fs",
+     "official": "nn::fssrv::sf::ISaveDataInfoReader",
+     "url": "https://switchbrew.org/wiki/Filesystem_services",
+     "referenced": true,
+     "implemented": [
+      0
+     ],
+     "constant": [
+      0
+     ],
+     "missing": [],
+     "undocumented": [],
+     "total": 1
+    },
+    {
+     "name": "fs/IStorage",
+     "family": "fs",
+     "official": "nn::fssrv::sf::IStorage",
+     "url": "https://switchbrew.org/wiki/Filesystem_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      4
+     ],
+     "constant": [],
+     "missing": [
+      {
+       "id": 1,
+       "name": "Write"
+      },
+      {
+       "id": 2,
+       "name": "Flush"
+      },
+      {
+       "id": 3,
+       "name": "SetSize"
+      },
+      {
+       "id": 5,
+       "name": "OperateRange"
+      }
+     ],
+     "undocumented": [],
+     "total": 6
+    },
+    {
+     "name": "fsp-srv",
+     "family": "fs",
+     "official": "nn::fssrv::sf::IFileSystemProxy",
+     "url": "https://switchbrew.org/wiki/Filesystem_services",
+     "referenced": true,
+     "implemented": [
+      1,
+      18,
+      22,
+      23,
+      25,
+      26,
+      27,
+      28,
+      51,
+      52,
+      53,
+      60,
+      61,
+      62,
+      200,
+      202,
+      203,
+      1003,
+      1004,
+      1005,
+      1006,
+      1011
+     ],
+     "constant": [
+      1,
+      22,
+      23,
+      25,
+      26,
+      27,
+      28,
+      1003,
+      1004,
+      1005,
+      1006,
+      1011
+     ],
+     "missing": [
+      {
+       "id": 0,
+       "name": "OpenFileSystem"
+      },
+      {
+       "id": 2,
+       "name": "OpenDataFileSystemByCurrentProcess"
+      },
+      {
+       "id": 7,
+       "name": "OpenFileSystemWithPatch"
+      },
+      {
+       "id": 8,
+       "name": "OpenFileSystemWithIdObsolete"
+      },
+      {
+       "id": 9,
+       "name": "OpenDataFileSystemByProgramId"
+      },
+      {
+       "id": 10,
+       "name": "OpenFileSystemWithId"
+      },
+      {
+       "id": 11,
+       "name": "OpenBisFileSystem"
+      },
+      {
+       "id": 12,
+       "name": "OpenBisStorage"
+      },
+      {
+       "id": 13,
+       "name": "InvalidateBisCache"
+      },
+      {
+       "id": 17,
+       "name": "OpenHostFileSystem"
+      },
+      {
+       "id": 19,
+       "name": "FormatSdCardFileSystem"
+      },
+      {
+       "id": 21,
+       "name": "DeleteSaveDataFileSystem"
+      },
+      {
+       "id": 24,
+       "name": "RegisterSaveDataFileSystemAtomicDeletion"
+      },
+      {
+       "id": 29,
+       "name": "IsInitializationMode"
+      },
+      {
+       "id": 30,
+       "name": "OpenGameCardStorage"
+      },
+      {
+       "id": 31,
+       "name": "OpenGameCardFileSystem"
+      },
+      {
+       "id": 32,
+       "name": "ExtendSaveDataFileSystem"
+      },
+      {
+       "id": 33,
+       "name": "DeleteCacheStorage"
+      },
+      {
+       "id": 34,
+       "name": "GetCacheStorageSize"
+      },
+      {
+       "id": 35,
+       "name": "CreateSaveDataFileSystemWithHashSalt"
+      },
+      {
+       "id": 36,
+       "name": "OpenHostFileSystemWithOption"
+      },
+      {
+       "id": 37,
+       "name": "CreateSaveDataFileSystemWithCreationInfo2"
+      },
+      {
+       "id": 38,
+       "name": "DetachSdCard"
+      },
+      {
+       "id": 39,
+       "name": "ShutdownStorage"
+      },
+      {
+       "id": 40,
+       "name": "FixSaveDataCertificate"
+      },
+      {
+       "id": 57,
+       "name": "ReadSaveDataFileSystemExtraDataBySaveDataSpaceId"
+      },
+      {
+       "id": 58,
+       "name": "ReadSaveDataFileSystemExtraData"
+      },
+      {
+       "id": 59,
+       "name": "WriteSaveDataFileSystemExtraData"
+      },
+      {
+       "id": 64,
+       "name": "OpenSaveDataInternalStorageFileSystem"
+      },
+      {
+       "id": 65,
+       "name": "UpdateSaveDataMacForDebug"
+      },
+      {
+       "id": 66,
+       "name": "WriteSaveDataFileSystemExtraDataWithMask"
+      },
+      {
+       "id": 67,
+       "name": "FindSaveDataWithFilter"
+      },
+      {
+       "id": 68,
+       "name": "OpenSaveDataInfoReaderWithFilter"
+      },
+      {
+       "id": 69,
+       "name": "ReadSaveDataFileSystemExtraDataBySaveDataAttribute"
+      },
+      {
+       "id": 70,
+       "name": "WriteSaveDataFileSystemExtraDataWithMaskBySaveDataAttribute"
+      },
+      {
+       "id": 71,
+       "name": "ReadSaveDataFileSystemExtraDataWithMaskBySaveDataAttribute"
+      },
+      {
+       "id": 80,
+       "name": "OpenSaveDataMetaFile"
+      },
+      {
+       "id": 81,
+       "name": "OpenSaveDataTransferManager"
+      },
+      {
+       "id": 82,
+       "name": "OpenSaveDataTransferManagerVersion2"
+      },
+      {
+       "id": 83,
+       "name": "OpenSaveDataTransferProhibiter"
+      },
+      {
+       "id": 84,
+       "name": "ListAccessibleSaveDataOwnerId"
+      },
+      {
+       "id": 85,
+       "name": "OpenSaveDataTransferManagerForSaveDataRepair"
+      },
+      {
+       "id": 86,
+       "name": "OpenSaveDataMover"
+      },
+      {
+       "id": 87,
+       "name": "OpenSaveDataTransferManagerForRepair"
+      },
+      {
+       "id": 88,
+       "name": "OpenSaveDataTransferManagerForSaveDataRepairWithPolicy"
+      },
+      {
+       "id": 100,
+       "name": "OpenImageDirectoryFileSystem"
+      },
+      {
+       "id": 101,
+       "name": "OpenBaseFileSystem"
+      },
+      {
+       "id": 102,
+       "name": "FormatBaseFileSystem"
+      },
+      {
+       "id": 110,
+       "name": "OpenContentStorageFileSystem"
+      },
+      {
+       "id": 120,
+       "name": "OpenCloudBackupWorkStorageFileSystem"
+      },
+      {
+       "id": 130,
+       "name": "OpenCustomStorageFileSystem"
+      },
+      {
+       "id": 201,
+       "name": "OpenDataStorageByProgramId"
+      },
+      {
+       "id": 204,
+       "name": "OpenDataFileSystemWithProgramIndex"
+      },
+      {
+       "id": 205,
+       "name": "OpenDataStorageWithProgramIndex"
+      },
+      {
+       "id": 206,
+       "name": "OpenDataStorageByPath"
+      },
+      {
+       "id": 207,
+       "name": "OpenDataFileSystemByDataId"
+      },
+      {
+       "id": 210,
+       "name": "OpenDataStorageByCurrentProcessForBatchRead"
+      },
+      {
+       "id": 211,
+       "name": "OpenDataStorageByProgramIdForBatchRead"
+      },
+      {
+       "id": 212,
+       "name": "OpenDataStorageWithProgramIndexForBatchRead"
+      },
+      {
+       "id": 213,
+       "name": "OpenDataStorageByPathForBatchRead"
+      },
+      {
+       "id": 400,
+       "name": "OpenDeviceOperator"
+      },
+      {
+       "id": 500,
+       "name": "OpenSdCardDetectionEventNotifier"
+      },
+      {
+       "id": 501,
+       "name": "OpenGameCardDetectionEventNotifier"
+      },
+      {
+       "id": 502,
+       "name": "OpenSdCardAwakenReadyEventNotifier"
+      },
+      {
+       "id": 503,
+       "name": "OpenGameCardAwakenReadyEventNotifier"
+      },
+      {
+       "id": 510,
+       "name": "OpenSystemDataUpdateEventNotifier"
+      },
+      {
+       "id": 511,
+       "name": "NotifySystemDataUpdateEvent"
+      },
+      {
+       "id": 520,
+       "name": "SimulateDeviceDetectionEvent"
+      },
+      {
+       "id": 600,
+       "name": "SetCurrentPosixTime"
+      },
+      {
+       "id": 601,
+       "name": "QuerySaveDataTotalSize"
+      },
+      {
+       "id": 602,
+       "name": "VerifySaveDataFileSystem"
+      },
+      {
+       "id": 603,
+       "name": "CorruptSaveDataFileSystem"
+      },
+      {
+       "id": 604,
+       "name": "CreatePaddingFile"
+      },
+      {
+       "id": 605,
+       "name": "DeleteAllPaddingFiles"
+      },
+      {
+       "id": 606,
+       "name": "GetRightsId"
+      },
+      {
+       "id": 607,
+       "name": "RegisterExternalKey"
+      },
+      {
+       "id": 608,
+       "name": "UnregisterAllExternalKey"
+      },
+      {
+       "id": 609,
+       "name": "GetRightsIdByPath"
+      },
+      {
+       "id": 610,
+       "name": "GetRightsIdAndKeyGenerationByPath"
+      },
+      {
+       "id": 611,
+       "name": "SetCurrentPosixTimeWithTimeDifference"
+      },
+      {
+       "id": 612,
+       "name": "GetFreeSpaceSizeForSaveData"
+      },
+      {
+       "id": 613,
+       "name": "VerifySaveDataFileSystemBySaveDataSpaceId"
+      },
+      {
+       "id": 614,
+       "name": "CorruptSaveDataFileSystemBySaveDataSpaceId"
+      },
+      {
+       "id": 615,
+       "name": "QuerySaveDataInternalStorageTotalSize"
+      },
+      {
+       "id": 616,
+       "name": "GetSaveDataCommitId"
+      },
+      {
+       "id": 617,
+       "name": "UnregisterExternalKey"
+      },
+      {
+       "id": 618,
+       "name": "GetProgramId"
+      },
+      {
+       "id": 620,
+       "name": "SetSdCardEncryptionSeed"
+      },
+      {
+       "id": 630,
+       "name": "SetSdCardAccessibility"
+      },
+      {
+       "id": 631,
+       "name": "IsSdCardAccessible"
+      },
+      {
+       "id": 632,
+       "name": "TestExternalKey"
+      },
+      {
+       "id": 640,
+       "name": "IsSignedSystemPartitionOnSdCardValid"
+      },
+      {
+       "id": 700,
+       "name": "OpenAccessFailureDetectionEventNotifier"
+      },
+      {
+       "id": 701,
+       "name": "GetAccessFailureDetectionEvent"
+      },
+      {
+       "id": 702,
+       "name": "IsAccessFailureDetected"
+      },
+      {
+       "id": 710,
+       "name": "ResolveAccessFailure"
+      },
+      {
+       "id": 720,
+       "name": "AbandonAccessFailure"
+      },
+      {
+       "id": 800,
+       "name": "GetAndClearErrorInfo"
+      },
+      {
+       "id": 810,
+       "name": "RegisterProgramIndexMapInfo"
+      },
+      {
+       "id": 820,
+       "name": "GetContentStorageInfoIndex"
+      },
+      {
+       "id": 830,
+       "name": "EncryptStreamPlaySaveData"
+      },
+      {
+       "id": 831,
+       "name": "DecryptStreamPlaySaveData"
+      },
+      {
+       "id": 1000,
+       "name": "SetBisRootForHost"
+      },
+      {
+       "id": 1001,
+       "name": "SetSaveDataSize"
+      },
+      {
+       "id": 1002,
+       "name": "SetSaveDataRootPath"
+      },
+      {
+       "id": 1007,
+       "name": "RegisterUpdatePartition"
+      },
+      {
+       "id": 1008,
+       "name": "OpenRegisteredUpdatePartition"
+      },
+      {
+       "id": 1009,
+       "name": "GetAndClearMemoryReportInfo"
+      },
+      {
+       "id": 1010,
+       "name": "SetDataStorageRedirectTarget"
+      },
+      {
+       "id": 1012,
+       "name": "GetFsStackUsage"
+      },
+      {
+       "id": 1013,
+       "name": "UnsetSaveDataRootPath"
+      },
+      {
+       "id": 1014,
+       "name": "OutputMultiProgramTagAccessLog"
+      },
+      {
+       "id": 1016,
+       "name": "FlushAccessLogOnSdCard"
+      },
+      {
+       "id": 1017,
+       "name": "OutputApplicationInfoAccessLog"
+      },
+      {
+       "id": 1018,
+       "name": "SetDebugOption"
+      },
+      {
+       "id": 1019,
+       "name": "UnsetDebugOption"
+      },
+      {
+       "id": 1020,
+       "name": "OpenMemoryStressor"
+      },
+      {
+       "id": 1021,
+       "name": "GetFsVariant"
+      },
+      {
+       "id": 1100,
+       "name": "OverrideSaveDataTransferTokenSignVerificationKey"
+      },
+      {
+       "id": 1101,
+       "name": "OverrideSaveDataTransferKeyForTest"
+      },
+      {
+       "id": 1110,
+       "name": "CorruptSaveDataFileSystemByOffset"
+      },
+      {
+       "id": 1200,
+       "name": "OpenMultiCommitManager"
+      },
+      {
+       "id": 1300,
+       "name": "OpenBisWiper"
+      },
+      {
+       "id": 1400,
+       "name": "NotifyErrorContextServiceReady"
+      }
+     ],
+     "undocumented": [],
+     "total": 146
+    },
+    {
+     "name": "hid",
+     "family": "hid",
+     "official": "nn::hid::IHidServer",
+     "url": "https://switchbrew.org/wiki/HID_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      1,
+      11,
+      21,
+      31,
+      40,
+      66,
+      67,
+      68,
+      69,
+      82,
+      100,
+      101,
+      102,
+      103,
+      104,
+      106,
+      108,
+      109,
+      120,
+      121,
+      122,
+      123,
+      124,
+      125,
+      128,
+      129,
+      130,
+      131,
+      132,
+      133,
+      200,
+      201,
+      203,
+      206,
+      1000
+     ],
+     "constant": [
+      1,
+      11,
+      21,
+      31,
+      40,
+      66,
+      67,
+      68,
+      69,
+      82,
+      103,
+      104,
+      109,
+      122,
+      123,
+      124,
+      125,
+      128,
+      129,
+      130,
+      131,
+      132,
+      133,
+      201,
+      206,
+      1000
+     ],
+     "missing": [
+      {
+       "id": 22,
+       "name": "AddMouseWheelDelta"
+      },
+      {
+       "id": 26,
+       "name": "ActivateDebugMouse"
+      },
+      {
+       "id": 32,
+       "name": "SendKeyboardLockKeyEvent"
+      },
+      {
+       "id": 41,
+       "name": "ReleaseXpadIdEventHandle"
+      },
+      {
+       "id": 51,
+       "name": "ActivateXpad"
+      },
+      {
+       "id": 55,
+       "name": "GetXpadIds"
+      },
+      {
+       "id": 56,
+       "name": "ActivateJoyXpad"
+      },
+      {
+       "id": 58,
+       "name": "GetJoyXpadLifoHandle"
+      },
+      {
+       "id": 59,
+       "name": "GetJoyXpadIds"
+      },
+      {
+       "id": 60,
+       "name": "ActivateSixAxisSensor"
+      },
+      {
+       "id": 61,
+       "name": "DeactivateSixAxisSensor"
+      },
+      {
+       "id": 62,
+       "name": "GetSixAxisSensorLifoHandle"
+      },
+      {
+       "id": 63,
+       "name": "ActivateJoySixAxisSensor"
+      },
+      {
+       "id": 64,
+       "name": "DeactivateJoySixAxisSensor"
+      },
+      {
+       "id": 65,
+       "name": "GetJoySixAxisSensorLifoHandle"
+      },
+      {
+       "id": 70,
+       "name": "SetSixAxisSensorFusionParameters"
+      },
+      {
+       "id": 71,
+       "name": "GetSixAxisSensorFusionParameters"
+      },
+      {
+       "id": 72,
+       "name": "ResetSixAxisSensorFusionParameters"
+      },
+      {
+       "id": 73,
+       "name": "SetAccelerometerParameters"
+      },
+      {
+       "id": 74,
+       "name": "GetAccelerometerParameters"
+      },
+      {
+       "id": 75,
+       "name": "ResetAccelerometerParameters"
+      },
+      {
+       "id": 76,
+       "name": "SetAccelerometerPlayMode"
+      },
+      {
+       "id": 77,
+       "name": "GetAccelerometerPlayMode"
+      },
+      {
+       "id": 78,
+       "name": "ResetAccelerometerPlayMode"
+      },
+      {
+       "id": 79,
+       "name": "SetGyroscopeZeroDriftMode"
+      },
+      {
+       "id": 80,
+       "name": "GetGyroscopeZeroDriftMode"
+      },
+      {
+       "id": 81,
+       "name": "ResetGyroscopeZeroDriftMode"
+      },
+      {
+       "id": 83,
+       "name": "IsFirmwareUpdateAvailableForSixAxisSensor"
+      },
+      {
+       "id": 84,
+       "name": "EnableSixAxisSensorUnalteredPassthrough"
+      },
+      {
+       "id": 85,
+       "name": "IsSixAxisSensorUnalteredPassthroughEnabled"
+      },
+      {
+       "id": 86,
+       "name": "StoreSixAxisSensorCalibrationParameter"
+      },
+      {
+       "id": 87,
+       "name": "LoadSixAxisSensorCalibrationParameter"
+      },
+      {
+       "id": 88,
+       "name": "GetSixAxisSensorIcInformation"
+      },
+      {
+       "id": 89,
+       "name": "ResetIsSixAxisSensorDeviceNewlyAssigned"
+      },
+      {
+       "id": 91,
+       "name": "ActivateGesture"
+      },
+      {
+       "id": 92,
+       "name": "SetGestureOutputRanges"
+      },
+      {
+       "id": 107,
+       "name": "DisconnectNpad"
+      },
+      {
+       "id": 126,
+       "name": "StartLrAssignmentMode"
+      },
+      {
+       "id": 127,
+       "name": "StopLrAssignmentMode"
+      },
+      {
+       "id": 134,
+       "name": "SetNpadAnalogStickUseCenterClamp"
+      },
+      {
+       "id": 135,
+       "name": "SetNpadCaptureButtonAssignment"
+      },
+      {
+       "id": 136,
+       "name": "ClearNpadCaptureButtonAssignment"
+      },
+      {
+       "id": 137,
+       "name": "SetNpadGcAnalogStick8bitRawValue"
+      },
+      {
+       "id": 140,
+       "name": "IsFirmwareUpdateAvailableForDebug"
+      },
+      {
+       "id": 150,
+       "name": "GetSixAxisSensorIcSettings"
+      },
+      {
+       "id": 151,
+       "name": "SetSixAxisSensorIcSettings"
+      },
+      {
+       "id": 160,
+       "name": "GetSixAxisSensorIcAccelerationOffset"
+      },
+      {
+       "id": 202,
+       "name": "GetActualVibrationValue"
+      },
+      {
+       "id": 204,
+       "name": "PermitVibration"
+      },
+      {
+       "id": 205,
+       "name": "IsVibrationPermitted"
+      },
+      {
+       "id": 207,
+       "name": "SendVibrationGcErmCommand"
+      },
+      {
+       "id": 208,
+       "name": "GetActualVibrationGcErmCommand"
+      },
+      {
+       "id": 209,
+       "name": "BeginPermitVibrationSession"
+      },
+      {
+       "id": 210,
+       "name": "EndPermitVibrationSession"
+      },
+      {
+       "id": 211,
+       "name": "IsVibrationDeviceMounted"
+      },
+      {
+       "id": 212,
+       "name": "SendVibrationValueInBool"
+      },
+      {
+       "id": 213,
+       "name": "SendVibrationValueInMode"
+      },
+      {
+       "id": 214,
+       "name": "SendVibrationValuesInMode"
+      },
+      {
+       "id": 300,
+       "name": "ActivateConsoleSixAxisSensor"
+      },
+      {
+       "id": 301,
+       "name": "StartConsoleSixAxisSensor"
+      },
+      {
+       "id": 302,
+       "name": "StopConsoleSixAxisSensor"
+      },
+      {
+       "id": 303,
+       "name": "ActivateSevenSixAxisSensor"
+      },
+      {
+       "id": 304,
+       "name": "StartSevenSixAxisSensor"
+      },
+      {
+       "id": 305,
+       "name": "StopSevenSixAxisSensor"
+      },
+      {
+       "id": 306,
+       "name": "InitializeSevenSixAxisSensor"
+      },
+      {
+       "id": 307,
+       "name": "FinalizeSevenSixAxisSensor"
+      },
+      {
+       "id": 308,
+       "name": "SetSevenSixAxisSensorFusionStrength"
+      },
+      {
+       "id": 309,
+       "name": "GetSevenSixAxisSensorFusionStrength"
+      },
+      {
+       "id": 310,
+       "name": "ResetSevenSixAxisSensorTimestamp"
+      },
+      {
+       "id": 311,
+       "name": "ForceActivateConsoleSixAxisSensor"
+      },
+      {
+       "id": 312,
+       "name": "ForceDeactivateConsoleSixAxisSensor"
+      },
+      {
+       "id": 320,
+       "name": "EnableNpadImu"
+      },
+      {
+       "id": 321,
+       "name": "DisableNpadImu"
+      },
+      {
+       "id": 322,
+       "name": "SetNpadImuSupportedFeatures"
+      },
+      {
+       "id": 323,
+       "name": "EnableNpadImuHandle"
+      },
+      {
+       "id": 324,
+       "name": "DisableNpadImuHandle"
+      },
+      {
+       "id": 400,
+       "name": "IsUsbFullKeyControllerEnabled"
+      },
+      {
+       "id": 401,
+       "name": "EnableUsbFullKeyController"
+      },
+      {
+       "id": 402,
+       "name": "IsUsbFullKeyControllerConnected"
+      },
+      {
+       "id": 403,
+       "name": "HasBattery"
+      },
+      {
+       "id": 404,
+       "name": "HasLeftRightBattery"
+      },
+      {
+       "id": 405,
+       "name": "GetNpadInterfaceType"
+      },
+      {
+       "id": 406,
+       "name": "GetNpadLeftRightInterfaceType"
+      },
+      {
+       "id": 407,
+       "name": "GetNpadOfHighestBatteryLevel"
+      },
+      {
+       "id": 408,
+       "name": "GetNpadOfHighestBatteryLevelForJoyRight"
+      },
+      {
+       "id": 500,
+       "name": "GetPalmaConnectionHandle"
+      },
+      {
+       "id": 501,
+       "name": "InitializePalma"
+      },
+      {
+       "id": 502,
+       "name": "AcquirePalmaOperationCompleteEvent"
+      },
+      {
+       "id": 503,
+       "name": "GetPalmaOperationInfo"
+      },
+      {
+       "id": 504,
+       "name": "PlayPalmaActivity"
+      },
+      {
+       "id": 505,
+       "name": "SetPalmaFrModeType"
+      },
+      {
+       "id": 506,
+       "name": "ReadPalmaStep"
+      },
+      {
+       "id": 507,
+       "name": "EnablePalmaStep"
+      },
+      {
+       "id": 508,
+       "name": "ResetPalmaStep"
+      },
+      {
+       "id": 509,
+       "name": "ReadPalmaApplicationSection"
+      },
+      {
+       "id": 510,
+       "name": "WritePalmaApplicationSection"
+      },
+      {
+       "id": 511,
+       "name": "ReadPalmaUniqueCode"
+      },
+      {
+       "id": 512,
+       "name": "SetPalmaUniqueCodeInvalid"
+      },
+      {
+       "id": 513,
+       "name": "WritePalmaActivityEntry"
+      },
+      {
+       "id": 514,
+       "name": "WritePalmaRgbLedPatternEntry"
+      },
+      {
+       "id": 515,
+       "name": "WritePalmaWaveEntry"
+      },
+      {
+       "id": 516,
+       "name": "SetPalmaDataBaseIdentificationVersion"
+      },
+      {
+       "id": 517,
+       "name": "GetPalmaDataBaseIdentificationVersion"
+      },
+      {
+       "id": 518,
+       "name": "SuspendPalmaFeature"
+      },
+      {
+       "id": 519,
+       "name": "GetPalmaOperationResult"
+      },
+      {
+       "id": 520,
+       "name": "ReadPalmaPlayLog"
+      },
+      {
+       "id": 521,
+       "name": "ResetPalmaPlayLog"
+      },
+      {
+       "id": 522,
+       "name": "SetIsPalmaAllConnectable"
+      },
+      {
+       "id": 523,
+       "name": "SetIsPalmaPairedConnectable"
+      },
+      {
+       "id": 524,
+       "name": "PairPalma"
+      },
+      {
+       "id": 525,
+       "name": "SetPalmaBoostMode"
+      },
+      {
+       "id": 526,
+       "name": "CancelWritePalmaWaveEntry"
+      },
+      {
+       "id": 527,
+       "name": "EnablePalmaBoostMode"
+      },
+      {
+       "id": 528,
+       "name": "GetPalmaBluetoothAddress"
+      },
+      {
+       "id": 529,
+       "name": "SetDisallowedPalmaConnection"
+      },
+      {
+       "id": 1001,
+       "name": "GetNpadCommunicationMode"
+      },
+      {
+       "id": 1002,
+       "name": "SetTouchScreenConfiguration"
+      },
+      {
+       "id": 1003,
+       "name": "IsFirmwareUpdateNeededForNotification"
+      },
+      {
+       "id": 1004,
+       "name": "SetTouchScreenOutputRanges"
+      },
+      {
+       "id": 1005,
+       "name": "EnableNxTouchScreenEmulationForTouchEnter"
+      },
+      {
+       "id": 2000,
+       "name": "ActivateDigitizer"
+      },
+      {
+       "id": 3000,
+       "name": "GetDebugPadGenericPadMap"
+      },
+      {
+       "id": 3001,
+       "name": "SetDebugPadGenericPadMap"
+      },
+      {
+       "id": 3002,
+       "name": "ResetDebugPadGenericPadMap"
+      },
+      {
+       "id": 3003,
+       "name": "GetDebugPadKeyboardMap"
+      },
+      {
+       "id": 3004,
+       "name": "SetDebugPadKeyboardMap"
+      },
+      {
+       "id": 3005,
+       "name": "ResetDebugPadKeyboardMap"
+      },
+      {
+       "id": 3006,
+       "name": "GetFullKeyGenericPadMap"
+      },
+      {
+       "id": 3007,
+       "name": "SetFullKeyGenericPadMap"
+      },
+      {
+       "id": 3008,
+       "name": "ResetFullKeyGenericPadMap"
+      },
+      {
+       "id": 3009,
+       "name": "GetFullKeyKeyboardMap"
+      },
+      {
+       "id": 3010,
+       "name": "SetFullKeyKeyboardMap"
+      },
+      {
+       "id": 3011,
+       "name": "ResetFullKeyKeyboardMap"
+      },
+      {
+       "id": 3012,
+       "name": "GetDebugPadGenericPadMap"
+      },
+      {
+       "id": 3013,
+       "name": "SetDebugPadGenericPadMap"
+      },
+      {
+       "id": 3014,
+       "name": "GetDebugPadKeyboardMap"
+      },
+      {
+       "id": 3015,
+       "name": "SetDebugPadKeyboardMap"
+      },
+      {
+       "id": 3150,
+       "name": "SetMouseLibraryVersion"
+      }
+     ],
+     "undocumented": [],
+     "total": 174
+    },
+    {
+     "name": "hid/IActiveVibrationDeviceList",
+     "family": "hid",
+     "official": "nn::hid::IActiveVibrationDeviceList",
+     "url": "https://switchbrew.org/wiki/HID_services",
+     "referenced": true,
+     "implemented": [
+      0
+     ],
+     "constant": [
+      0
+     ],
+     "missing": [],
+     "undocumented": [],
+     "total": 1
+    },
+    {
+     "name": "hid/IAppletResource",
+     "family": "hid",
+     "official": "nn::hid::IAppletResource",
+     "url": "https://switchbrew.org/wiki/HID_services",
+     "referenced": true,
+     "implemented": [
+      0
+     ],
+     "constant": [],
+     "missing": [],
+     "undocumented": [],
+     "total": 1
+    },
+    {
+     "name": "hwopus",
+     "family": "hwopus",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+     ],
+     "constant": [],
+     "missing": [],
+     "undocumented": [],
+     "total": 10
+    },
+    {
+     "name": "hwopus/IHardwareOpusDecoder",
+     "family": "hwopus",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+     ],
+     "constant": [
+      1,
+      3
+     ],
+     "missing": [],
+     "undocumented": [],
+     "total": 8
+    },
+    {
+     "name": "ldr:ro",
+     "family": "ldr",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      10
+     ],
+     "constant": [
+      2,
+      3,
+      4,
+      10
+     ],
+     "missing": [],
+     "undocumented": [],
+     "total": 6
+    },
+    {
+     "name": "lm",
+     "family": "lm",
+     "official": "nn::lm::ILogService",
+     "url": "https://switchbrew.org/wiki/Log_services",
+     "referenced": true,
+     "implemented": [
+      0
+     ],
+     "constant": [],
+     "missing": [],
+     "undocumented": [],
+     "total": 1
+    },
+    {
+     "name": "lm/ILogger",
+     "family": "lm",
+     "official": "nn::lm::ILogger",
+     "url": "https://switchbrew.org/wiki/Log_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      1
+     ],
+     "constant": [
+      1
+     ],
+     "missing": [
+      {
+       "id": 2,
+       "name": "TransmitHashedLog"
+      },
+      {
+       "id": 3,
+       "name": "DevNotify"
+      },
+      {
+       "id": 11,
+       "name": "OpenSharedMemoryAccessorForHashedLog"
+      }
+     ],
+     "undocumented": [],
+     "total": 5
+    },
+    {
+     "name": "mm:u",
+     "family": "mm",
+     "official": "nn::mmnv::IRequest",
+     "url": "https://switchbrew.org/wiki/Multimedia_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+     ],
+     "constant": [
+      0,
+      1
+     ],
+     "missing": [],
+     "undocumented": [],
+     "total": 8
+    },
+    {
+     "name": "nfp:user",
+     "family": "nfp",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [
+      0
+     ],
+     "constant": [],
+     "missing": [],
+     "undocumented": [],
+     "total": 1
+    },
+    {
+     "name": "nfp:user/IUser",
+     "family": "nfp",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23
+     ],
+     "constant": [],
+     "missing": [],
+     "undocumented": [],
+     "total": 12
+    },
+    {
+     "name": "nvdrv",
+     "family": "nvdrv",
+     "official": "nns::nvdrv::INvDrvServices",
+     "url": "https://switchbrew.org/wiki/NV_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      8,
+      11,
+      12,
+      13
+     ],
+     "constant": [],
+     "missing": [
+      {
+       "id": 5,
+       "name": "MapSharedMem"
+      },
+      {
+       "id": 6,
+       "name": "GetStatus"
+      },
+      {
+       "id": 7,
+       "name": "SetAruidWithoutCheck"
+      },
+      {
+       "id": 9,
+       "name": "DumpStatus"
+      },
+      {
+       "id": 10,
+       "name": "InitializeDevtools"
+      }
+     ],
+     "undocumented": [],
+     "total": 14
+    },
+    {
+     "name": "pctl",
+     "family": "pctl",
+     "official": "nn::pctl::detail::ipc::IParentalControlServiceFactory",
+     "url": "https://switchbrew.org/wiki/Parental_Control_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      1
+     ],
+     "constant": [],
+     "missing": [],
+     "undocumented": [],
+     "total": 2
+    },
+    {
+     "name": "pctl/IParentalControlService",
+     "family": "pctl",
+     "official": "nn::pctl::detail::ipc::IParentalControlService",
+     "url": "https://switchbrew.org/wiki/Parental_Control_services",
+     "referenced": true,
+     "implemented": [],
+     "constant": [],
+     "missing": [
+      {
+       "id": 1,
+       "name": "Initialize"
+      },
+      {
+       "id": 1001,
+       "name": "CheckFreeCommunicationPermission"
+      },
+      {
+       "id": 1002,
+       "name": "ConfirmLaunchApplicationPermission"
+      },
+      {
+       "id": 1003,
+       "name": "ConfirmResumeApplicationPermission"
+      },
+      {
+       "id": 1004,
+       "name": "ConfirmSnsPostPermission"
+      },
+      {
+       "id": 1005,
+       "name": "ConfirmSystemSettingsPermission"
+      },
+      {
+       "id": 1006,
+       "name": "IsRestrictionTemporaryUnlocked"
+      },
+      {
+       "id": 1007,
+       "name": "RevertRestrictionTemporaryUnlocked"
+      },
+      {
+       "id": 1008,
+       "name": "EnterRestrictedSystemSettings"
+      },
+      {
+       "id": 1009,
+       "name": "LeaveRestrictedSystemSettings"
+      },
+      {
+       "id": 1010,
+       "name": "IsRestrictedSystemSettingsEntered"
+      },
+      {
+       "id": 1011,
+       "name": "RevertRestrictedSystemSettingsEntered"
+      },
+      {
+       "id": 1012,
+       "name": "GetRestrictedFeatures"
+      },
+      {
+       "id": 1013,
+       "name": "ConfirmStereoVisionPermission"
+      },
+      {
+       "id": 1014,
+       "name": "ConfirmPlayableApplicationVideoOld"
+      },
+      {
+       "id": 1015,
+       "name": "ConfirmPlayableApplicationVideo"
+      },
+      {
+       "id": 1016,
+       "name": "ConfirmShowNewsPermission"
+      },
+      {
+       "id": 1017,
+       "name": "EndFreeCommunication"
+      },
+      {
+       "id": 1018,
+       "name": "IsFreeCommunicationAvailable"
+      },
+      {
+       "id": 1019,
+       "name": "ConfirmLaunchApplicationPermission"
+      },
+      {
+       "id": 1020,
+       "name": "ConfirmLaunchSharedApplicationPermission"
+      },
+      {
+       "id": 1021,
+       "name": "TryBeginFreeCommunicationForStreamPlay"
+      },
+      {
+       "id": 1022,
+       "name": "EndFreeCommunicationForStreamPlay"
+      },
+      {
+       "id": 1023,
+       "name": "GetRestrictedFeatureFlagSet"
+      },
+      {
+       "id": 1031,
+       "name": "IsRestrictionEnabled"
+      },
+      {
+       "id": 1032,
+       "name": "GetSafetyLevel"
+      },
+      {
+       "id": 1033,
+       "name": "SetSafetyLevel"
+      },
+      {
+       "id": 1034,
+       "name": "GetSafetyLevelSettings"
+      },
+      {
+       "id": 1035,
+       "name": "GetCurrentSettings"
+      },
+      {
+       "id": 1036,
+       "name": "SetCustomSafetyLevelSettings"
+      },
+      {
+       "id": 1037,
+       "name": "GetDefaultRatingOrganization"
+      },
+      {
+       "id": 1038,
+       "name": "SetDefaultRatingOrganization"
+      },
+      {
+       "id": 1039,
+       "name": "GetFreeCommunicationApplicationListCount"
+      },
+      {
+       "id": 1042,
+       "name": "AddToFreeCommunicationApplicationList"
+      },
+      {
+       "id": 1043,
+       "name": "DeleteSettings"
+      },
+      {
+       "id": 1044,
+       "name": "GetFreeCommunicationApplicationList"
+      },
+      {
+       "id": 1045,
+       "name": "UpdateFreeCommunicationApplicationList"
+      },
+      {
+       "id": 1046,
+       "name": "DisableFeaturesForReset"
+      },
+      {
+       "id": 1047,
+       "name": "NotifyApplicationDownloadStartedOld"
+      },
+      {
+       "id": 1048,
+       "name": "NotifyNetworkProfileCreated"
+      },
+      {
+       "id": 1049,
+       "name": "ResetFreeCommunicationApplicationList"
+      },
+      {
+       "id": 1050,
+       "name": "AddToFreeCommunicationApplicationList"
+      },
+      {
+       "id": 1051,
+       "name": "NotifyApplicationDownloadStarted"
+      },
+      {
+       "id": 1061,
+       "name": "ConfirmStereoVisionRestrictionConfigurable"
+      },
+      {
+       "id": 1062,
+       "name": "GetStereoVisionRestriction"
+      },
+      {
+       "id": 1063,
+       "name": "SetStereoVisionRestriction"
+      },
+      {
+       "id": 1064,
+       "name": "ResetConfirmedStereoVisionPermission"
+      },
+      {
+       "id": 1065,
+       "name": "IsStereoVisionPermitted"
+      },
+      {
+       "id": 1201,
+       "name": "UnlockRestrictionTemporarily"
+      },
+      {
+       "id": 1202,
+       "name": "UnlockSystemSettingsRestriction"
+      },
+      {
+       "id": 1203,
+       "name": "SetPinCode"
+      },
+      {
+       "id": 1204,
+       "name": "GenerateInquiryCode"
+      },
+      {
+       "id": 1205,
+       "name": "CheckMasterKey"
+      },
+      {
+       "id": 1206,
+       "name": "GetPinCodeLength"
+      },
+      {
+       "id": 1207,
+       "name": "GetPinCodeChangedEvent"
+      },
+      {
+       "id": 1208,
+       "name": "GetPinCode"
+      },
+      {
+       "id": 1209,
+       "name": "UnlockSystemSettingsRestriction"
+      },
+      {
+       "id": 1403,
+       "name": "IsPairingActive"
+      },
+      {
+       "id": 1406,
+       "name": "GetSettingsLastUpdated"
+      },
+      {
+       "id": 1411,
+       "name": "GetPairingAccountInfo"
+      },
+      {
+       "id": 1412,
+       "name": "GetAllPairingAccountInfos"
+      },
+      {
+       "id": 1421,
+       "name": "GetAccountNickname"
+      },
+      {
+       "id": 1424,
+       "name": "GetAccountState"
+      },
+      {
+       "id": 1425,
+       "name": "RequestPostEvents"
+      },
+      {
+       "id": 1426,
+       "name": "GetPostEventInterval"
+      },
+      {
+       "id": 1427,
+       "name": "SetPostEventInterval"
+      },
+      {
+       "id": 1432,
+       "name": "GetSynchronizationEvent"
+      },
+      {
+       "id": 1451,
+       "name": "StartPlayTimer"
+      },
+      {
+       "id": 1452,
+       "name": "StopPlayTimer"
+      },
+      {
+       "id": 1453,
+       "name": "IsPlayTimerEnabled"
+      },
+      {
+       "id": 1454,
+       "name": "GetPlayTimerRemainingTime"
+      },
+      {
+       "id": 1455,
+       "name": "IsRestrictedByPlayTimer"
+      },
+      {
+       "id": 1456,
+       "name": "GetPlayTimerSettingsOld"
+      },
+      {
+       "id": 1457,
+       "name": "GetPlayTimerEventToRequestSuspension"
+      },
+      {
+       "id": 1458,
+       "name": "IsPlayTimerAlarmDisabled"
+      },
+      {
+       "id": 1459,
+       "name": "GetPlayTimerRemainingTimeDisplayInfo"
+      },
+      {
+       "id": 1460,
+       "name": "GetWatcherStatusDisplayInfo"
+      },
+      {
+       "id": 1471,
+       "name": "NotifyWrongPinCodeInputManyTimes"
+      },
+      {
+       "id": 1472,
+       "name": "CancelNetworkRequest"
+      },
+      {
+       "id": 1473,
+       "name": "GetUnlinkedEvent"
+      },
+      {
+       "id": 1474,
+       "name": "ClearUnlinkedEvent"
+      },
+      {
+       "id": 1475,
+       "name": "GetExtendedPlayTimerEvent"
+      },
+      {
+       "id": 1501,
+       "name": "SetTimerEventEnabled"
+      },
+      {
+       "id": 1601,
+       "name": "DisableAllFeatures"
+      },
+      {
+       "id": 1602,
+       "name": "PostEnableAllFeatures"
+      },
+      {
+       "id": 1603,
+       "name": "IsAllFeaturesDisabled"
+      },
+      {
+       "id": 1901,
+       "name": "DeleteFromFreeCommunicationApplicationListForDebug"
+      },
+      {
+       "id": 1902,
+       "name": "ClearFreeCommunicationApplicationListForDebug"
+      },
+      {
+       "id": 1903,
+       "name": "GetExemptApplicationListCountForDebug"
+      },
+      {
+       "id": 1904,
+       "name": "GetExemptApplicationListForDebug"
+      },
+      {
+       "id": 1905,
+       "name": "UpdateExemptApplicationListForDebug"
+      },
+      {
+       "id": 1906,
+       "name": "AddToExemptApplicationListForDebug"
+      },
+      {
+       "id": 1907,
+       "name": "DeleteFromExemptApplicationListForDebug"
+      },
+      {
+       "id": 1908,
+       "name": "ClearExemptApplicationListForDebug"
+      },
+      {
+       "id": 1941,
+       "name": "DeletePairing"
+      },
+      {
+       "id": 1951,
+       "name": "SetPlayTimerSettingsForDebugOld"
+      },
+      {
+       "id": 1952,
+       "name": "GetPlayTimerSpentTimeForTest"
+      },
+      {
+       "id": 1953,
+       "name": "SetPlayTimerAlarmDisabledForDebug"
+      },
+      {
+       "id": 1954,
+       "name": "IsBedtimeAlarmEnabled"
+      },
+      {
+       "id": 1955,
+       "name": "GetBedtimeAlarmTime"
+      },
+      {
+       "id": 1956,
+       "name": "GetBedtimeAlarmTimeHour"
+      },
+      {
+       "id": 1957,
+       "name": "GetBedtimeAlarmTimeMinute"
+      },
+      {
+       "id": 1958,
+       "name": "GetBedtimeAlarmResetTimeHour"
+      },
+      {
+       "id": 1959,
+       "name": "GetBedtimeAlarmResetTimeMinute"
+      },
+      {
+       "id": 1960,
+       "name": "GetExtraPlayingTimeForDebug"
+      },
+      {
+       "id": 2001,
+       "name": "RequestPairingAsync"
+      },
+      {
+       "id": 2002,
+       "name": "FinishRequestPairing"
+      },
+      {
+       "id": 2003,
+       "name": "AuthorizePairingAsyncOld"
+      },
+      {
+       "id": 2004,
+       "name": "FinishAuthorizePairing"
+      },
+      {
+       "id": 2005,
+       "name": "RetrievePairingInfoAsync"
+      },
+      {
+       "id": 2006,
+       "name": "FinishRetrievePairingInfo"
+      },
+      {
+       "id": 2007,
+       "name": "UnlinkPairingAsync"
+      },
+      {
+       "id": 2008,
+       "name": "FinishUnlinkPairing"
+      },
+      {
+       "id": 2009,
+       "name": "GetAccountMiiImageAsync"
+      },
+      {
+       "id": 2010,
+       "name": "FinishGetAccountMiiImage"
+      },
+      {
+       "id": 2011,
+       "name": "GetAccountMiiImageContentTypeAsync"
+      },
+      {
+       "id": 2012,
+       "name": "FinishGetAccountMiiImageContentType"
+      },
+      {
+       "id": 2013,
+       "name": "SynchronizeParentalControlSettingsAsync"
+      },
+      {
+       "id": 2014,
+       "name": "FinishSynchronizeParentalControlSettings"
+      },
+      {
+       "id": 2015,
+       "name": "FinishSynchronizeParentalControlSettingsWithLastUpdated"
+      },
+      {
+       "id": 2016,
+       "name": "RequestUpdateExemptionListAsync"
+      },
+      {
+       "id": 2017,
+       "name": "AuthorizePairingAsync"
+      },
+      {
+       "id": 2019,
+       "name": "RequestUpdateDeviceUsersBackground"
+      },
+      {
+       "id": 2021,
+       "name": "RequestCopyPairingAsync"
+      },
+      {
+       "id": 2022,
+       "name": "FinishRequestCopyPairing"
+      },
+      {
+       "id": 2023,
+       "name": "IsFromPairingActiveDevice"
+      },
+      {
+       "id": 2024,
+       "name": "RollbackCopyPairing"
+      },
+      {
+       "id": 2025,
+       "name": "DownloadAllAccountMiiImagesAsync"
+      },
+      {
+       "id": 2026,
+       "name": "FinishDownloadAllAccountMiiImagesAsync"
+      },
+      {
+       "id": 2027,
+       "name": "GetPairingAccountChangedEvent"
+      },
+      {
+       "id": 3001,
+       "name": "GetErrorContextChangedEvent"
+      },
+      {
+       "id": 9401,
+       "name": "GetEvents"
+      },
+      {
+       "id": 9402,
+       "name": "GetEventsWithJson"
+      },
+      {
+       "id": 9403,
+       "name": "RequestPostEvents"
+      },
+      {
+       "id": 9404,
+       "name": "GetPostEventInterval"
+      },
+      {
+       "id": 9405,
+       "name": "SetPostEventInterval"
+      },
+      {
+       "id": 9406,
+       "name": "GetDeviceIdForDebug"
+      },
+      {
+       "id": 9407,
+       "name": "PrepareMigrationWithEmulatedOldSaveDataForDebug"
+      },
+      {
+       "id": 145601,
+       "name": "GetPlayTimerSettings"
+      },
+      {
+       "id": 195101,
+       "name": "SetPlayTimerSettingsForDebug"
+      }
+     ],
+     "undocumented": [],
+     "total": 140
+    },
+    {
+     "name": "pl:u",
+     "family": "pl",
+     "official": "nn::pl::sharedresource::detail::IPlatformSharedResourceManager",
+     "url": "https://switchbrew.org/wiki/Glue_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+     ],
+     "constant": [
+      0,
+      1
+     ],
+     "missing": [
+      {
+       "id": 6,
+       "name": "GetSharedFontInOrderOfPriorityForSystem"
+      }
+     ],
+     "undocumented": [],
+     "total": 7
+    },
+    {
+     "name": "set",
+     "family": "set",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      8
+     ],
+     "constant": [
+      8
+     ],
+     "missing": [],
+     "undocumented": [],
+     "total": 8
+    },
+    {
+     "name": "sm:",
+     "family": "sm",
+     "official": "nn::sm::detail::IUserInterface",
+     "url": "https://switchbrew.org/wiki/Services_API",
+     "referenced": true,
+     "implemented": [
+      0,
+      1,
+      2,
+      3
+     ],
+     "constant": [
+      0,
+      2,
+      3
+     ],
+     "missing": [
+      {
+       "id": 4,
+       "name": "DetachClient"
+      }
+     ],
+     "undocumented": [],
+     "total": 5
+    },
+    {
+     "name": "time/ISteadyClock",
+     "family": "time",
+     "official": "nn::timesrv::detail::service::ISteadyClock",
+     "url": "https://switchbrew.org/wiki/Glue_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      2,
+      100,
+      200
+     ],
+     "constant": [
+      2,
+      200
+     ],
+     "missing": [
+      {
+       "id": 3,
+       "name": "SetTestOffset"
+      },
+      {
+       "id": 101,
+       "name": "IsRtcResetDetected"
+      },
+      {
+       "id": 102,
+       "name": "GetSetupResultValue"
+      },
+      {
+       "id": 201,
+       "name": "SetInternalOffset"
+      }
+     ],
+     "undocumented": [],
+     "total": 8
+    },
+    {
+     "name": "time/ISystemClock",
+     "family": "time",
+     "official": "nn::timesrv::detail::service::ISystemClock",
+     "url": "https://switchbrew.org/wiki/Glue_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      1,
+      2,
+      3,
+      4
+     ],
+     "constant": [
+      1,
+      3
+     ],
+     "missing": [],
+     "undocumented": [],
+     "total": 5
+    },
+    {
+     "name": "time/ITimeZoneService",
+     "family": "time",
+     "official": "nn::timesrv::detail::service::ITimeZoneService",
+     "url": "https://switchbrew.org/wiki/Glue_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      100,
+      101,
+      201,
+      202
+     ],
+     "constant": [
+      1,
+      2
+     ],
+     "missing": [
+      {
+       "id": 6,
+       "name": "GetDeviceLocationNameAndUpdatedTime"
+      },
+      {
+       "id": 7,
+       "name": "SetDeviceLocationNameWithTimeZoneRule"
+      },
+      {
+       "id": 8,
+       "name": "ParseTimeZoneBinary"
+      },
+      {
+       "id": 20,
+       "name": "GetDeviceLocationNameOperationEventReadableHandle"
+      }
+     ],
+     "undocumented": [],
+     "total": 14
+    },
+    {
+     "name": "time:u",
+     "family": "time",
+     "official": "nn::timesrv::detail::service::IStaticService",
+     "url": "https://switchbrew.org/wiki/Glue_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      20,
+      100,
+      300,
+      500,
+      501
+     ],
+     "constant": [
+      100,
+      500,
+      501
+     ],
+     "missing": [
+      {
+       "id": 30,
+       "name": "GetStandardNetworkClockOperationEventReadableHandle"
+      },
+      {
+       "id": 31,
+       "name": "GetEphemeralNetworkClockOperationEventReadableHandle"
+      },
+      {
+       "id": 50,
+       "name": "SetStandardSteadyClockInternalOffset"
+      },
+      {
+       "id": 51,
+       "name": "GetStandardSteadyClockRtcValue"
+      },
+      {
+       "id": 101,
+       "name": "SetStandardUserSystemClockAutomaticCorrectionEnabled"
+      },
+      {
+       "id": 102,
+       "name": "GetStandardUserSystemClockInitialYear"
+      },
+      {
+       "id": 200,
+       "name": "IsStandardNetworkSystemClockAccuracySufficient"
+      },
+      {
+       "id": 201,
+       "name": "GetStandardUserSystemClockAutomaticCorrectionUpdatedTime"
+      },
+      {
+       "id": 400,
+       "name": "GetClockSnapshot"
+      },
+      {
+       "id": 401,
+       "name": "GetClockSnapshotFromSystemClockContext"
+      },
+      {
+       "id": 600,
+       "name": "GetInitialLaunchEndTime"
+      },
+      {
+       "id": 601,
+       "name": "NotifyInitialLaunchSettingsDone"
+      }
+     ],
+     "undocumented": [],
+     "total": 23
+    },
+    {
+     "name": "vi/IApplicationDisplayService",
+     "family": "vi",
+     "official": "nn::visrv::sf::IApplicationDisplayService",
+     "url": "https://switchbrew.org/wiki/Display_services",
+     "referenced": true,
+     "implemented": [
+      100,
+      101,
+      102,
+      103,
+      1000,
+      1010,
+      1011,
+      1020,
+      1101,
+      1102,
+      2020,
+      2021,
+      2030,
+      2031,
+      2101,
+      2102,
+      5202,
+      5203
+     ],
+     "constant": [
+      1010,
+      1011,
+      1020,
+      1101,
+      2021,
+      2031,
+      2101
+     ],
+     "missing": [
+      {
+       "id": 2103,
+       "name": "Unknown"
+      },
+      {
+       "id": 2450,
+       "name": "GetIndirectLayerImageMap"
+      },
+      {
+       "id": 2451,
+       "name": "GetIndirectLayerImageCropMap"
+      },
+      {
+       "id": 2460,
+       "name": "GetIndirectLayerImageRequiredMemoryInfo"
+      }
+     ],
+     "undocumented": [],
+     "total": 22
+    },
+    {
+     "name": "vi/IGraphicBufferProducer",
+     "family": "vi",
+     "official": "android::IGraphicBufferProducer",
+     "url": "https://android.googlesource.com/platform/frameworks/native/+/refs/tags/android-5.0.0_r1/libs/gui/IGraphicBufferProducer.cpp",
+     "referenced": true,
+     "implemented": [
+      1,
+      2,
+      3,
+      7,
+      8,
+      9,
+      10,
+      11,
+      14
+     ],
+     "constant": [
+      2,
+      8,
+      11
+     ],
+     "missing": [
+      {
+       "id": 4,
+       "name": "DETACH_BUFFER"
+      },
+      {
+       "id": 5,
+       "name": "DETACH_NEXT_BUFFER"
+      },
+      {
+       "id": 6,
+       "name": "ATTACH_BUFFER"
+      },
+      {
+       "id": 12,
+       "name": "SET_SIDEBAND_STREAM"
+      },
+      {
+       "id": 13,
+       "name": "ALLOCATE_BUFFERS"
+      }
+     ],
+     "undocumented": [],
+     "total": 14
+    },
+    {
+     "name": "vi/IHOSBinderDriver",
+     "family": "vi",
+     "official": "nns::hosbinder::IHOSBinderDriver",
+     "url": "https://switchbrew.org/wiki/Nvnflinger_services",
+     "referenced": true,
+     "implemented": [
+      0,
+      1,
+      2,
+      3
+     ],
+     "constant": [
+      1
+     ],
+     "missing": [],
+     "undocumented": [],
+     "total": 4
+    },
+    {
+     "name": "vi/IManagerDisplayService",
+     "family": "vi",
+     "official": "nn::visrv::sf::IManagerDisplayService",
+     "url": "https://switchbrew.org/wiki/Display_services",
+     "referenced": true,
+     "implemented": [],
+     "constant": [],
+     "missing": [
+      {
+       "id": 200,
+       "name": "AllocateProcessHeapBlock"
+      },
+      {
+       "id": 201,
+       "name": "FreeProcessHeapBlock"
+      },
+      {
+       "id": 1102,
+       "name": "GetDisplayResolution"
+      },
+      {
+       "id": 2010,
+       "name": "CreateManagedLayer"
+      },
+      {
+       "id": 2011,
+       "name": "DestroyManagedLayer"
+      },
+      {
+       "id": 2012,
+       "name": "CreateStrayLayer"
+      },
+      {
+       "id": 2050,
+       "name": "CreateIndirectLayer"
+      },
+      {
+       "id": 2051,
+       "name": "DestroyIndirectLayer"
+      },
+      {
+       "id": 2052,
+       "name": "CreateIndirectProducerEndPoint"
+      },
+      {
+       "id": 2053,
+       "name": "DestroyIndirectProducerEndPoint"
+      },
+      {
+       "id": 2054,
+       "name": "CreateIndirectConsumerEndPoint"
+      },
+      {
+       "id": 2055,
+       "name": "DestroyIndirectConsumerEndPoint"
+      },
+      {
+       "id": 2060,
+       "name": "CreateWatermarkCompositor"
+      },
+      {
+       "id": 2062,
+       "name": "SetWatermarkText"
+      },
+      {
+       "id": 2063,
+       "name": "SetWatermarkLayerStacks"
+      },
+      {
+       "id": 2300,
+       "name": "AcquireLayerTexturePresentingEvent"
+      },
+      {
+       "id": 2301,
+       "name": "ReleaseLayerTexturePresentingEvent"
+      },
+      {
+       "id": 2302,
+       "name": "GetDisplayHotplugEvent"
+      },
+      {
+       "id": 2303,
+       "name": "GetDisplayModeChangedEvent"
+      },
+      {
+       "id": 2402,
+       "name": "GetDisplayHotplugState"
+      },
+      {
+       "id": 2501,
+       "name": "GetCompositorErrorInfo"
+      },
+      {
+       "id": 2601,
+       "name": "GetDisplayErrorEvent"
+      },
+      {
+       "id": 2701,
+       "name": "GetDisplayFatalErrorEvent"
+      },
+      {
+       "id": 4201,
+       "name": "SetDisplayAlpha"
+      },
+      {
+       "id": 4203,
+       "name": "SetDisplayLayerStack"
+      },
+      {
+       "id": 4205,
+       "name": "SetDisplayPowerState"
+      },
+      {
+       "id": 4206,
+       "name": "SetDefaultDisplay"
+      },
+      {
+       "id": 4207,
+       "name": "ResetDisplayPanel"
+      },
+      {
+       "id": 4208,
+       "name": "SetDisplayFatalErrorEnabled"
+      },
+      {
+       "id": 4209,
+       "name": "IsDisplayPanelOn"
+      },
+      {
+       "id": 4300,
+       "name": "GetInternalPanelId"
+      },
+      {
+       "id": 6000,
+       "name": "AddToLayerStack"
+      },
+      {
+       "id": 6001,
+       "name": "RemoveFromLayerStack"
+      },
+      {
+       "id": 6002,
+       "name": "SetLayerVisibility"
+      },
+      {
+       "id": 6003,
+       "name": "SetLayerConfig"
+      },
+      {
+       "id": 6004,
+       "name": "AttachLayerPresentationTracer"
+      },
+      {
+       "id": 6005,
+       "name": "DetachLayerPresentationTracer"
+      },
+      {
+       "id": 6006,
+       "name": "StartLayerPresentationRecording"
+      },
+      {
+       "id": 6007,
+       "name": "StopLayerPresentationRecording"
+      },
+      {
+       "id": 6008,
+       "name": "StartLayerPresentationFenceWait"
+      },
+      {
+       "id": 6009,
+       "name": "StopLayerPresentationFenceWait"
+      },
+      {
+       "id": 6010,
+       "name": "GetLayerPresentationAllFencesExpiredEvent"
+      },
+      {
+       "id": 6011,
+       "name": "EnableLayerAutoClearTransitionBuffer"
+      },
+      {
+       "id": 6012,
+       "name": "DisableLayerAutoClearTransitionBuffer"
+      },
+      {
+       "id": 6013,
+       "name": "SetLayerOpacity"
+      },
+      {
+       "id": 6014,
+       "name": "AttachLayerWatermarkCompositor"
+      },
+      {
+       "id": 6015,
+       "name": "DetachLayerWatermarkCompositor"
+      },
+      {
+       "id": 7000,
+       "name": "SetContentVisibility"
+      },
+      {
+       "id": 8000,
+       "name": "SetConductorLayer"
+      },
+      {
+       "id": 8001,
+       "name": "SetTimestampTracking"
+      },
+      {
+       "id": 8100,
+       "name": "SetIndirectProducerFlipOffset"
+      },
+      {
+       "id": 8200,
+       "name": "CreateSharedBufferStaticStorage"
+      },
+      {
+       "id": 8201,
+       "name": "CreateSharedBufferTransferMemory"
+      },
+      {
+       "id": 8202,
+       "name": "DestroySharedBuffer"
+      },
+      {
+       "id": 8203,
+       "name": "BindSharedLowLevelLayerToManagedLayer"
+      },
+      {
+       "id": 8204,
+       "name": "BindSharedLowLevelLayerToIndirectLayer"
+      },
+      {
+       "id": 8207,
+       "name": "UnbindSharedLowLevelLayer"
+      },
+      {
+       "id": 8208,
+       "name": "ConnectSharedLowLevelLayerToSharedBuffer"
+      },
+      {
+       "id": 8209,
+       "name": "DisconnectSharedLowLevelLayerFromSharedBuffer"
+      },
+      {
+       "id": 8210,
+       "name": "CreateSharedLayer"
+      },
+      {
+       "id": 8211,
+       "name": "DestroySharedLayer"
+      },
+      {
+       "id": 8216,
+       "name": "AttachSharedLayerToLowLevelLayer"
+      },
+      {
+       "id": 8217,
+       "name": "ForceDetachSharedLayerFromLowLevelLayer"
+      },
+      {
+       "id": 8218,
+       "name": "StartDetachSharedLayerFromLowLevelLayer"
+      },
+      {
+       "id": 8219,
+       "name": "FinishDetachSharedLayerFromLowLevelLayer"
+      },
+      {
+       "id": 8220,
+       "name": "GetSharedLayerDetachReadyEvent"
+      },
+      {
+       "id": 8221,
+       "name": "GetSharedLowLevelLayerSynchronizedEvent"
+      },
+      {
+       "id": 8222,
+       "name": "CheckSharedLowLevelLayerSynchronized"
+      },
+      {
+       "id": 8223,
+       "name": "RegisterSharedBufferImporterAruid"
+      },
+      {
+       "id": 8224,
+       "name": "UnregisterSharedBufferImporterAruid"
+      },
+      {
+       "id": 8227,
+       "name": "CreateSharedBufferProcessHeap"
+      },
+      {
+       "id": 8228,
+       "name": "GetSharedLayerLayerStacks"
+      },
+      {
+       "id": 8229,
+       "name": "SetSharedLayerLayerStacks"
+      },
+      {
+       "id": 8291,
+       "name": "PresentDetachedSharedFrameBufferToLowLevelLayer"
+      },
+      {
+       "id": 8292,
+       "name": "FillDetachedSharedFrameBufferColor"
+      },
+      {
+       "id": 8293,
+       "name": "GetDetachedSharedFrameBufferImage"
+      },
+      {
+       "id": 8294,
+       "name": "SetDetachedSharedFrameBufferImage"
+      },
+      {
+       "id": 8295,
+       "name": "CopyDetachedSharedFrameBufferImage"
+      },
+      {
+       "id": 8296,
+       "name": "SetDetachedSharedFrameBufferSubImage"
+      },
+      {
+       "id": 8297,
+       "name": "GetSharedFrameBufferContentParameter"
+      },
+      {
+       "id": 8298,
+       "name": "ExpandStartupLogoOnSharedFrameBuffer"
+      }
+     ],
+     "undocumented": [],
+     "total": 81
+    },
+    {
+     "name": "vi/ISystemDisplayService",
+     "family": "vi",
+     "official": "nn::visrv::sf::ISystemDisplayService",
+     "url": "https://switchbrew.org/wiki/Display_services",
+     "referenced": true,
+     "implemented": [],
+     "constant": [],
+     "missing": [
+      {
+       "id": 1200,
+       "name": "GetZOrderCountMin"
+      },
+      {
+       "id": 1202,
+       "name": "GetZOrderCountMax"
+      },
+      {
+       "id": 1203,
+       "name": "GetDisplayLogicalResolution"
+      },
+      {
+       "id": 1204,
+       "name": "SetDisplayMagnification"
+      },
+      {
+       "id": 2201,
+       "name": "SetLayerPosition"
+      },
+      {
+       "id": 2203,
+       "name": "SetLayerSize"
+      },
+      {
+       "id": 2204,
+       "name": "GetLayerZ"
+      },
+      {
+       "id": 2205,
+       "name": "SetLayerZ"
+      },
+      {
+       "id": 2207,
+       "name": "SetLayerVisibility"
+      },
+      {
+       "id": 2209,
+       "name": "SetLayerAlpha"
+      },
+      {
+       "id": 2210,
+       "name": "SetLayerPositionAndSize"
+      },
+      {
+       "id": 2312,
+       "name": "CreateStrayLayer"
+      },
+      {
+       "id": 2400,
+       "name": "OpenIndirectLayer"
+      },
+      {
+       "id": 2401,
+       "name": "CloseIndirectLayer"
+      },
+      {
+       "id": 2402,
+       "name": "FlipIndirectLayer"
+      },
+      {
+       "id": 3000,
+       "name": "ListDisplayModes"
+      },
+      {
+       "id": 3001,
+       "name": "ListDisplayRgbRanges"
+      },
+      {
+       "id": 3002,
+       "name": "ListDisplayContentTypes"
+      },
+      {
+       "id": 3200,
+       "name": "GetDisplayMode"
+      },
+      {
+       "id": 3201,
+       "name": "SetDisplayMode"
+      },
+      {
+       "id": 3202,
+       "name": "GetDisplayUnderscan"
+      },
+      {
+       "id": 3203,
+       "name": "SetDisplayUnderscan"
+      },
+      {
+       "id": 3204,
+       "name": "GetDisplayContentType"
+      },
+      {
+       "id": 3205,
+       "name": "SetDisplayContentType"
+      },
+      {
+       "id": 3206,
+       "name": "GetDisplayRgbRange"
+      },
+      {
+       "id": 3207,
+       "name": "SetDisplayRgbRange"
+      },
+      {
+       "id": 3208,
+       "name": "GetDisplayCmuMode"
+      },
+      {
+       "id": 3209,
+       "name": "SetDisplayCmuMode"
+      },
+      {
+       "id": 3210,
+       "name": "GetDisplayContrastRatio"
+      },
+      {
+       "id": 3211,
+       "name": "SetDisplayContrastRatio"
+      },
+      {
+       "id": 3214,
+       "name": "GetDisplayGamma"
+      },
+      {
+       "id": 3215,
+       "name": "SetDisplayGamma"
+      },
+      {
+       "id": 3216,
+       "name": "GetDisplayCmuLuma"
+      },
+      {
+       "id": 3217,
+       "name": "SetDisplayCmuLuma"
+      },
+      {
+       "id": 3218,
+       "name": "SetDisplayCrcMode"
+      },
+      {
+       "id": 6013,
+       "name": "GetLayerPresentationSubmissionTimestamps"
+      },
+      {
+       "id": 8225,
+       "name": "GetSharedBufferMemoryHandleId"
+      },
+      {
+       "id": 8250,
+       "name": "OpenSharedLayer"
+      },
+      {
+       "id": 8251,
+       "name": "CloseSharedLayer"
+      },
+      {
+       "id": 8252,
+       "name": "ConnectSharedLayer"
+      },
+      {
+       "id": 8253,
+       "name": "DisconnectSharedLayer"
+      },
+      {
+       "id": 8254,
+       "name": "AcquireSharedFrameBuffer"
+      },
+      {
+       "id": 8255,
+       "name": "PresentSharedFrameBuffer"
+      },
+      {
+       "id": 8256,
+       "name": "GetSharedFrameBufferAcquirableEvent"
+      },
+      {
+       "id": 8257,
+       "name": "FillSharedFrameBufferColor"
+      },
+      {
+       "id": 8258,
+       "name": "CancelSharedFrameBuffer"
+      },
+      {
+       "id": 9000,
+       "name": "GetDp2hdmiController"
+      }
+     ],
+     "undocumented": [],
+     "total": 47
+    },
+    {
+     "name": "vi:m",
+     "family": "vi",
+     "official": "nn::visrv::sf::IManagerRootService",
+     "url": "https://switchbrew.org/wiki/Display_services",
+     "referenced": true,
+     "implemented": [
+      2
+     ],
+     "constant": [],
+     "missing": [
+      {
+       "id": 3,
+       "name": "GetDisplayServiceWithProxyNameExchange"
+      },
+      {
+       "id": 100,
+       "name": "PrepareFatal"
+      },
+      {
+       "id": 101,
+       "name": "ShowFatal"
+      },
+      {
+       "id": 102,
+       "name": "DrawFatalRectangle"
+      },
+      {
+       "id": 103,
+       "name": "DrawFatalText32"
+      }
+     ],
+     "undocumented": [],
+     "total": 6
+    },
+    {
+     "name": "vi:s",
+     "family": "vi",
+     "official": "nn::visrv::sf::ISystemRootService",
+     "url": "https://switchbrew.org/wiki/Display_services",
+     "referenced": true,
+     "implemented": [
+      1
+     ],
+     "constant": [],
+     "missing": [
+      {
+       "id": 3,
+       "name": "GetDisplayServiceWithProxyNameExchange"
+      }
+     ],
+     "undocumented": [],
+     "total": 2
+    },
+    {
+     "name": "vi:u",
+     "family": "vi",
+     "official": "nn::visrv::sf::IApplicationRootService",
+     "url": "https://switchbrew.org/wiki/Display_services",
+     "referenced": true,
+     "implemented": [
+      0
+     ],
+     "constant": [],
+     "missing": [
+      {
+       "id": 1,
+       "name": "GetDisplayServiceWithProxyNameExchange"
+      }
+     ],
+     "undocumented": [],
+     "total": 2
+    }
+   ]
+  },
+  {
+   "id": "svc",
+   "title": "SVCs do kernel",
+   "unit": "SVCs",
+   "implemented": 45,
+   "total": 124,
+   "groups": [
+    {
+     "name": "SVCs",
+     "family": "SVC",
+     "official": "https://switchbrew.org/wiki/SVC",
+     "url": "https://switchbrew.org/wiki/SVC",
+     "referenced": true,
+     "implemented": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      33,
+      34,
+      36,
+      37,
+      38,
+      39,
+      41,
+      44,
+      45,
+      50,
+      51,
+      52,
+      53,
+      69
+     ],
+     "constant": [
+      3
+     ],
+     "missing": [
+      {
+       "id": 32,
+       "name": "SendSyncRequestLight"
+      },
+      {
+       "id": 35,
+       "name": "SendAsyncRequestWithUserBuffer"
+      },
+      {
+       "id": 40,
+       "name": "ReturnFromException"
+      },
+      {
+       "id": 42,
+       "name": "FlushEntireDataCache"
+      },
+      {
+       "id": 43,
+       "name": "FlushDataCache"
+      },
+      {
+       "id": 46,
+       "name": "GetDebugFutureThreadInfo"
+      },
+      {
+       "id": 47,
+       "name": "GetLastThreadInfo"
+      },
+      {
+       "id": 48,
+       "name": "GetResourceLimitLimitValue"
+      },
+      {
+       "id": 49,
+       "name": "GetResourceLimitCurrentValue"
+      },
+      {
+       "id": 54,
+       "name": "SynchronizePreemptionState"
+      },
+      {
+       "id": 55,
+       "name": "GetResourceLimitPeakValue"
+      },
+      {
+       "id": 57,
+       "name": "CreateIoPool"
+      },
+      {
+       "id": 58,
+       "name": "CreateIoRegion"
+      },
+      {
+       "id": 60,
+       "name": "KernelDebug"
+      },
+      {
+       "id": 61,
+       "name": "ChangeKernelTraceState"
+      },
+      {
+       "id": 64,
+       "name": "CreateSession"
+      },
+      {
+       "id": 65,
+       "name": "AcceptSession"
+      },
+      {
+       "id": 66,
+       "name": "ReplyAndReceiveLight"
+      },
+      {
+       "id": 67,
+       "name": "ReplyAndReceive"
+      },
+      {
+       "id": 68,
+       "name": "ReplyAndReceiveWithUserBuffer"
+      },
+      {
+       "id": 70,
+       "name": "MapIoRegion"
+      },
+      {
+       "id": 71,
+       "name": "UnmapIoRegion"
+      },
+      {
+       "id": 72,
+       "name": "MapPhysicalMemoryUnsafe"
+      },
+      {
+       "id": 73,
+       "name": "UnmapPhysicalMemoryUnsafe"
+      },
+      {
+       "id": 74,
+       "name": "SetUnsafeLimit"
+      },
+      {
+       "id": 75,
+       "name": "CreateCodeMemory"
+      },
+      {
+       "id": 76,
+       "name": "ControlCodeMemory"
+      },
+      {
+       "id": 77,
+       "name": "SleepSystem"
+      },
+      {
+       "id": 78,
+       "name": "ReadWriteRegister"
+      },
+      {
+       "id": 79,
+       "name": "SetProcessActivity"
+      },
+      {
+       "id": 80,
+       "name": "CreateSharedMemory"
+      },
+      {
+       "id": 81,
+       "name": "MapTransferMemory"
+      },
+      {
+       "id": 82,
+       "name": "UnmapTransferMemory"
+      },
+      {
+       "id": 83,
+       "name": "CreateInterruptEvent"
+      },
+      {
+       "id": 84,
+       "name": "QueryPhysicalAddress"
+      },
+      {
+       "id": 85,
+       "name": "QueryMemoryMapping"
+      },
+      {
+       "id": 86,
+       "name": "CreateDeviceAddressSpace"
+      },
+      {
+       "id": 87,
+       "name": "AttachDeviceAddressSpace"
+      },
+      {
+       "id": 88,
+       "name": "DetachDeviceAddressSpace"
+      },
+      {
+       "id": 89,
+       "name": "MapDeviceAddressSpaceByForce"
+      },
+      {
+       "id": 90,
+       "name": "MapDeviceAddressSpaceAligned"
+      },
+      {
+       "id": 91,
+       "name": "MapDeviceAddressSpace"
+      },
+      {
+       "id": 92,
+       "name": "UnmapDeviceAddressSpace"
+      },
+      {
+       "id": 93,
+       "name": "InvalidateProcessDataCache"
+      },
+      {
+       "id": 94,
+       "name": "StoreProcessDataCache"
+      },
+      {
+       "id": 95,
+       "name": "FlushProcessDataCache"
+      },
+      {
+       "id": 96,
+       "name": "DebugActiveProcess"
+      },
+      {
+       "id": 97,
+       "name": "BreakDebugProcess"
+      },
+      {
+       "id": 98,
+       "name": "TerminateDebugProcess"
+      },
+      {
+       "id": 99,
+       "name": "GetDebugEvent"
+      },
+      {
+       "id": 100,
+       "name": "ContinueDebugEvent"
+      },
+      {
+       "id": 101,
+       "name": "GetProcessList"
+      },
+      {
+       "id": 102,
+       "name": "GetThreadList"
+      },
+      {
+       "id": 103,
+       "name": "GetDebugThreadContext"
+      },
+      {
+       "id": 104,
+       "name": "SetDebugThreadContext"
+      },
+      {
+       "id": 105,
+       "name": "QueryDebugProcessMemory"
+      },
+      {
+       "id": 106,
+       "name": "ReadDebugProcessMemory"
+      },
+      {
+       "id": 107,
+       "name": "WriteDebugProcessMemory"
+      },
+      {
+       "id": 108,
+       "name": "SetHardwareBreakPoint"
+      },
+      {
+       "id": 109,
+       "name": "GetDebugThreadParam"
+      },
+      {
+       "id": 111,
+       "name": "GetSystemInfo"
+      },
+      {
+       "id": 112,
+       "name": "CreatePort"
+      },
+      {
+       "id": 113,
+       "name": "ManageNamedPort"
+      },
+      {
+       "id": 114,
+       "name": "ConnectToPort"
+      },
+      {
+       "id": 115,
+       "name": "SetProcessMemoryPermission"
+      },
+      {
+       "id": 116,
+       "name": "MapProcessMemory"
+      },
+      {
+       "id": 117,
+       "name": "UnmapProcessMemory"
+      },
+      {
+       "id": 118,
+       "name": "QueryProcessMemory"
+      },
+      {
+       "id": 119,
+       "name": "MapProcessCodeMemory"
+      },
+      {
+       "id": 120,
+       "name": "UnmapProcessCodeMemory"
+      },
+      {
+       "id": 121,
+       "name": "CreateProcess"
+      },
+      {
+       "id": 122,
+       "name": "StartProcess"
+      },
+      {
+       "id": 123,
+       "name": "TerminateProcess"
+      },
+      {
+       "id": 124,
+       "name": "GetProcessInfo"
+      },
+      {
+       "id": 125,
+       "name": "CreateResourceLimit"
+      },
+      {
+       "id": 126,
+       "name": "SetResourceLimitLimitValue"
+      },
+      {
+       "id": 127,
+       "name": "CallSecureMonitor"
+      },
+      {
+       "id": 144,
+       "name": "MapInsecurePhysicalMemory"
+      },
+      {
+       "id": 145,
+       "name": "UnmapInsecurePhysicalMemory"
+      }
+     ],
+     "undocumented": [],
+     "total": 124
+    }
+   ]
+  },
+  {
+   "id": "ioctl",
+   "title": "Driver da GPU (nvdrv)",
+   "unit": "ioctls",
+   "implemented": 58,
+   "total": 138,
+   "groups": [
+    {
+     "name": "/dev/nvhost-as-gpu",
+     "family": "as-gpu",
+     "official": "https://switchbrew.org/wiki/NV_services",
+     "url": "https://switchbrew.org/wiki/NV_services",
+     "referenced": true,
+     "implemented": [
+      1074020609,
+      1076379913,
+      3221242132,
+      3221766405,
+      3222290691,
+      3222814978,
+      3223863558,
+      3225436424
+     ],
+     "constant": [
+      1074020609,
+      1076379913
+     ],
+     "missing": [
+      {
+       "id": 1074807047,
+       "name": "NVGPU_AS_IOCTL_ALLOC_AS"
+      },
+      {
+       "id": 3222814980,
+       "name": "NVGPU_AS_IOCTL_MAP_BUFFER"
+      },
+      {
+       "id": 3224912138,
+       "name": "NVGPU_AS_IOCTL_MAP_BUFFER_EX2"
+      }
+     ],
+     "undocumented": [],
+     "total": 11
+    },
+    {
+     "name": "/dev/nvhost-gpu",
+     "family": "canal",
+     "official": "https://switchbrew.org/wiki/NV_services  (section \"Channels\" > \"Ioctls\")",
+     "url": "https://switchbrew.org/wiki/NV_services",
+     "referenced": true,
+     "implemented": [
+      1074022401,
+      1074022403,
+      1074022413,
+      2155890710,
+      3221243912,
+      3221506077,
+      3222292489,
+      3222292491,
+      3222816780,
+      3222816795,
+      3223341082
+     ],
+     "constant": [
+      1074022401,
+      1074022403,
+      1074022413,
+      2155890710,
+      3221506077,
+      3222292491,
+      3222816780
+     ],
+     "missing": [
+      {
+       "id": 19,
+       "name": "NVHOST_IOCTL_CHANNEL_SET_TIMEOUT_EX"
+      },
+      {
+       "id": 18446,
+       "name": "NVGPU_IOCTL_CHANNEL_ENABLE"
+      },
+      {
+       "id": 18447,
+       "name": "NVGPU_IOCTL_CHANNEL_DISABLE"
+      },
+      {
+       "id": 18448,
+       "name": "NVGPU_IOCTL_CHANNEL_PREEMPT"
+      },
+      {
+       "id": 18449,
+       "name": "NVGPU_IOCTL_CHANNEL_FORCE_RESET"
+      },
+      {
+       "id": 1074003975,
+       "name": "NVHOST_IOCTL_CHANNEL_SET_SUBMIT_TIMEOUT"
+      },
+      {
+       "id": 1074266120,
+       "name": "NVHOST_IOCTL_CHANNEL_SET_CLK_RATE"
+      },
+      {
+       "id": 1074284308,
+       "name": "NVGPU_IOCTL_CHANNEL_SET_USER_DATA"
+      },
+      {
+       "id": 1074284549,
+       "name": "NVGPU_IOCTL_CHANNEL_ALLOC_GPFIFO"
+      },
+      {
+       "id": 1074284554,
+       "name": "NVHOST_IOCTL_CHANNEL_FREE_OBJ_CTX"
+      },
+      {
+       "id": 1074284562,
+       "name": "NVGPU_IOCTL_CHANNEL_EVENT_ID_CONTROL"
+      },
+      {
+       "id": 1075333126,
+       "name": "NVGPU_IOCTL_CHANNEL_WAIT"
+      },
+      {
+       "id": 1075857432,
+       "name": "NVGPU_IOCTL_CHANNEL_ALLOC_GPFIFO_EX"
+      },
+      {
+       "id": 2148026133,
+       "name": "NVGPU_IOCTL_CHANNEL_GET_USER_DATA"
+      },
+      {
+       "id": 3221225473,
+       "name": "NVHOST_IOCTL_CHANNEL_SUBMIT (0xC0??0001)"
+      },
+      {
+       "id": 3221225481,
+       "name": "NVHOST_IOCTL_CHANNEL_MAP_CMD_BUFFER (0xC0??0009)"
+      },
+      {
+       "id": 3221225482,
+       "name": "NVHOST_IOCTL_CHANNEL_UNMAP_CMD_BUFFER (0xC0??000A)"
+      },
+      {
+       "id": 3221225508,
+       "name": "NVHOST_IOCTL_CHANNEL_SUBMIT_EX (0xC0??0024)"
+      },
+      {
+       "id": 3221225509,
+       "name": "NVHOST_IOCTL_CHANNEL_MAP_CMD_BUFFER_EX (0xC0??0025)"
+      },
+      {
+       "id": 3221225510,
+       "name": "NVHOST_IOCTL_CHANNEL_UNMAP_CMD_BUFFER_EX (0xC0??0026)"
+      },
+      {
+       "id": 3221243929,
+       "name": "NVGPU_IOCTL_CHANNEL_SUBMIT_GPFIFO_RETRY (0xC0??4819)"
+      },
+      {
+       "id": 3221506055,
+       "name": "NVGPU_IOCTL_CHANNEL_CYCLE_STATS"
+      },
+      {
+       "id": 3221749762,
+       "name": "NVHOST_IOCTL_CHANNEL_GET_SYNCPOINT"
+      },
+      {
+       "id": 3221749763,
+       "name": "NVHOST_IOCTL_CHANNEL_GET_WAITBASE"
+      },
+      {
+       "id": 3221749764,
+       "name": "NVHOST_IOCTL_CHANNEL_GET_MODMUTEX"
+      },
+      {
+       "id": 3221749780,
+       "name": "NVHOST_IOCTL_CHANNEL_GET_CLK_RATE"
+      },
+      {
+       "id": 3221749795,
+       "name": "NVHOST_IOCTL_CHANNEL_GET_CLK_RATE"
+      },
+      {
+       "id": 3222292499,
+       "name": "NVGPU_IOCTL_CHANNEL_CYCLE_STATS_SNAPSHOT"
+      },
+      {
+       "id": 3222292503,
+       "name": "NVGPU_IOCTL_CHANNEL_GET_ERROR_NOTIFICATION"
+      },
+      {
+       "id": 3222816796,
+       "name": "NVGPU_IOCTL_CHANNEL_SUBMIT_GPFIFO2_RETRY"
+      }
+     ],
+     "undocumented": [
+      20
+     ],
+     "total": 41
+    },
+    {
+     "name": "/dev/nvhost-ctrl",
+     "family": "ctrl",
+     "official": "https://switchbrew.org/wiki/NV_services",
+     "url": "https://switchbrew.org/wiki/NV_services",
+     "referenced": true,
+     "implemented": [
+      1074003989,
+      1074266145,
+      3221487647,
+      3221487648,
+      3221749780,
+      3222011926,
+      3222274073,
+      3222274077,
+      3222274078,
+      3246587931
+     ],
+     "constant": [
+      1074266145,
+      3221487647,
+      3221487648
+     ],
+     "missing": [
+      {
+       "id": 1074266135,
+       "name": "NVHOST_IOCTL_CTRL_MODULE_MUTEX"
+      },
+      {
+       "id": 3221487644,
+       "name": "NVHOST_IOCTL_CTRL_SYNCPT_CLEAR_EVENT_WAIT"
+      },
+      {
+       "id": 3221487650,
+       "name": "NVHOST_IOCTL_CTRL_SYNCPT_GET_SHIFT"
+      },
+      {
+       "id": 3221749786,
+       "name": "NVHOST_IOCTL_CTRL_SYNCPT_READ_MAX"
+      },
+      {
+       "id": 3222798360,
+       "name": "NVHOST_IOCTL_CTRL_MODULE_REGRDWR"
+      }
+     ],
+     "undocumented": [],
+     "total": 15
+    },
+    {
+     "name": "/dev/nvhost-ctrl-gpu",
+     "family": "ctrl-gpu",
+     "official": "https://switchbrew.org/wiki/NV_services",
+     "url": "https://switchbrew.org/wiki/NV_services",
+     "referenced": true,
+     "implemented": [
+      1074284295,
+      1076643587,
+      2147763969,
+      2148026130,
+      2148026132,
+      2150123266,
+      3221505811,
+      3222292252,
+      3222816518,
+      3224651524,
+      3232777989
+     ],
+     "constant": [
+      1074284295,
+      1076643587,
+      3224651524
+     ],
+     "missing": [
+      {
+       "id": 1074284301,
+       "name": "NVGPU_GPU_IOCTL_INVAL_ICACHE"
+      },
+      {
+       "id": 1074284302,
+       "name": "NVGPU_GPU_IOCTL_SET_MMU_DEBUG_MODE"
+      },
+      {
+       "id": 1074284310,
+       "name": "NVGPU_GPU_IOCTL_SET_CG_CONTROLS"
+      },
+      {
+       "id": 1074284312,
+       "name": "NVGPU_GPU_IOCTL_SET_PG_CONTROLS"
+      },
+      {
+       "id": 1074808591,
+       "name": "NVGPU_GPU_IOCTL_SET_SM_DEBUG_MODE"
+      },
+      {
+       "id": 2147763989,
+       "name": "NVGPU_GPU_IOCTL_PMU_GET_GPU_LOAD"
+      },
+      {
+       "id": 2148026129,
+       "name": "NVGPU_GPU_IOCTL_GET_TPC_EXCEPTION_EN_STATUS"
+      },
+      {
+       "id": 2149074714,
+       "name": "NVGPU_GPU_IOCTL_PMU_GET_ELPG_RESIDENCY_GATING"
+      },
+      {
+       "id": 3221767952,
+       "name": "NVGPU_GPU_IOCTL_WAIT_FOR_PAUSE"
+      },
+      {
+       "id": 3221767959,
+       "name": "NVGPU_GPU_IOCTL_GET_CG_CONTROLS"
+      },
+      {
+       "id": 3221767961,
+       "name": "NVGPU_GPU_IOCTL_GET_PG_CONTROLS"
+      },
+      {
+       "id": 3221767963,
+       "name": "NVGPU_GPU_IOCTL_GET_ERROR_CHANNEL_USER_DATA"
+      },
+      {
+       "id": 3224389392,
+       "name": "NVGPU_GPU_IOCTL_WAIT_FOR_PAUSE"
+      },
+      {
+       "id": 3238545181,
+       "name": "NVGPU_GPU_IOCTL_GET_CPU_TIME_CORRELATION_INFO"
+      }
+     ],
+     "undocumented": [
+      11
+     ],
+     "total": 25
+    },
+    {
+     "name": "/dev/nvhost-nvdec",
+     "family": "nvdec",
+     "official": "https://switchbrew.org/wiki/NV_services  (section \"Channels\" > \"Ioctls\": the host1x channel ioctls)",
+     "url": "https://switchbrew.org/wiki/NV_services",
+     "referenced": true,
+     "implemented": [
+      1074003975,
+      3221225473,
+      3221225481,
+      3221225482,
+      3221749762,
+      3221749763
+     ],
+     "constant": [
+      1074003975,
+      3221225482
+     ],
+     "missing": [
+      {
+       "id": 19,
+       "name": "NVHOST_IOCTL_CHANNEL_SET_TIMEOUT_EX"
+      },
+      {
+       "id": 1074266120,
+       "name": "NVHOST_IOCTL_CHANNEL_SET_CLK_RATE"
+      },
+      {
+       "id": 3221225508,
+       "name": "NVHOST_IOCTL_CHANNEL_SUBMIT_EX (0xC0??0024)"
+      },
+      {
+       "id": 3221225509,
+       "name": "NVHOST_IOCTL_CHANNEL_MAP_CMD_BUFFER_EX (0xC0??0025)"
+      },
+      {
+       "id": 3221225510,
+       "name": "NVHOST_IOCTL_CHANNEL_UNMAP_CMD_BUFFER_EX (0xC0??0026)"
+      },
+      {
+       "id": 3221749764,
+       "name": "NVHOST_IOCTL_CHANNEL_GET_MODMUTEX"
+      },
+      {
+       "id": 3221749795,
+       "name": "NVHOST_IOCTL_CHANNEL_GET_CLK_RATE"
+      }
+     ],
+     "undocumented": [],
+     "total": 13
+    },
+    {
+     "name": "/dev/nvmap",
+     "family": "nvmap",
+     "official": "https://switchbrew.org/wiki/NV_services",
+     "url": "https://switchbrew.org/wiki/NV_services",
+     "referenced": true,
+     "implemented": [
+      3221750017,
+      3221750019,
+      3221750030,
+      3222012169,
+      3222798597,
+      3223322884
+     ],
+     "constant": [],
+     "missing": [
+      {
+       "id": 258,
+       "name": "NVMAP_IOC_CLAIM"
+      },
+      {
+       "id": 273,
+       "name": "NVMAP_IOC_RESERVE"
+      },
+      {
+       "id": 1074004240,
+       "name": "NVMAP_IOC_SET_ALLOCATION_TAG_LABEL"
+      },
+      {
+       "id": 1074790674,
+       "name": "NVMAP_IOC_EXPORT_FOR_ARUID"
+      },
+      {
+       "id": 1074790675,
+       "name": "NVMAP_IOC_IS_OWNED_BY_ARUID"
+      },
+      {
+       "id": 1074790676,
+       "name": "NVMAP_IOC_REMOVE_EXPORT_FOR_ARUID"
+      },
+      {
+       "id": 3221487885,
+       "name": "NVMAP_IOC_GET_IVC_ID"
+      },
+      {
+       "id": 3221487887,
+       "name": "NVMAP_IOC_FROM_IVC_ID"
+      },
+      {
+       "id": 3221750028,
+       "name": "NVMAP_IOC_CACHE"
+      },
+      {
+       "id": 3222274314,
+       "name": "NVMAP_IOC_PIN_MULT"
+      },
+      {
+       "id": 3222274315,
+       "name": "NVMAP_IOC_UNPIN_MULT"
+      },
+      {
+       "id": 3223847174,
+       "name": "NVMAP_IOC_MMAP"
+      },
+      {
+       "id": 3223847175,
+       "name": "NVMAP_IOC_WRITE"
+      },
+      {
+       "id": 3223847176,
+       "name": "NVMAP_IOC_READ"
+      }
+     ],
+     "undocumented": [],
+     "total": 20
+    },
+    {
+     "name": "/dev/nvhost-vic",
+     "family": "vic",
+     "official": "https://switchbrew.org/wiki/NV_services  (section \"Channels\" > \"Ioctls\": the host1x channel ioctls)",
+     "url": "https://switchbrew.org/wiki/NV_services",
+     "referenced": true,
+     "implemented": [
+      1074003975,
+      3221225473,
+      3221225481,
+      3221225482,
+      3221749762,
+      3221749763
+     ],
+     "constant": [
+      1074003975,
+      3221225482
+     ],
+     "missing": [
+      {
+       "id": 19,
+       "name": "NVHOST_IOCTL_CHANNEL_SET_TIMEOUT_EX"
+      },
+      {
+       "id": 1074266120,
+       "name": "NVHOST_IOCTL_CHANNEL_SET_CLK_RATE"
+      },
+      {
+       "id": 3221225508,
+       "name": "NVHOST_IOCTL_CHANNEL_SUBMIT_EX (0xC0??0024)"
+      },
+      {
+       "id": 3221225509,
+       "name": "NVHOST_IOCTL_CHANNEL_MAP_CMD_BUFFER_EX (0xC0??0025)"
+      },
+      {
+       "id": 3221225510,
+       "name": "NVHOST_IOCTL_CHANNEL_UNMAP_CMD_BUFFER_EX (0xC0??0026)"
+      },
+      {
+       "id": 3221749764,
+       "name": "NVHOST_IOCTL_CHANNEL_GET_MODMUTEX"
+      },
+      {
+       "id": 3221749795,
+       "name": "NVHOST_IOCTL_CHANNEL_GET_CLK_RATE"
+      }
+     ],
+     "undocumented": [],
+     "total": 13
+    }
+   ]
+  },
+  {
+   "id": "shaders",
+   "title": "Instruções de shader Maxwell",
+   "unit": "mnemônicos",
+   "implemented": 79,
+   "total": 146,
+   "groups": [
+    {
+     "name": "ponto flutuante",
+     "family": "ponto flutuante",
+     "official": "",
+     "url": "",
+     "referenced": true,
+     "implemented": [
+      "fadd",
+      "fadd32i",
+      "fcmp",
+      "ffma",
+      "ffma32i",
+      "fmnmx",
+      "fmul",
+      "fmul32i",
+      "fset",
+      "fsetp",
+      "fswzadd",
+      "mufu",
+      "rro"
+     ],
+     "constant": [],
+     "missing": [
+      {
+       "id": "dadd",
+       "name": ""
+      },
+      {
+       "id": "dfma",
+       "name": ""
+      },
+      {
+       "id": "dmnmx",
+       "name": ""
+      },
+      {
+       "id": "dmul",
+       "name": ""
+      },
+      {
+       "id": "dset",
+       "name": ""
+      },
+      {
+       "id": "dsetp",
+       "name": ""
+      },
+      {
+       "id": "fchk",
+       "name": ""
+      }
+     ],
+     "undocumented": [],
+     "total": 20
+    },
+    {
+     "name": "meia precisão",
+     "family": "meia precisão",
+     "official": "",
+     "url": "",
+     "referenced": true,
+     "implemented": [
+      "hadd2",
+      "hfma2",
+      "hmul2",
+      "hsetp2"
+     ],
+     "constant": [],
+     "missing": [
+      {
+       "id": "hadd2_32i",
+       "name": ""
+      },
+      {
+       "id": "hfma2_32i",
+       "name": ""
+      },
+      {
+       "id": "hmul2_32i",
+       "name": ""
+      },
+      {
+       "id": "hset2",
+       "name": ""
+      }
+     ],
+     "undocumented": [],
+     "total": 8
+    },
+    {
+     "name": "inteiros",
+     "family": "inteiros",
+     "official": "",
+     "url": "",
+     "referenced": true,
+     "implemented": [
+      "bfe",
+      "bfi",
+      "flo",
+      "iadd",
+      "iadd3",
+      "iadd32i",
+      "icmp",
+      "imnmx",
+      "iscadd",
+      "iset",
+      "isetp",
+      "lea",
+      "lop",
+      "lop3",
+      "lop32i",
+      "popc",
+      "sel",
+      "shf",
+      "shl",
+      "shr",
+      "vmnmx",
+      "xmad"
+     ],
+     "constant": [],
+     "missing": [
+      {
+       "id": "imad",
+       "name": ""
+      },
+      {
+       "id": "imad32i",
+       "name": ""
+      },
+      {
+       "id": "imadsp",
+       "name": ""
+      },
+      {
+       "id": "imul",
+       "name": ""
+      },
+      {
+       "id": "imul32i",
+       "name": ""
+      },
+      {
+       "id": "iscadd32i",
+       "name": ""
+      },
+      {
+       "id": "prmt",
+       "name": ""
+      },
+      {
+       "id": "vabsdiff",
+       "name": ""
+      },
+      {
+       "id": "vadd",
+       "name": ""
+      },
+      {
+       "id": "vmad",
+       "name": ""
+      },
+      {
+       "id": "vset",
+       "name": ""
+      },
+      {
+       "id": "vsetp",
+       "name": ""
+      },
+      {
+       "id": "vshl",
+       "name": ""
+      },
+      {
+       "id": "vshr",
+       "name": ""
+      }
+     ],
+     "undocumented": [],
+     "total": 36
+    },
+    {
+     "name": "conversão",
+     "family": "conversão",
+     "official": "",
+     "url": "",
+     "referenced": true,
+     "implemented": [
+      "f2f",
+      "f2i",
+      "i2f",
+      "i2i"
+     ],
+     "constant": [],
+     "missing": [],
+     "undocumented": [],
+     "total": 4
+    },
+    {
+     "name": "registradores e predicados",
+     "family": "registradores e predicados",
+     "official": "",
+     "url": "",
+     "referenced": true,
+     "implemented": [
+      "csetp",
+      "mov",
+      "mov32i",
+      "p2r",
+      "pset",
+      "psetp",
+      "r2p",
+      "shfl",
+      "vote"
+     ],
+     "constant": [],
+     "missing": [
+      {
+       "id": "b2r",
+       "name": ""
+      },
+      {
+       "id": "cset",
+       "name": ""
+      },
+      {
+       "id": "r2b",
+       "name": ""
+      }
+     ],
+     "undocumented": [],
+     "total": 12
+    },
+    {
+     "name": "memória",
+     "family": "memória",
+     "official": "",
+     "url": "",
+     "referenced": true,
+     "implemented": [
+      "atom",
+      "ipa",
+      "ld",
+      "ldg",
+      "red",
+      "st",
+      "stg"
+     ],
+     "constant": [],
+     "missing": [
+      {
+       "id": "al2p",
+       "name": ""
+      },
+      {
+       "id": "atoms",
+       "name": ""
+      },
+      {
+       "id": "cctl",
+       "name": ""
+      },
+      {
+       "id": "cctll",
+       "name": ""
+      },
+      {
+       "id": "isberd",
+       "name": ""
+      },
+      {
+       "id": "out",
+       "name": ""
+      },
+      {
+       "id": "pixld",
+       "name": ""
+      }
+     ],
+     "undocumented": [],
+     "total": 14
+    },
+    {
+     "name": "texturas e superfícies",
+     "family": "texturas e superfícies",
+     "official": "",
+     "url": "",
+     "referenced": true,
+     "implemented": [
+      "sust",
+      "tex",
+      "texs",
+      "tld4",
+      "tld4s",
+      "tlds",
+      "tmml",
+      "txq"
+     ],
+     "constant": [],
+     "missing": [
+      {
+       "id": "suatom",
+       "name": ""
+      },
+      {
+       "id": "suld",
+       "name": ""
+      },
+      {
+       "id": "sured",
+       "name": ""
+      },
+      {
+       "id": "tld",
+       "name": ""
+      },
+      {
+       "id": "txa",
+       "name": ""
+      },
+      {
+       "id": "txd",
+       "name": ""
+      }
+     ],
+     "undocumented": [],
+     "total": 14
+    },
+    {
+     "name": "controle de fluxo",
+     "family": "controle de fluxo",
+     "official": "",
+     "url": "",
+     "referenced": true,
+     "implemented": [
+      "bar",
+      "bra",
+      "brk",
+      "brx",
+      "depbar",
+      "exit",
+      "kil",
+      "membar",
+      "nop",
+      "pbk",
+      "ssy",
+      "sync"
+     ],
+     "constant": [],
+     "missing": [
+      {
+       "id": "bpt",
+       "name": ""
+      },
+      {
+       "id": "cal",
+       "name": ""
+      },
+      {
+       "id": "cont",
+       "name": ""
+      },
+      {
+       "id": "ide",
+       "name": ""
+      },
+      {
+       "id": "jcal",
+       "name": ""
+      },
+      {
+       "id": "jmp",
+       "name": ""
+      },
+      {
+       "id": "jmx",
+       "name": ""
+      },
+      {
+       "id": "pcnt",
+       "name": ""
+      },
+      {
+       "id": "pret",
+       "name": ""
+      },
+      {
+       "id": "ret",
+       "name": ""
+      },
+      {
+       "id": "rtt",
+       "name": ""
+      },
+      {
+       "id": "sam",
+       "name": ""
+      }
+     ],
+     "undocumented": [],
+     "total": 24
+    },
+    {
+     "name": "outras",
+     "family": "outras",
+     "official": "",
+     "url": "",
+     "referenced": true,
+     "implemented": [],
+     "constant": [],
+     "missing": [
+      {
+       "id": "cctlt",
+       "name": ""
+      },
+      {
+       "id": "cs2r",
+       "name": ""
+      },
+      {
+       "id": "getcrsptr",
+       "name": ""
+      },
+      {
+       "id": "getlmembase",
+       "name": ""
+      },
+      {
+       "id": "idp",
+       "name": ""
+      },
+      {
+       "id": "lepc",
+       "name": ""
+      },
+      {
+       "id": "longjmp",
+       "name": ""
+      },
+      {
+       "id": "pexit",
+       "name": ""
+      },
+      {
+       "id": "plongjmp",
+       "name": ""
+      },
+      {
+       "id": "ram",
+       "name": ""
+      },
+      {
+       "id": "setcrsptr",
+       "name": ""
+      },
+      {
+       "id": "setlmembase",
+       "name": ""
+      },
+      {
+       "id": "stp",
+       "name": ""
+      },
+      {
+       "id": "vabsdiff4",
+       "name": ""
+      }
+     ],
+     "undocumented": [],
+     "total": 14
+    }
+   ]
+  }
+ ]
+}
