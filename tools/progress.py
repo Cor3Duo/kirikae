@@ -18,14 +18,14 @@ MAXWELL_OPCODES = ROOT / "crates/maxwell/src/opcodes.rs"
 MAXWELL_TRANSLATE = ROOT / "crates/maxwell/src/translate.rs"
 
 SHADER_CLASSES = {
-    "ponto flutuante": "fadd fadd32i fmul fmul32i ffma ffma32i fmnmx fset fsetp fcmp fchk fswzadd mufu rro dadd dmul dfma dmnmx dset dsetp",
-    "meia precisão": "hadd2 hadd2_32i hmul2 hmul2_32i hfma2 hfma2_32i hset2 hsetp2",
-    "inteiros": "iadd iadd32i iadd3 iscadd iscadd32i imad imad32i imadsp imul imul32i imnmx icmp iset isetp xmad lop lop32i lop3 shl shr shf lea bfe bfi flo popc sel prmt vabsdiff vmad vmnmx vset vsetp vadd vshl vshr",
-    "conversão": "f2f f2i i2f i2i",
-    "registradores e predicados": "mov mov32i s2r p2r r2p psetp pset csetp cset vote shfl r2b b2r",
-    "memória": "ld ldc ldg lds ldl st stg sts stl atom atoms atomcas red cctl cctll ald ast ipa out al2p isberd pixld",
-    "texturas e superfícies": "tex texs tld tlds tld4 tld4s txq txd txa tmml tmmls suld sust sured suatom",
-    "controle de fluxo": "bra brx ssy sync pbk brk cont pcnt exit kil bar membar depbar nop cal jcal ret jmp jmx pret sam rtt bpt preexit ide ret",
+    "floating point": "fadd fadd32i fmul fmul32i ffma ffma32i fmnmx fset fsetp fcmp fchk fswzadd mufu rro dadd dmul dfma dmnmx dset dsetp",
+    "half precision": "hadd2 hadd2_32i hmul2 hmul2_32i hfma2 hfma2_32i hset2 hsetp2",
+    "integer": "iadd iadd32i iadd3 iscadd iscadd32i imad imad32i imadsp imul imul32i imnmx icmp iset isetp xmad lop lop32i lop3 shl shr shf lea bfe bfi flo popc sel prmt vabsdiff vmad vmnmx vset vsetp vadd vshl vshr",
+    "conversion": "f2f f2i i2f i2i",
+    "registers and predicates": "mov mov32i s2r p2r r2p psetp pset csetp cset vote shfl r2b b2r",
+    "memory": "ld ldc ldg lds ldl st stg sts stl atom atoms atomcas red cctl cctll ald ast ipa out al2p isberd pixld",
+    "textures and surfaces": "tex texs tld tlds tld4 tld4s txq txd txa tmml tmmls suld sust sured suatom",
+    "control flow": "bra brx ssy sync pbk brk cont pcnt exit kil bar membar depbar nop cal jcal ret jmp jmx pret sam rtt bpt preexit ide ret",
 }
 
 NV_DEVICES = {
@@ -51,7 +51,7 @@ NV_SHORT = {
     "/dev/nvhost-as-gpu": "as-gpu",
     "/dev/nvhost-ctrl": "ctrl",
     "/dev/nvhost-ctrl-gpu": "ctrl-gpu",
-    "/dev/nvhost-gpu": "canal",
+    "/dev/nvhost-gpu": "channel",
     "/dev/nvhost-nvdec": "nvdec",
     "/dev/nvhost-vic": "vic",
 }
@@ -307,10 +307,10 @@ def read_reference():
     return ref
 
 SECTIONS = [
-    ("services", "Serviços do Horizon", "comandos IPC"),
-    ("svc", "SVCs do kernel", "SVCs"),
-    ("ioctl", "Driver da GPU (nvdrv)", "ioctls"),
-    ("shaders", "Instruções de shader Maxwell", "mnemônicos"),
+    ("services", "Horizon services", "IPC commands"),
+    ("svc", "Kernel SVCs", "SVCs"),
+    ("ioctl", "GPU driver (nvdrv)", "ioctls"),
+    ("shaders", "Maxwell shader instructions", "mnemonics"),
 ]
 
 def shader_groups():
@@ -668,7 +668,7 @@ def render_svg(report):
     services = report["sections"][0]
     system = [s for s in report["sections"] if s["id"] in ("svc", "ioctl")]
     kernel = {
-        "title": "Kernel e GPU",
+        "title": "Kernel and GPU",
         "implemented": sum(s["implemented"] for s in system),
         "total": sum(s["total"] for s in system),
         "groups": [g for s in system for g in s["groups"]],
@@ -682,14 +682,14 @@ def render_svg(report):
     if shaders and shaders["total"]:
         treemap_panel(services, 0, 0, 500, H - 22, out)
         treemap_panel(kernel, 510, 0, 235, H - 22, out)
-        treemap_panel({**shaders, "title": "Shaders Maxwell"}, 755, 0, 245, H - 22, out)
+        treemap_panel({**shaders, "title": "Maxwell shaders"}, 755, 0, 245, H - 22, out)
     else:
         treemap_panel(services, 0, 0, 640, H - 22, out)
         treemap_panel(kernel, 650, 0, 350, H - 22, out)
     lx = 4
-    legend = [("done", "implementado"), ("constant", "só devolve sucesso/constante"), ("missing", "falta")]
+    legend = [("done", "implemented"), ("constant", "returns success/constants only"), ("missing", "missing")]
     if "coverage" in report:
-        legend = [("used_done", "usado pelo jogo"), ("used_missing", "usado e stub/faltando")] + legend
+        legend = [("used_done", "used by the game"), ("used_missing", "used, stub/missing")] + legend
     for kind, text in legend:
         out.append(f'<rect x="{lx}" y="{H - 15}" width="10" height="10" fill="{COLORS[kind]}"/>')
         out.append(f'<text x="{lx + 14}" y="{H - 6}" font-size="11" fill="{COLORS["text"]}">{text}</text>')
@@ -720,8 +720,8 @@ def pct(a, b):
 def section_table(section):
     rows = [
         f'<h2>{html.escape(section["title"])}</h2>',
-        f'<p class="muted">{section["implemented"]} de {section["total"]} {section["unit"]} documentados ({pct(section["implemented"], section["total"])}).</p>',
-        '<table><tr><th>Interface</th><th>Nome oficial</th><th class="n">Feitos</th><th class="n">Constante</th><th class="n">Total</th><th class="n">%</th></tr>',
+        f'<p class="muted">{section["implemented"]} of {section["total"]} documented {section["unit"]} ({pct(section["implemented"], section["total"])}).</p>',
+        '<table><tr><th>Interface</th><th>Official name</th><th class="n">Done</th><th class="n">Constant</th><th class="n">Total</th><th class="n">%</th></tr>',
     ]
     fam = None
     hexa = section["id"] in ("svc", "ioctl")
@@ -738,20 +738,20 @@ def section_table(section):
         missing = ""
         if g["missing"]:
             items = "".join(f'<li><code>{(hex(m["id"]) if hexa else m["id"])}</code> {html.escape(m["name"])}</li>' for m in g["missing"])
-            missing = f'<details><summary>faltam {len(g["missing"])}</summary><ul>{items}</ul></details>'
+            missing = f'<details><summary>{len(g["missing"])} missing</summary><ul>{items}</ul></details>'
         if section["id"] == "shaders":
             pass
         elif not g["referenced"]:
-            missing += '<div class="muted">sem lista de referência: total = comandos tratados</div>'
+            missing += '<div class="muted">no reference list: total = handled commands</div>'
         if g["undocumented"]:
             ids = ", ".join(hex(c) if hexa else str(c) for c in g["undocumented"])
-            missing += f'<div class="muted">tratados mas não documentados: {ids}</div>'
+            missing += f'<div class="muted">handled but undocumented: {ids}</div>'
         if g.get("used") or g.get("used_missing"):
             fmt = lambda c: hex(c) if hexa and isinstance(c, int) else str(c)
             used = ", ".join(fmt(c) for c in g.get("used", []) + g.get("used_missing", []))
-            missing += f'<div class="muted">usados pelos jogos: {used}</div>'
+            missing += f'<div class="muted">used by games: {used}</div>'
             if g.get("used_missing"):
-                missing += f'<div style="color:#f85149">usados e stub/faltando: {", ".join(fmt(c) for c in g["used_missing"])}</div>'
+                missing += f'<div style="color:#f85149">used, stub/missing: {", ".join(fmt(c) for c in g["used_missing"])}</div>'
         rows.append(
             f'<tr><td>{name}{missing}</td><td>{official}</td><td class="n">{done}</td><td class="n">{len(g["constant"])}</td>'
             f'<td class="n">{total}</td><td class="n"><span class="bar"><i style="width:{width:.0f}%"></i></span>{pct(done, total)}</td></tr>'
@@ -763,12 +763,12 @@ def coverage_section(report):
     cov = report["coverage"]
     games = ", ".join(report.get("games", []))
     rows = [
-        "<h2>Usado pelo jogo e faltando</h2>",
-        f'<p class="muted">{cov["used"]} comandos, SVCs, ioctls e instruções usados ({html.escape(games)}); '
-        f'{len(cov["gaps"])} deles ainda são stub ou faltam, do mais usado ao menos usado. O evento guarda o '
-        "momento do primeiro uso: a imagem do frame seguinte e uma cópia dos saves do jogo naquele instante "
-        "(para voltar ali, carregue o save mais recente que o jogo gravou antes dele).</p>",
-        '<table><tr><th>Item</th><th>Status</th><th class="n">Vezes</th><th>Primeiro uso</th><th>Evento</th></tr>',
+        "<h2>Used by the game and missing</h2>",
+        f'<p class="muted">{cov["used"]} commands, SVCs, ioctls and instructions used ({html.escape(games)}); '
+        f'{len(cov["gaps"])} of them are still stubs or missing, most used first. Each event keeps the moment '
+        "of the first use: the next frame and a copy of the game's saves at that point "
+        "(to go back there, load the latest save the game wrote before it).</p>",
+        '<table><tr><th>Item</th><th>Status</th><th class="n">Count</th><th>First use</th><th>Event</th></tr>',
     ]
     for gap in cov["gaps"]:
         item = f'<code>{html.escape(gap["interface"])} {html.escape(fmt_id(gap["section"], gap["id"]))}</code>'
@@ -791,37 +791,36 @@ def coverage_section(report):
     rows.append("</table>")
     if cov["resolved"]:
         done = ", ".join(f'<code>{html.escape(r["interface"])} {html.escape(fmt_id(r["section"], r["id"]))}</code>' for r in cov["resolved"])
-        rows.append(f'<p class="muted">Implementados depois de registrados como stub/faltando: {done}.</p>')
+        rows.append(f'<p class="muted">Implemented after being recorded as stub/missing: {done}.</p>')
     return "\n".join(rows)
 
 def render_html(report):
     total_done = sum(s["implemented"] for s in report["sections"])
     total_all = sum(s["total"] for s in report["sections"])
     parts = [
-        '<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
         f"<title>kirikae progress</title><style>{STYLE}</style></head><body>",
-        "<h1>Progresso do kirikae</h1>",
-        '<img src="progress.svg" alt="Treemap: cada quadrado é um comando, SVC, ioctl ou instrução de shader; verde = implementado, cinza = falta">',
-        f'<p>Gerado por <code>tools/progress.py</code> em {report["generated"]}. Números brutos: <a href="progress.json">progress.json</a>. '
-        f'<a href="history.html">Histórico</a> (um ponto por dia). No total: {total_done} de {total_all} ({pct(total_done, total_all)}).</p>',
+        "<h1>Kirikae progress</h1>",
+        '<img src="progress.svg" alt="Treemap: each square is a command, SVC, ioctl or shader instruction; green = implemented, gray = missing">',
+        f'<p>Generated by <code>tools/progress.py</code> on {report["generated"]}. Raw numbers: <a href="progress.json">progress.json</a>. '
+        f'<a href="history.html">History</a> (one point a day). In total: {total_done} of {total_all} ({pct(total_done, total_all)}).</p>',
     ]
     if "coverage" in report:
         parts.append(coverage_section(report))
     parts += [section_table(s) for s in report["sections"]]
     parts.append(
-        "<h2>Como é contado</h2><p>Um comando conta como implementado quando o runtime tem um braço próprio para ele no "
-        "<code>match</code> do serviço (<code>crates/rt/src/services</code>), da SVC (<code>horizon.rs</code>) ou do ioctl do "
-        "dispositivo (<code>services/nvdrv.rs</code>); o que cai no braço padrão vai para o stub, que responde com zeros e avisa. "
-        "A coluna <em>Constante</em> separa os implementados cujo corpo só devolve sucesso ou valores fixos. Os ioctls são "
-        "comparados pelo byte baixo do número, que é como os dispositivos despacham.</p>"
-        "<p>O total são os comandos documentados no <a href=\"https://switchbrew.org\">Switchbrew</a> "
-        "(<code>tools/reference/horizon.txt</code>, só IDs e nomes) para as interfaces que o kirikae expõe ou que os jogos testados "
-        "pedem, não todos os serviços do sistema. A lista acompanha o kirikae: uma interface nova entra na contagem quando entra na "
-        "referência.</p>"
-        "<p>As instruções de shader contam os mnemônicos da tabela de opcodes do Maxwell gerada do envytools "
-        "(<code>crates/maxwell/src/opcodes.rs</code>) que têm braço próprio no tradutor para SPIR-V "
-        "(<code>crates/maxwell/src/translate.rs</code>). Um mnemônico conta inteiro mesmo quando só parte das suas "
-        "variantes é traduzida.</p></body></html>"
+        "<h2>How it is counted</h2><p>A command counts as implemented when the runtime has its own arm for it in the "
+        "<code>match</code> of the service (<code>crates/rt/src/services</code>), the SVC (<code>horizon.rs</code>) or the device "
+        "ioctl (<code>services/nvdrv.rs</code>); anything that falls to the default arm goes to the stub, which answers with zeros "
+        "and warns. The <em>Constant</em> column sets apart implemented commands whose body only returns success or fixed values. "
+        "Ioctls are compared by the low byte of their number, which is how the devices dispatch them.</p>"
+        "<p>The totals are the commands documented on <a href=\"https://switchbrew.org\">Switchbrew</a> "
+        "(<code>tools/reference/horizon.txt</code>, IDs and names only) for the interfaces Kirikae exposes or games ask for, "
+        "not every system service. A new interface joins the count when it joins the reference.</p>"
+        "<p>Shader instructions count the mnemonics of the Maxwell opcode table generated from envytools "
+        "(<code>crates/maxwell/src/opcodes.rs</code>) that have their own arm in the SPIR-V translator "
+        "(<code>crates/maxwell/src/translate.rs</code>). A mnemonic counts whole even when only some of its "
+        "variants are translated.</p></body></html>"
     )
     return "\n".join(parts)
 
@@ -839,7 +838,7 @@ def render_history(history):
     names = {sid: title for sid, title, _ in SECTIONS}
     n = len(history)
     xs = [pad + (W - 2 * pad) * (i / (n - 1) if n > 1 else 0.5) for i in range(n)]
-    svg = [f'<svg viewBox="0 0 {W} {H}" width="100%" role="img" aria-label="Progresso por dia">']
+    svg = [f'<svg viewBox="0 0 {W} {H}" width="100%" role="img" aria-label="Progress per day">']
     for p in (0, 25, 50, 75, 100):
         y = H - pad - (H - 2 * pad) * p / 100
         svg.append(f'<line x1="{pad}" x2="{W - pad}" y1="{y}" y2="{y}" stroke="currentColor" stroke-opacity=".15"/>')
@@ -859,15 +858,15 @@ def render_history(history):
     )
     heads = "".join(f'<th class="n">{html.escape(names[s])}</th>' for s in colors)
     return (
-        '<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
-        f"<title>kirikae history</title><style>{STYLE}</style></head><body><h1>Histórico do progresso</h1>"
-        f'<p><a href="index.html">← Progresso</a></p><p>{legend}</p>{"".join(svg)}'
-        f"<table><tr><th>Dia</th>{heads}</tr>{rows}</table></body></html>"
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+        f"<title>kirikae history</title><style>{STYLE}</style></head><body><h1>Progress history</h1>"
+        f'<p><a href="index.html">← Progress</a></p><p>{legend}</p>{"".join(svg)}'
+        f"<table><tr><th>Day</th>{heads}</tr>{rows}</table></body></html>"
     )
 
 def main():
     ap = argparse.ArgumentParser(description="Progress report for kirikae: what the runtime implements of the Switch's system interface, against what is documented.")
-    ap.add_argument("--out", help="output folder (default docs/progress, or docs/progress-jogos with --coverage)")
+    ap.add_argument("--out", help="output folder (default docs/progress, or docs/progress-games with --coverage)")
     ap.add_argument(
         "--coverage",
         nargs="+",
@@ -878,7 +877,7 @@ def main():
     )
     args = ap.parse_args()
     sys.stdout.reconfigure(errors="replace")
-    out = Path(args.out or ROOT / ("docs/progress-jogos" if args.coverage else "docs/progress"))
+    out = Path(args.out or ROOT / ("docs/progress-games" if args.coverage else "docs/progress"))
     out.mkdir(parents=True, exist_ok=True)
     report = build_report()
     if args.coverage:
@@ -890,13 +889,21 @@ def main():
     (out / "progress.json").write_text(json.dumps(report, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
     (out / "progress.svg").write_text(render_svg(report), encoding="utf-8")
     (out / "index.html").write_text(render_html(report), encoding="utf-8")
+    badges = out / "badges"
+    badges.mkdir(exist_ok=True)
+    labels = {"services": "services", "svc": "SVCs", "ioctl": "nvdrv ioctls", "shaders": "shader ops"}
+    for s in report["sections"]:
+        ratio = s["implemented"] / s["total"] if s["total"] else 0
+        color = "2ea043" if ratio >= 0.5 else "d29922" if ratio >= 0.3 else "db6d28"
+        badge = {"schemaVersion": 1, "label": labels.get(s["id"], s["id"]), "message": f'{s["implemented"]}/{s["total"]} ({pct(s["implemented"], s["total"])})', "color": color}
+        (badges / f'{s["id"]}.json').write_text(json.dumps(badge) + "\n", encoding="utf-8")
     history = update_history(out / "history.json", report)
     (out / "history.html").write_text(render_history(history), encoding="utf-8")
     for s in report["sections"]:
         print(f'{s["title"]}: {s["implemented"]}/{s["total"]} ({pct(s["implemented"], s["total"])})')
     if "coverage" in report:
         cov = report["coverage"]
-        print(f'{", ".join(report["games"])}: {cov["used"]} itens usados, {len(cov["gaps"])} stub/faltando')
+        print(f'{", ".join(report["games"])}: {cov["used"]} items used, {len(cov["gaps"])} stub/missing')
     if not REFERENCE.exists():
         print(f"note: {REFERENCE.relative_to(ROOT)} is missing; totals only count handled commands")
     print(f"wrote {out}")

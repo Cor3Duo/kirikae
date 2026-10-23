@@ -27,45 +27,45 @@ def main():
         runs = data.get("runs", [])
         played = sum(r.get("seconds", 0) for r in runs)
         frames = sum(r.get("frames", 0) for r in runs)
-        print(f'{data["game"]} ({data.get("title_id", "?")}): {len(runs)} execução(ões), {progress.fmt_time(played)} jogados, {frames} frames')
+        print(f'{data["game"]} ({data.get("title_id", "?")}): {len(runs)} run(s), {progress.fmt_time(played)} played, {frames} frames')
         print(f"  {path}")
     used = {}
     for (section, _, _) in items:
         used[section] = used.get(section, 0) + 1
-    print("usados: " + ", ".join(f"{n} {s}" for s, n in sorted(used.items())))
+    print("used: " + ", ".join(f"{n} {s}" for s, n in sorted(used.items())))
     print()
 
     gaps = cov["gaps"]
     if not gaps:
-        print("Nada faltando: tudo o que o jogo usou está implementado.")
+        print("Nothing missing: everything the game used is implemented.")
     else:
-        print(f"Faltando ou stub ({len(gaps)}), do mais usado ao menos usado:")
-        print(f'  {"vezes":>8}  {"status":<8} item')
+        print(f"Missing or stub ({len(gaps)}), most used first:")
+        print(f'  {"count":>8}  {"status":<8} item')
         for g in gaps:
             name = f' {g["name"]}' if g["name"] else ""
             note = f' ({g["note"]})' if g["note"] else ""
             first = g["first"] or {}
             ev = g["event"]
-            where = f'1º uso: {first.get("game", "")} {progress.fmt_time(first.get("seconds"))}, frame {first.get("frame", "?")}'
+            where = f'first use: {first.get("game", "")} {progress.fmt_time(first.get("seconds"))}, frame {first.get("frame", "?")}'
             print(f'  {g["count"]:>8}  {g["status"]:<8} {g["interface"]} {progress.fmt_id(g["section"], g["id"])}{name}{note}')
-            print(f"            {where}" + (f'  evento #{ev["n"]}' if ev else ""))
+            print(f"            {where}" + (f'  event #{ev["n"]}' if ev else ""))
             if ev:
                 if ev["screenshot"]:
-                    print(f'            imagem: {ev["screenshot"]}')
+                    print(f'            image:  {ev["screenshot"]}')
                 if ev["saves"]:
                     print(f'            saves:  {ev["saves"]}')
                 elif not ev["screenshot"]:
-                    print(f'            pasta:  {ev["folder"]}')
+                    print(f'            folder: {ev["folder"]}')
     if cov["resolved"]:
         print()
-        print("Implementados depois de registrados como stub/faltando:")
+        print("Implemented after being recorded as stub/missing:")
         for r in cov["resolved"]:
-            print(f'  {r["interface"]} {progress.fmt_id(r["section"], r["id"])} (era {r["was"]}, {r["count"]} vezes)')
+            print(f'  {r["interface"]} {progress.fmt_id(r["section"], r["id"])} (was {r["was"]}, {r["count"]} times)')
 
     detailed = [g for g in gaps if g["event"] and (g["event"]["backtrace"] or g["event"]["args"])][: args.details]
     if detailed:
         print()
-        print("Detalhes dos mais usados:")
+        print("Details of the most used:")
         for g in detailed:
             ev = g["event"]
             print(f'  #{ev["n"]} {g["interface"]} {progress.fmt_id(g["section"], g["id"])}')
@@ -76,7 +76,7 @@ def main():
 
     if args.all:
         print()
-        print("Implementados e usados:")
+        print("Implemented and used:")
         for (section, iface, cid), e in sorted(items.items(), key=lambda kv: -kv[1]["count"]):
             if not any(g["section"] == section and g["interface"] == iface and g["id"] == cid for g in gaps):
                 print(f'  {e["count"]:>8}  {iface} {progress.fmt_id(section, cid)}')

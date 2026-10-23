@@ -3,8 +3,8 @@
  "sections": [
   {
    "id": "services",
-   "title": "Serviços do Horizon",
-   "unit": "comandos IPC",
+   "title": "Horizon services",
+   "unit": "IPC commands",
    "implemented": 360,
    "total": 1230,
    "groups": [
@@ -4801,7 +4801,7 @@
   },
   {
    "id": "svc",
-   "title": "SVCs do kernel",
+   "title": "Kernel SVCs",
    "unit": "SVCs",
    "implemented": 45,
    "total": 124,
@@ -5187,7 +5187,7 @@
   },
   {
    "id": "ioctl",
-   "title": "Driver da GPU (nvdrv)",
+   "title": "GPU driver (nvdrv)",
    "unit": "ioctls",
    "implemented": 58,
    "total": 138,
@@ -5231,7 +5231,7 @@
     },
     {
      "name": "/dev/nvhost-gpu",
-     "family": "canal",
+     "family": "channel",
      "official": "https://switchbrew.org/wiki/NV_services  (section \"Channels\" > \"Ioctls\")",
      "url": "https://switchbrew.org/wiki/NV_services",
      "referenced": true,
@@ -5701,14 +5701,14 @@
   },
   {
    "id": "shaders",
-   "title": "Instruções de shader Maxwell",
-   "unit": "mnemônicos",
+   "title": "Maxwell shader instructions",
+   "unit": "mnemonics",
    "implemented": 79,
    "total": 146,
    "groups": [
     {
-     "name": "ponto flutuante",
-     "family": "ponto flutuante",
+     "name": "floating point",
+     "family": "floating point",
      "official": "",
      "url": "",
      "referenced": true,
@@ -5762,8 +5762,8 @@
      "total": 20
     },
     {
-     "name": "meia precisão",
-     "family": "meia precisão",
+     "name": "half precision",
+     "family": "half precision",
      "official": "",
      "url": "",
      "referenced": true,
@@ -5796,8 +5796,8 @@
      "total": 8
     },
     {
-     "name": "inteiros",
-     "family": "inteiros",
+     "name": "integer",
+     "family": "integer",
      "official": "",
      "url": "",
      "referenced": true,
@@ -5888,8 +5888,8 @@
      "total": 36
     },
     {
-     "name": "conversão",
-     "family": "conversão",
+     "name": "conversion",
+     "family": "conversion",
      "official": "",
      "url": "",
      "referenced": true,
@@ -5905,8 +5905,8 @@
      "total": 4
     },
     {
-     "name": "registradores e predicados",
-     "family": "registradores e predicados",
+     "name": "registers and predicates",
+     "family": "registers and predicates",
      "official": "",
      "url": "",
      "referenced": true,
@@ -5940,8 +5940,8 @@
      "total": 12
     },
     {
-     "name": "memória",
-     "family": "memória",
+     "name": "memory",
+     "family": "memory",
      "official": "",
      "url": "",
      "referenced": true,
@@ -5989,8 +5989,8 @@
      "total": 14
     },
     {
-     "name": "texturas e superfícies",
-     "family": "texturas e superfícies",
+     "name": "textures and surfaces",
+     "family": "textures and surfaces",
      "official": "",
      "url": "",
      "referenced": true,
@@ -6035,8 +6035,8 @@
      "total": 14
     },
     {
-     "name": "controle de fluxo",
-     "family": "controle de fluxo",
+     "name": "control flow",
+     "family": "control flow",
      "official": "",
      "url": "",
      "referenced": true,

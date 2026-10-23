@@ -34,7 +34,7 @@ frames/
 *.coverage.json
 *.coverage.json.*
 *-coverage/
-docs/progress-jogos/
+docs/progress-games/
 
 # Local tooling.
 __pycache__/

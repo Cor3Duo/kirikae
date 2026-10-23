@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 340" width="1000" height="340" font-family="Segoe UI, Helvetica, Arial, sans-serif">
 <rect width="1000" height="340" fill="#0d1117"/>
-<text x="4" y="17" font-size="16" fill="#f0f6fc">Serviços do Horizon: 29.3% (360/1230)</text>
+<text x="4" y="17" font-size="16" fill="#f0f6fc">Horizon services: 29.3% (360/1230)</text>
 <rect x="0.0" y="26.0" width="197.6" height="184.5" fill="#0d1117"/>
 <g stroke="#0d1117" stroke-width="0.6">
 <rect x="2.0" y="46.0" width="9.6" height="9.6" fill="#2ea043"/>
@@ -1307,7 +1307,7 @@
 <rect x="492.8" y="294.2" width="5.0" height="5.0" fill="#6e7681"/>
 <rect x="492.8" y="299.2" width="5.0" height="5.0" fill="#6e7681"/>
 </g>
-<text x="514" y="17" font-size="16" fill="#f0f6fc">Kernel e GPU: 39.3% (103/262)</text>
+<text x="514" y="17" font-size="16" fill="#f0f6fc">Kernel and GPU: 39.3% (103/262)</text>
 <rect x="510.0" y="26.0" width="235.0" height="138.2" fill="#0d1117"/>
 <g stroke="#0d1117" stroke-width="0.6">
 <rect x="512.0" y="46.0" width="14.2" height="14.2" fill="#2ea043"/>
@@ -1480,7 +1480,7 @@
 <rect x="597.4" y="233.0" width="12.2" height="12.2" fill="#6e7681"/>
 <rect x="512.0" y="245.2" width="12.2" height="12.2" fill="#6e7681"/>
 </g>
-<text x="515.0" y="179.2" font-size="12" font-weight="bold" fill="#f0f6fc" stroke="#0d1117" stroke-width="3" paint-order="stroke">canal</text>
+<text x="515.0" y="179.2" font-size="12" font-weight="bold" fill="#f0f6fc" stroke="#0d1117" stroke-width="3" paint-order="stroke">channel</text>
 <rect x="510.0" y="259.7" width="112.4" height="58.3" fill="#0d1117"/>
 <g stroke="#0d1117" stroke-width="0.6">
 <rect x="512.0" y="279.7" width="12.0" height="12.0" fill="#2ea043"/>
@@ -1600,7 +1600,7 @@
 <rect x="710.5" y="291.1" width="10.7" height="10.7" fill="#6e7681"/>
 <rect x="721.3" y="291.1" width="10.7" height="10.7" fill="#6e7681"/>
 </g>
-<text x="759" y="17" font-size="16" fill="#f0f6fc">Shaders Maxwell: 54.1% (79/146)</text>
+<text x="759" y="17" font-size="16" fill="#f0f6fc">Maxwell shaders: 54.1% (79/146)</text>
 <rect x="755.0" y="26.0" width="147.0" height="120.0" fill="#0d1117"/>
 <g stroke="#0d1117" stroke-width="0.6">
 <rect x="757.0" y="46.0" width="17.7" height="17.7" fill="#2ea043"/>
@@ -1640,7 +1640,7 @@
 <rect x="792.5" y="116.9" width="17.7" height="17.7" fill="#6e7681"/>
 <rect x="810.2" y="116.9" width="17.7" height="17.7" fill="#6e7681"/>
 </g>
-<text x="760.0" y="41.0" font-size="12" font-weight="bold" fill="#f0f6fc" stroke="#0d1117" stroke-width="3" paint-order="stroke">inteiros</text>
+<text x="760.0" y="41.0" font-size="12" font-weight="bold" fill="#f0f6fc" stroke="#0d1117" stroke-width="3" paint-order="stroke">integer</text>
 <rect x="902.0" y="26.0" width="98.0" height="120.0" fill="#0d1117"/>
 <g stroke="#0d1117" stroke-width="0.6">
 <rect x="904.0" y="46.0" width="18.6" height="18.6" fill="#2ea043"/>
@@ -1668,6 +1668,7 @@
 <rect x="941.2" y="120.4" width="18.6" height="18.6" fill="#6e7681"/>
 <rect x="959.8" y="120.4" width="18.6" height="18.6" fill="#6e7681"/>
 </g>
+<text x="907.0" y="41.0" font-size="12" font-weight="bold" fill="#f0f6fc" stroke="#0d1117" stroke-width="3" paint-order="stroke">control flow</text>
 <rect x="755.0" y="146.0" width="96.9" height="101.2" fill="#0d1117"/>
 <g stroke="#0d1117" stroke-width="0.6">
 <rect x="757.0" y="166.0" width="18.4" height="18.4" fill="#2ea043"/>
@@ -1708,7 +1709,7 @@
 <rect x="789.5" y="299.7" width="16.2" height="16.2" fill="#6e7681"/>
 <rect x="805.7" y="299.7" width="16.2" height="16.2" fill="#6e7681"/>
 </g>
-<text x="760.0" y="262.2" font-size="12" font-weight="bold" fill="#f0f6fc" stroke="#0d1117" stroke-width="3" paint-order="stroke">memória</text>
+<text x="760.0" y="262.2" font-size="12" font-weight="bold" fill="#f0f6fc" stroke="#0d1117" stroke-width="3" paint-order="stroke">memory</text>
 <rect x="851.9" y="146.0" width="74.1" height="92.6" fill="#0d1117"/>
 <g stroke="#0d1117" stroke-width="0.6">
 <rect x="853.9" y="166.0" width="17.3" height="17.3" fill="#2ea043"/>
@@ -1778,10 +1779,10 @@
 <rect x="979.9" y="293.5" width="17.3" height="17.3" fill="#2ea043"/>
 </g>
 <rect x="4" y="325" width="10" height="10" fill="#2ea043"/>
-<text x="18" y="334" font-size="11" fill="#f0f6fc">implementado</text>
-<rect x="97.19999999999999" y="325" width="10" height="10" fill="#9be9a8"/>
-<text x="111.19999999999999" y="334" font-size="11" fill="#f0f6fc">só devolve sucesso/constante</text>
-<rect x="280.0" y="325" width="10" height="10" fill="#6e7681"/>
-<text x="294.0" y="334" font-size="11" fill="#f0f6fc">falta</text>
+<text x="18" y="334" font-size="11" fill="#f0f6fc">implemented</text>
+<rect x="91.6" y="325" width="10" height="10" fill="#9be9a8"/>
+<text x="105.6" y="334" font-size="11" fill="#f0f6fc">returns success/constants only</text>
+<rect x="285.6" y="325" width="10" height="10" fill="#6e7681"/>
+<text x="299.6" y="334" font-size="11" fill="#f0f6fc">missing</text>
 <text x="996" y="334" font-size="11" fill="#6e7681" text-anchor="end">kirikae · 2026-10-22</text>
 </svg>
