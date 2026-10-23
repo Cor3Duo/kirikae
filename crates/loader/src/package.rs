@@ -49,6 +49,26 @@ pub fn from_exefs(files: &[(String, Vec<u8>)], title_id: Option<u64>, romfs: Opt
     Ok(Executable { modules, entry, title_id, main_stack_size, system_resource_size, romfs })
 }
 
+fn npdm_title(npdm: &[u8]) -> Option<u64> {
+    let at = npdm_u32(npdm, 0x70)? as usize;
+    let aci = npdm.get(at..at + 0x18)?;
+    (&aci[..4] == b"ACI0").then(|| u64::from_le_bytes(aci[0x10..0x18].try_into().unwrap())).filter(|&t| t != 0)
+}
+
+fn romfs_beside(base: &Path) -> Result<Option<RomFs>, Error> {
+    let image = base.join("romfs.bin");
+    let folder = base.join("romfs");
+    if !image.is_file() && folder.is_dir() {
+        eprintln!("kirikae: building {} from {} (once; delete it to rebuild)", image.display(), folder.display());
+        crate::romfs::build(&folder, &image)?;
+    }
+    if !image.is_file() {
+        return Ok(None);
+    }
+    let size = std::fs::metadata(&image)?.len();
+    Ok(Some(RomFs { path: std::path::absolute(&image).unwrap_or(image), offset: 0, size, compression: None }))
+}
+
 fn npdm_u32(npdm: &[u8], at: usize) -> Option<u64> {
     if npdm.len() < 0x80 || &npdm[..4] != b"META" {
         return None;
@@ -118,17 +138,22 @@ pub enum Source {
 
 pub fn read_source(path: &Path) -> Result<Source, Error> {
     if path.is_dir() {
+        let (exefs, base) = if path.join("main").is_file() { (path.to_path_buf(), path.parent().map(Path::to_path_buf)) } else { (path.join("exefs"), Some(path.to_path_buf())) };
+        if !exefs.join("main").is_file() {
+            return Err(Error::Malformed("the folder has no ExeFS: expected `main` in it or in an `exefs` folder"));
+        }
         let mut files = Vec::new();
         for name in LOAD_ORDER.iter().copied().chain(["main.npdm"]) {
-            if let Ok(bytes) = std::fs::read(path.join(name)) {
+            if let Ok(bytes) = std::fs::read(exefs.join(name)) {
                 files.push((name.to_string(), bytes));
             }
         }
-        let romfs = path.parent().map(|p| p.join("romfs.bin")).filter(|p| p.is_file()).map(|p| {
-            let size = std::fs::metadata(&p).map_or(0, |m| m.len());
-            RomFs { path: std::path::absolute(&p).unwrap_or(p), offset: 0, size, compression: None }
-        });
-        return Ok(Source::ExeFs(files, None, romfs));
+        let title = files.iter().find(|(n, _)| n == "main.npdm").and_then(|(_, b)| npdm_title(b));
+        let romfs = match base {
+            Some(base) => romfs_beside(&base)?,
+            None => None,
+        };
+        return Ok(Source::ExeFs(files, title, romfs));
     }
     let mut magic = [0u8; 0x14];
     File::open(path)?.read_exact(&mut magic).map_err(|_| Error::TooSmall)?;

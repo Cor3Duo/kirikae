@@ -189,6 +189,216 @@ pub fn list(r: &mut Reader, limit: usize) -> Result<Vec<FileEntry>, Error> {
     Ok(out)
 }
 
+const EMPTY: u32 = u32::MAX;
+const HEADER: u64 = 0x50;
+const DATA_START: u64 = 0x200;
+
+pub fn hash(parent: u32, name: &[u8]) -> u32 {
+    let mut h = parent ^ 123456789;
+    for &b in name {
+        h = h.rotate_right(5) ^ b as u32;
+    }
+    h
+}
+
+fn table_size(entries: usize) -> usize {
+    if entries < 3 {
+        return 3;
+    }
+    if entries < 19 {
+        return entries | 1;
+    }
+    let mut n = entries;
+    while [2, 3, 5, 7, 11, 13, 17].iter().any(|p| n % p == 0) {
+        n += 1;
+    }
+    n
+}
+
+fn padded(name: &[u8]) -> usize {
+    name.len().div_ceil(4) * 4
+}
+
+pub fn lookup(r: &mut Reader, path: &str) -> Result<Option<FileEntry>, Error> {
+    let mut header = [0u8; 0x50];
+    r.read_at(0, &mut header)?;
+    let field = |k: usize| u64_at(&header, 8 * k);
+    let read = |r: &mut Reader, off: u64, len: u64| -> Result<Vec<u8>, Error> {
+        let mut b = vec![0u8; len as usize];
+        r.read_at(off, &mut b)?;
+        Ok(b)
+    };
+    let dir_hash = read(r, field(1), field(2))?;
+    let dirs = read(r, field(3), field(4))?;
+    let file_hash = read(r, field(5), field(6))?;
+    let files = read(r, field(7), field(8))?;
+    let parts: Vec<&str> = path.trim_start_matches('/').split('/').filter(|p| !p.is_empty()).collect();
+    let Some((file, folders)) = parts.split_last() else { return Ok(None) };
+    let find = |table: &[u8], meta: &[u8], parent: u32, name: &[u8], next_at: usize, name_at: usize| -> Option<u32> {
+        let buckets = table.len() / 4;
+        let mut at = u32_at(table, 4 * (hash(parent, name) as usize % buckets));
+        while at != EMPTY {
+            let e = at as usize;
+            let len = u32_at(meta, e + name_at - 4) as usize;
+            if u32_at(meta, e) == parent && meta.get(e + name_at..e + name_at + len) == Some(name) {
+                return Some(at);
+            }
+            at = u32_at(meta, e + next_at);
+        }
+        None
+    };
+    let mut dir = 0u32;
+    for f in folders {
+        match find(&dir_hash, &dirs, dir, f.as_bytes(), 0x10, 0x18) {
+            Some(d) => dir = d,
+            None => return Ok(None),
+        }
+    }
+    let Some(at) = find(&file_hash, &files, dir, file.as_bytes(), 0x18, 0x20) else { return Ok(None) };
+    let e = at as usize;
+    Ok(Some(FileEntry { path: format!("/{}", parts.join("/")), offset: field(9) + u64_at(&files, e + 8), size: u64_at(&files, e + 16) }))
+}
+
+struct Dir {
+    name: Vec<u8>,
+    parent: usize,
+    path: std::path::PathBuf,
+    dirs: Vec<usize>,
+    files: Vec<usize>,
+    offset: u32,
+}
+
+struct FileItem {
+    name: Vec<u8>,
+    path: std::path::PathBuf,
+    size: u64,
+    offset: u32,
+    data: u64,
+}
+
+fn sorted_entries(dir: &std::path::Path) -> std::io::Result<Vec<std::fs::DirEntry>> {
+    let mut v: Vec<_> = std::fs::read_dir(dir)?.collect::<Result<_, _>>()?;
+    v.sort_by_key(|e| e.file_name());
+    Ok(v)
+}
+
+pub fn build(dir: &std::path::Path, out: &std::path::Path) -> Result<u64, Error> {
+    use std::io::Write;
+    let mut dirs = vec![Dir { name: Vec::new(), parent: 0, path: dir.to_path_buf(), dirs: Vec::new(), files: Vec::new(), offset: 0 }];
+    let mut files: Vec<FileItem> = Vec::new();
+    let mut k = 0;
+    while k < dirs.len() {
+        for e in sorted_entries(&dirs[k].path.clone())? {
+            let name = e.file_name().to_string_lossy().into_owned().into_bytes();
+            if e.file_type()?.is_dir() {
+                let i = dirs.len();
+                dirs.push(Dir { name, parent: k, path: e.path(), dirs: Vec::new(), files: Vec::new(), offset: 0 });
+                dirs[k].dirs.push(i);
+            } else {
+                let i = files.len();
+                files.push(FileItem { name, path: e.path(), size: e.metadata()?.len(), offset: 0, data: 0 });
+                dirs[k].files.push(i);
+            }
+        }
+        k += 1;
+    }
+    let mut at = 0u32;
+    for d in &mut dirs {
+        d.offset = at;
+        at += (0x18 + padded(&d.name)) as u32;
+    }
+    let dir_meta_size = at as u64;
+    let mut order = Vec::new();
+    for d in &dirs {
+        order.extend(d.files.iter().copied());
+    }
+    let (mut at, mut data) = (0u32, 0u64);
+    for &i in &order {
+        let f = &mut files[i];
+        f.offset = at;
+        at += (0x20 + padded(&f.name)) as u32;
+        data = data.div_ceil(0x10) * 0x10;
+        f.data = data;
+        data += f.size;
+    }
+    let file_meta_size = at as u64;
+    let dir_buckets = table_size(dirs.len());
+    let file_buckets = table_size(files.len());
+    let mut dir_hash = vec![EMPTY; dir_buckets];
+    let mut file_hash = vec![EMPTY; file_buckets];
+    let mut dir_meta = vec![0u8; dir_meta_size as usize];
+    let mut file_meta = vec![0u8; file_meta_size as usize];
+    let put32 = |b: &mut [u8], at: usize, v: u32| b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    let put64 = |b: &mut [u8], at: usize, v: u64| b[at..at + 8].copy_from_slice(&v.to_le_bytes());
+    for (i, d) in dirs.iter().enumerate() {
+        let parent = dirs[d.parent].offset;
+        let siblings = if i == 0 { &[][..] } else { &dirs[d.parent].dirs[..] };
+        let sibling = siblings.iter().position(|&s| s == i).and_then(|p| siblings.get(p + 1)).map_or(EMPTY, |&s| dirs[s].offset);
+        let bucket = hash(parent, &d.name) as usize % dir_buckets;
+        let e = d.offset as usize;
+        put32(&mut dir_meta, e, parent);
+        put32(&mut dir_meta, e + 4, sibling);
+        put32(&mut dir_meta, e + 8, d.dirs.first().map_or(EMPTY, |&c| dirs[c].offset));
+        put32(&mut dir_meta, e + 12, d.files.first().map_or(EMPTY, |&c| files[c].offset));
+        put32(&mut dir_meta, e + 16, dir_hash[bucket]);
+        put32(&mut dir_meta, e + 20, d.name.len() as u32);
+        dir_meta[e + 24..e + 24 + d.name.len()].copy_from_slice(&d.name);
+        dir_hash[bucket] = d.offset;
+    }
+    for d in &dirs {
+        for (j, &i) in d.files.iter().enumerate() {
+            let f = &files[i];
+            let sibling = d.files.get(j + 1).map_or(EMPTY, |&s| files[s].offset);
+            let bucket = hash(d.offset, &f.name) as usize % file_buckets;
+            let e = f.offset as usize;
+            put32(&mut file_meta, e, d.offset);
+            put32(&mut file_meta, e + 4, sibling);
+            put64(&mut file_meta, e + 8, f.data);
+            put64(&mut file_meta, e + 16, f.size);
+            put32(&mut file_meta, e + 24, file_hash[bucket]);
+            put32(&mut file_meta, e + 28, f.name.len() as u32);
+            file_meta[e + 32..e + 32 + f.name.len()].copy_from_slice(&f.name);
+            file_hash[bucket] = f.offset;
+        }
+    }
+    let tables = (DATA_START + data).div_ceil(4) * 4;
+    let dir_hash_at = tables;
+    let dir_meta_at = dir_hash_at + 4 * dir_buckets as u64;
+    let file_hash_at = dir_meta_at + dir_meta_size;
+    let file_meta_at = file_hash_at + 4 * file_buckets as u64;
+    let end = file_meta_at + file_meta_size;
+    let mut header = vec![0u8; DATA_START as usize];
+    for (k, v) in [HEADER, dir_hash_at, 4 * dir_buckets as u64, dir_meta_at, dir_meta_size, file_hash_at, 4 * file_buckets as u64, file_meta_at, file_meta_size, DATA_START].iter().enumerate() {
+        put64(&mut header, 8 * k, *v);
+    }
+    let tmp = out.with_extension("part");
+    let mut w = std::io::BufWriter::with_capacity(8 << 20, File::create(&tmp)?);
+    w.write_all(&header)?;
+    let mut written = 0u64;
+    for &i in &order {
+        let f = &files[i];
+        w.write_all(&vec![0u8; (f.data - written) as usize])?;
+        let n = std::io::copy(&mut File::open(&f.path)?, &mut w)?;
+        if n != f.size {
+            return Err(Error::Malformed("a RomFS file changed while it was read"));
+        }
+        written = f.data + f.size;
+    }
+    w.write_all(&vec![0u8; (tables - DATA_START - written) as usize])?;
+    for v in &dir_hash {
+        w.write_all(&v.to_le_bytes())?;
+    }
+    w.write_all(&dir_meta)?;
+    for v in &file_hash {
+        w.write_all(&v.to_le_bytes())?;
+    }
+    w.write_all(&file_meta)?;
+    w.flush()?;
+    drop(w);
+    std::fs::rename(&tmp, out)?;
+    Ok(end)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,6 +434,34 @@ mod tests {
         let mut mid = [0u8; 6];
         r.read_at(5, &mut mid).unwrap();
         assert_eq!(&mid, b"d!!\0\0\0");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn built_images_read_back() {
+        let dir = std::env::temp_dir().join(format!("kirikae-romfs-build-{}", std::process::id()));
+        let src = dir.join("romfs");
+        std::fs::create_dir_all(src.join("Model/Sub")).unwrap();
+        std::fs::create_dir_all(src.join("Empty")).unwrap();
+        std::fs::write(src.join("top.txt"), b"top level").unwrap();
+        std::fs::write(src.join("Model/a.bin"), vec![7u8; 1000]).unwrap();
+        std::fs::write(src.join("Model/Sub/b.txt"), b"nested file").unwrap();
+        for k in 0..40 {
+            std::fs::write(src.join(format!("Model/f{k}.dat")), format!("file {k}")).unwrap();
+        }
+        let image = dir.join("romfs.bin");
+        let size = build(&src, &image).unwrap();
+        assert_eq!(std::fs::metadata(&image).unwrap().len(), size);
+        let mut r = Reader::open(&RomFs { path: image.clone(), offset: 0, size, compression: None }).unwrap();
+        let all = list(&mut r, usize::MAX).unwrap();
+        assert_eq!(all.len(), 43);
+        for (path, want) in [("/top.txt", b"top level".to_vec()), ("/Model/Sub/b.txt", b"nested file".to_vec()), ("/Model/f33.dat", b"file 33".to_vec())] {
+            let f = lookup(&mut r, path).unwrap().unwrap_or_else(|| panic!("{path} not found"));
+            let mut got = vec![0u8; f.size as usize];
+            r.read_at(f.offset, &mut got).unwrap();
+            assert_eq!(got, want, "{path}");
+        }
+        assert!(lookup(&mut r, "/Model/missing.bin").unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
