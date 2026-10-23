@@ -1,0 +1,10 @@
+[package]
+name = "kirikae-gui"
+description = "Graphical front end: pick a dump, recompile it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+eframe = "0.31"
+rfd = "0.15"
