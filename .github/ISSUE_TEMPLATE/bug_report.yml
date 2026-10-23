@@ -1,0 +1,61 @@
+name: Bug report
+description: Something does not build, crashes or renders wrong
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report! Please read [LEGAL.md](../blob/main/LEGAL.md) first.
+        **Never attach or link game files, keys, firmware, recompiled executables, saves or screenshots of copyrighted content.**
+        Requests for any of those are closed without an answer.
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: Rules
+      options:
+        - label: The game was dumped from my own console.
+          required: true
+        - label: This report contains no game files, keys, firmware or links to them.
+          required: true
+  - type: input
+    id: title
+    attributes:
+      label: Game title ID and version
+      description: The 16-digit title ID from `kirikae info` and the game version, if it is about a game.
+      placeholder: "0100000000000000, v1.0.0"
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Where does it fail?
+      options:
+        - kirikae build (recompiling)
+        - Starting the game
+        - In game (crash or hang)
+        - Graphics
+        - Audio or video
+        - Input
+        - GUI
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Kirikae log
+      description: The console output, ideally with `KIRIKAE_STATS=1`. Only Kirikae's own messages.
+      render: text
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Windows version, GPU and driver version, Kirikae commit.
+      placeholder: "Windows 11 23H2, RX 550 (Adrenalin 24.x), commit abc1234"
+    validations:
+      required: true

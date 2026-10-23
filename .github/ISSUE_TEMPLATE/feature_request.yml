@@ -1,0 +1,21 @@
+name: Feature request
+description: Something Kirikae should support or do better
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please read [LEGAL.md](../blob/main/LEGAL.md) first. Requests for game files, keys, firmware or
+        decryption support are closed without an answer.
+  - type: textarea
+    id: what
+    attributes:
+      label: What would you like?
+      description: The service, instruction, feature or tool, and why it matters.
+    validations:
+      required: true
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Public documentation (Switchbrew, envytools, NVIDIA docs, the Arm ARM) or MIT/BSD code. No GPL code, leaked or NDA material.

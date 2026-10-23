@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Project rules
+    url: https://github.com/Cor3Duo/kirikae/blob/main/LEGAL.md
+    about: What Kirikae is, what it is not, and the rules for users and contributors.
