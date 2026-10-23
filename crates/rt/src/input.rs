@@ -378,7 +378,8 @@ mod gamepad {
             }
         };
         loop {
-            while gilrs.next_event_blocking(Some(Duration::from_millis(8))).is_some() {}
+            gilrs.next_event_blocking(Some(Duration::from_millis(8)));
+            while gilrs.next_event().is_some() {}
             *STATE.lock().unwrap() = read(&gilrs);
         }
     }
