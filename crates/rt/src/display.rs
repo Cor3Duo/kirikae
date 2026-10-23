@@ -84,6 +84,7 @@ fn native_handle(window: &Window) -> Option<WindowHandle> {
     let d = window.display_handle().ok()?.as_raw();
     match (w, d) {
         (W::Win32(h), _) => Some(WindowHandle::Win32 { hwnd: h.hwnd.get(), hinstance: h.hinstance.map_or(0, |i| i.get()) }),
+        #[allow(clippy::unnecessary_cast)]
         (W::Xlib(h), D::Xlib(d)) => Some(WindowHandle::Xlib { display: d.display?.as_ptr() as usize, window: h.window as u64 }),
         (W::Xcb(h), D::Xcb(d)) => Some(WindowHandle::Xcb { connection: d.connection?.as_ptr() as usize, window: h.window.get() }),
         (W::Wayland(h), D::Wayland(d)) => Some(WindowHandle::Wayland { display: d.display.as_ptr() as usize, surface: h.surface.as_ptr() as usize }),
