@@ -70,11 +70,16 @@ nvdrv SUBMIT_GPFIFO ──► gpu/mod.rs: pushbuffer, methods by class ──►
                                        │                             twod.rs, DMA copies (mod.rs)
                                        │                             mme.rs (macros)
                                        ▼
-                              vulkan.rs: the renderer
-                              ├─ shaders: maxwell::translate → SPIR-V → pipelines (cached on disk)
-                              ├─ textures: tic.rs headers, formats.rs, astc.rs, block-linear detiling
-                              ├─ buffers: buffer_cache.rs (vertex, index and constant buffers on the GPU)
-                              └─ render targets as Vulkan images, written back to guest memory when read
+                              vulkan/: the renderer (mod.rs holds the Renderer and its setup)
+                              ├─ draw.rs: draws and dispatches; descriptors.rs: what each shader binds
+                              ├─ pipeline.rs: maxwell::translate → SPIR-V → pipelines (cached on disk)
+                              ├─ textures.rs, volumes.rs, tiling.rs: tic.rs headers, formats.rs,
+                              │  astc.rs, block-linear detiling, 3D textures
+                              ├─ buffers.rs: vertex and index buffers (buffer_cache.rs keeps them on the GPU)
+                              ├─ images.rs: render targets as Vulkan images; readback.rs writes them back
+                              │  to guest memory when read; guest_writes.rs tracks CPU writes over them
+                              ├─ submit.rs: command buffers, the upload ring, batches in flight
+                              └─ present.rs: the swapchain
 vi QueueBuffer ──► display.rs: the window and the swapchain, frame pacing
 ```
 
