@@ -2503,7 +2503,7 @@ impl Renderer {
         let mut descriptors = std::mem::take(&mut scratch.descriptors);
         descriptors.clear();
         self.draw_targets.clear();
-        self.draw_targets.extend(targets.iter().flatten().map(|&(k, _)| k));
+        self.draw_targets.extend(targets.iter().flatten().map(|&(k, _)| k).chain(depth));
         self.feedback_used.clear();
         let described = self.descriptors(gpu, mem, regs, cbufs, &vs, fs.as_deref(), &mut descriptors);
         self.draw_targets.clear();
