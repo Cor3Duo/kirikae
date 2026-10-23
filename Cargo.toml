@@ -12,7 +12,7 @@ repository = "https://github.com/Cor3Duo/kirikae"
 kirikae-a64 = { path = "crates/a64" }
 kirikae-loader = { path = "crates/loader" }
 kirikae-maxwell = { path = "crates/maxwell" }
-kirikae-rt = { path = "crates/rt" }
+kirikae-rt = { path = "crates/rt", default-features = false }
 kirikae-recomp = { path = "crates/recomp" }
 kirikae-testkit = { path = "crates/testkit" }
 

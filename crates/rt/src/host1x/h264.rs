@@ -1,5 +1,8 @@
+#[cfg(feature = "h264")]
 use openh264::decoder::{DecodeOptions, Decoder as OpenH264, DecoderConfig, Flush};
+#[cfg(feature = "h264")]
 use openh264::formats::YUVSource;
+#[cfg(feature = "h264")]
 use openh264::OpenH264API;
 
 use super::u32_at;
@@ -242,11 +245,27 @@ pub struct Frame {
     pub uv: Vec<u8>,
 }
 
+#[cfg(not(feature = "h264"))]
+pub struct Decoder;
+
+#[cfg(not(feature = "h264"))]
+impl Decoder {
+    pub fn new() -> Result<Decoder, String> {
+        Err("H.264 support was not built in".into())
+    }
+
+    pub fn decode(&mut self, _info: &PictureInfo, _slices: &[u8]) -> Result<Option<Frame>, String> {
+        Err("H.264 support was not built in".into())
+    }
+}
+
+#[cfg(feature = "h264")]
 pub struct Decoder {
     inner: OpenH264,
     headers: Vec<u8>,
 }
 
+#[cfg(feature = "h264")]
 impl Decoder {
     pub fn new() -> Result<Decoder, String> {
         let config = DecoderConfig::new().flush_after_decode(Flush::Flush);
@@ -287,7 +306,7 @@ impl Decoder {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "h264"))]
 mod tests {
     use super::*;
 
