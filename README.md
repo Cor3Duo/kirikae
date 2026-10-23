@@ -8,6 +8,7 @@
 
 <br>
 
+[![CI](https://github.com/Cor3Duo/kirikae/actions/workflows/ci.yml/badge.svg)](https://github.com/Cor3Duo/kirikae/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 [![Rust 2024](https://img.shields.io/badge/rust-2024%20edition-orange?logo=rust)](https://www.rust-lang.org)
 [![Platform: Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0078D6)](#requirements)
@@ -33,6 +34,11 @@ green is implemented, light green only returns success or constants, gray is mis
 
 <br>
 
+> [!WARNING]
+> **Early preview.** Kirikae already plays complete commercial games, but it has only been tested on a
+> handful of them: expect crashes, missing services and rendering bugs, and please
+> [report them](https://github.com/Cor3Duo/kirikae/issues/new/choose).
+
 > [!IMPORTANT]
 > Only use games dumped from **your own console**. Kirikae ships, downloads and decrypts no game files:
 > it only reads dumps that are already decrypted, the code is translated and compiled on the player's
@@ -45,6 +51,7 @@ green is implemented, light green only returns success or constants, gray is mis
 - [Highlights](#highlights)
 - [How it works](#how-it-works)
 - [Requirements](#requirements)
+- [Preparing a game](#preparing-a-game)
 - [Getting started](#getting-started)
 - [Features](#features)
 - [Configuration](#configuration)
@@ -100,8 +107,28 @@ command processor on top of Vulkan, with shaders translated to SPIR-V), audio an
 - [Rust](https://rustup.rs) (`cargo`) and the MSVC linker (Visual Studio Build Tools with *Desktop
   development with C++*): games are compiled on your machine. The first build downloads the runtime's
   dependencies through Cargo.
-- A **decrypted** dump of a game you own: a `.dnsp` (a PFS0 holding the program NCA in plaintext), an
-  extracted ExeFS folder (with `romfs.bin` next to it, if the game has one), an `.nso` or an `.nro`.
+- A **decrypted** dump of a game you own (see [Preparing a game](#preparing-a-game)).
+
+## Preparing a game
+
+Kirikae never decrypts anything, so it needs the game's files already extracted. A homebrew dumper
+running on **your own console** (for example nxdumptool) can dump a game's ExeFS and RomFS; put them in
+one folder:
+
+```
+my-game/
+├── exefs/        main, main.npdm, rtld, sdk, subsdk0...
+└── romfs/        the game's files, as dumped (or romfs.bin, a RomFS image)
+```
+
+Then pick the folder in the GUI (**Add game folder...**) or run `kirikae build my-game -o out`. The
+first build packs `romfs/` into `my-game/romfs.bin` (delete it to rebuild), and the title ID comes from
+`main.npdm`. Also accepted: a `.dnsp` (a PFS0 holding the program NCA in plaintext), a lone `.nso` and
+homebrew `.nro` files.
+
+> [!NOTE]
+> Updates and DLC are not supported yet: dump the base game. `kirikae dev extract <dump> <folder>`
+> turns any accepted dump into the folder layout above.
 
 ## Getting started
 
@@ -257,6 +284,8 @@ the badges and a [daily history](docs/progress/history.html). Totals cover the i
 exposes or games ask for, not the whole system.
 
 ## Project layout
+
+A longer tour of the code is in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 | Crate | What it does |
 | --- | --- |

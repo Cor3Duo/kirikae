@@ -10,6 +10,8 @@ Thanks for helping! Issues and pull requests are welcome in English or Portugues
 - Game-specific fixes belong in a plugin (`kirikae build --plugin`), not in the runtime, unless they
   fix how the hardware or the system really behaves.
 
+Start with [ARCHITECTURE.md](ARCHITECTURE.md) for a map of the code.
+
 ## Building and testing
 
 ```bash
