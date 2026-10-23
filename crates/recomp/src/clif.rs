@@ -33,10 +33,19 @@ const I64: ir::Type = types::I64;
 const I32: ir::Type = types::I32;
 
 pub fn host_isa() -> Result<OwnedTargetIsa, String> {
+    native_isa(false)
+}
+
+fn object_isa() -> Result<OwnedTargetIsa, String> {
+    native_isa(!cfg!(windows))
+}
+
+fn native_isa(pic: bool) -> Result<OwnedTargetIsa, String> {
     let mut flags = settings::builder();
     let set = |f: &mut settings::Builder, k: &str, v: &str| f.set(k, v).map_err(|e| format!("cranelift setting {k}: {e}"));
     set(&mut flags, "opt_level", "speed")?;
     set(&mut flags, "enable_verifier", if cfg!(debug_assertions) { "true" } else { "false" })?;
+    set(&mut flags, "is_pic", if pic { "true" } else { "false" })?;
     let builder = cranelift_native::builder().map_err(|e| format!("host not supported by Cranelift: {e}"))?;
     builder.finish(settings::Flags::new(flags)).map_err(|e| e.to_string())
 }
@@ -1375,7 +1384,7 @@ pub fn compile_program(
     progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<CompileReport, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let isa = host_isa()?;
+    let isa = object_isa()?;
     let list: Vec<u64> = entries.iter().copied().collect();
     let chunks: Vec<&[u64]> = list.chunks(per_object.max(1)).collect();
     let next = AtomicUsize::new(0);
