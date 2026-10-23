@@ -280,11 +280,11 @@ impl App {
             let paced = PACED_NS.load(Ordering::Relaxed);
             let (frames0, paced0) = std::mem::replace(&mut self.counted, (fps, paced));
             if paced > paced0 {
-                title += &format!(" (sem limite: {:.0} fps)", uncapped_fps(fps - frames0, elapsed, paced - paced0));
+                title += &format!(" (uncapped: {:.0} fps)", uncapped_fps(fps - frames0, elapsed, paced - paced0));
             }
             let gaps = crate::usage::new_events();
             if gaps > 0 {
-                title += &format!(" - {gaps} {} de cobertura", if gaps == 1 { "novo item" } else { "novos itens" });
+                title += &format!(" - {gaps} new coverage {}", if gaps == 1 { "item" } else { "items" });
             }
             window.set_title(&title);
             self.shown = 0;
