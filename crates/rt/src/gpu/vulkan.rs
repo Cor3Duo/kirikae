@@ -1696,7 +1696,9 @@ impl Renderer {
         }
         self.begin();
         self.end_rendering();
-        let value = vk::ClearDepthStencilValue { depth: f32::from_bits(regs[0x364]).clamp(0.0, 1.0), stencil: regs[0x368] & 0xff };
+        let depth = f32::from_bits(regs[0x364]).clamp(0.0, 1.0);
+        let depth = if key.format == vk::Format::D16_UNORM { (depth * 65535.0 + 0.25).floor() / 65535.0 } else { depth };
+        let value = vk::ClearDepthStencilValue { depth, stencil: regs[0x368] & 0xff };
         let range = [vk::ImageSubresourceRange { aspect_mask: mask, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 }];
         let image = self.images[&key].image;
         unsafe { self.device.cmd_clear_depth_stencil_image(self.cmd, image, vk::ImageLayout::GENERAL, &value, &range) };
@@ -2711,6 +2713,8 @@ impl Renderer {
         let types = depth.map_or(types, |(s, o)| types.wrapping_mul(0x1_0000_0001).wrapping_add((s.to_bits() as u64) << 32 | o.to_bits() as u64));
         let alpha_test = stage == Stage::Fragment && alpha_test_func(regs) != 7;
         let types = types.wrapping_mul(2).wrapping_add(alpha_test as u64);
+        let depth_unorm16 = matches!(stage, Stage::Vertex | Stage::Fragment) && regs[0x54e] & 1 == 1 && regs[0x3fa] == 0x13;
+        let types = types.wrapping_mul(2).wrapping_add(depth_unorm16 as u64);
         let key = ShaderKey { va, hash: head, stage: stage as u8, types };
         if let Some(s) = self.shaders.get(&key) {
             return Ok(s.clone());
@@ -2740,6 +2744,7 @@ impl Renderer {
             shared_memory: compute.map_or(0, |q| q.shared),
             image_binding: base + IMAGE_OFFSET,
             depth_transform: depth,
+            depth_unorm16,
             alpha_test,
             exact_texel_rounding: crate::env_var!("KIRIKAE_NO_TEXEL_ROUNDING").is_some(),
             ..Options::new(stage, base)

@@ -63,6 +63,7 @@ pub struct Options {
     pub shared_memory: u32,
     pub image_binding: u32,
     pub depth_transform: Option<(f32, f32)>,
+    pub depth_unorm16: bool,
     pub alpha_test: bool,
     pub exact_texel_rounding: bool,
 }
@@ -84,6 +85,7 @@ impl Options {
             shared_memory: 0,
             image_binding: base + 104,
             depth_transform: None,
+            depth_unorm16: false,
             alpha_test: false,
             exact_texel_rounding: false,
         }
@@ -587,7 +589,7 @@ impl<'a> Translator<'a> {
         if self.opts.stage == Stage::Fragment {
             self.fragment_outputs()?;
         }
-        if let Some((scale, offset)) = self.opts.depth_transform.filter(|_| self.opts.stage == Stage::Vertex) {
+        if self.opts.stage == Stage::Vertex && (self.opts.depth_transform.is_some() || self.opts.depth_unorm16) {
             let v4f = self.t.v4f;
             let position = self.builtin(BuiltIn::Position, v4f, true);
             let f32_ = self.t.f32;
@@ -595,12 +597,23 @@ impl<'a> Translator<'a> {
             let (two, three) = (self.u(2), self.u(3));
             let zp = self.b.access_chain(ptr_ty, None, position, [two])?;
             let wp = self.b.access_chain(ptr_ty, None, position, [three])?;
-            let z = self.b.load(f32_, None, zp, None, [])?;
+            let mut z = self.b.load(f32_, None, zp, None, [])?;
             let w = self.b.load(f32_, None, wp, None, [])?;
-            let (scale, offset) = (self.f(scale), self.f(offset));
-            let wo = self.b.f_mul(f32_, None, w, offset)?;
-            self.exact(wo);
-            let z = self.ext(f32_, glsl::FMA, &[z, scale, wo])?;
+            if let Some((scale, offset)) = self.opts.depth_transform {
+                let (scale, offset) = (self.f(scale), self.f(offset));
+                let wo = self.b.f_mul(f32_, None, w, offset)?;
+                self.exact(wo);
+                z = self.ext(f32_, glsl::FMA, &[z, scale, wo])?;
+            }
+            if self.opts.depth_unorm16 {
+                let window = self.b.f_div(f32_, None, z, w)?;
+                let snapped = self.snap_unorm16(window)?;
+                let snapped = self.b.f_mul(f32_, None, snapped, w)?;
+                let zero = self.f(0.0);
+                let bool_ = self.t.bool;
+                let positive = self.b.f_ord_greater_than(bool_, None, w, zero)?;
+                z = self.b.select(f32_, None, positive, snapped, z)?;
+            }
             self.b.store(zp, z, None, [])?;
         }
         self.b.ret()?;
@@ -2587,9 +2600,21 @@ impl<'a> Translator<'a> {
             let f32_ = self.t.f32;
             let var = self.builtin(BuiltIn::FragDepth, f32_, true);
             let d = self.rf(reg + 1)?;
+            let d = if self.opts.depth_unorm16 { self.snap_unorm16(d)? } else { d };
             self.b.store(var, d, None, [])?;
         }
         Ok(())
+    }
+
+    fn snap_unorm16(&mut self, v: Word) -> R<Word> {
+        let f32_ = self.t.f32;
+        let (scale, bias) = (self.f(65535.0), self.f(0.25));
+        let scaled = self.ext(f32_, glsl::FMA, &[v, scale, bias])?;
+        self.exact(scaled);
+        let level = self.ext(f32_, glsl::FLOOR, &[scaled])?;
+        let snapped = self.b.f_div(f32_, None, level, scale)?;
+        self.exact(snapped);
+        Ok(snapped)
     }
 
     fn alpha_test(&mut self, alpha: Word) -> R {
