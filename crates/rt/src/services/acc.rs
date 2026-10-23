@@ -30,7 +30,7 @@ impl Service for Account {
         match req.cmd {
             0 => Reply::ok().u32(1),
             1 => Reply::ok().u8((req.data.get(..16) == Some(&USER_ID[..])) as u8),
-            2 | 3 | 141 => {
+            2 | 3 | 131 | 141 => {
                 if let Some(out) = req.out_buf(0) {
                     let mut ids = vec![0u8; out.size.min(0x80) as usize];
                     ids[..16].copy_from_slice(&USER_ID);
