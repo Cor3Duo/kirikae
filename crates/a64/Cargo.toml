@@ -1,0 +1,8 @@
+[package]
+name = "kirikae-a64"
+description = "AArch64 decoder, lifter to kirikae IR, shared instruction semantics and a small test assembler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
