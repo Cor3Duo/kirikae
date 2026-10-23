@@ -223,6 +223,7 @@ impl Seen {
 
 pub fn find_entries(space: &CodeSpace, seeds: &[u64]) -> (BTreeSet<u64>, u64) {
     let mut entries: BTreeSet<u64> = seeds.iter().copied().filter(|a| space.is_code(*a)).collect();
+    let seeded = entries.clone();
     let (mut calls, mut cases) = (BTreeSet::new(), BTreeSet::<u64>::new());
     let mut seen = Seen::new(space);
     let mut work: Vec<u64> = entries.iter().copied().collect();
@@ -256,7 +257,7 @@ pub fn find_entries(space: &CodeSpace, seeds: &[u64]) -> (BTreeSet<u64>, u64) {
             Control::Return | Control::Undefined => {}
         }
     }
-    entries.retain(|e| calls.contains(e) || !cases.contains(e));
+    entries.retain(|e| seeded.contains(e) || calls.contains(e) || !cases.contains(e));
     (entries, seen.count())
 }
 
@@ -349,5 +350,20 @@ mod tests {
         let jump = f.blocks.last().unwrap();
         assert_eq!(jump.last().control(), Control::JumpIndirect);
         assert!(!f.has_block(jump.next), "{f:x?}");
+    }
+
+    #[test]
+    fn seeds_stay_entries_when_they_are_cases() {
+        let image = kirikae_loader::load(&kirikae_testkit::hello_nro(), LOAD_BASE).unwrap();
+        let space = CodeSpace::new(vec![&image]);
+        let prog = discover(&image);
+        let classify = prog.functions.iter().find(|f| f.blocks.iter().any(|b| b.last().control() == Control::JumpIndirect)).unwrap();
+        let br = classify.blocks.iter().find(|b| b.last().control() == Control::JumpIndirect).unwrap().last().addr;
+        let case = jump_table(&space, br).unwrap().0[0];
+
+        let (entries, _) = find_entries(&space, &[image.entry]);
+        assert!(!entries.contains(&case), "{entries:x?}");
+        let (entries, _) = find_entries(&space, &[image.entry, case]);
+        assert!(entries.contains(&case), "{entries:x?}");
     }
 }
