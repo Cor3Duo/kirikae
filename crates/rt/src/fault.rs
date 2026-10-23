@@ -118,7 +118,7 @@ mod sys {
     pub fn install() {
         unsafe {
             let mut sa: libc::sigaction = std::mem::zeroed();
-            sa.sa_sigaction = handler as usize;
+            sa.sa_sigaction = handler as *const () as usize;
             sa.sa_flags = libc::SA_SIGINFO;
             libc::sigaction(libc::SIGSEGV, &sa, std::ptr::null_mut());
             libc::sigaction(libc::SIGBUS, &sa, std::ptr::null_mut());
