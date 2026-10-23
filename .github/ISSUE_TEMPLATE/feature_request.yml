@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Please read [LEGAL.md](../blob/main/LEGAL.md) first. Requests for game files, keys, firmware or
+        Please read [LEGAL.md](https://github.com/Cor3Duo/kirikae/blob/main/LEGAL.md) first. Requests for game files, keys, firmware or
         decryption support are closed without an answer.
   - type: textarea
     id: what
