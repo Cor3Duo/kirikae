@@ -5,7 +5,7 @@
    "id": "services",
    "title": "Horizon services",
    "unit": "IPC commands",
-   "implemented": 360,
+   "implemented": 334,
    "total": 1230,
    "groups": [
     {
@@ -111,6 +111,7 @@
       51,
       100,
       101,
+      131,
       140,
       141,
       150,
@@ -164,10 +165,6 @@
       {
        "id": 130,
        "name": "LoadOpenContext"
-      },
-      {
-       "id": 131,
-       "name": "ListOpenContextStoredUsers"
       }
      ],
      "undocumented": [],
@@ -1524,19 +1521,28 @@
      "official": "nn::audio::detail::IAudioRendererManager",
      "url": "https://switchbrew.org/wiki/Audio_services",
      "referenced": true,
-     "implemented": [
-      0,
-      1,
-      2,
-      4
-     ],
-     "constant": [
-      1
-     ],
+     "implemented": [],
+     "constant": [],
      "missing": [
+      {
+       "id": 0,
+       "name": "OpenAudioRenderer"
+      },
+      {
+       "id": 1,
+       "name": "GetWorkBufferSize"
+      },
+      {
+       "id": 2,
+       "name": "GetAudioDeviceService"
+      },
       {
        "id": 3,
        "name": "OpenAudioRendererForManualExecution"
+      },
+      {
+       "id": 4,
+       "name": "GetAudioDeviceServiceWithRevisionInfo"
       }
      ],
      "undocumented": [],
@@ -1548,27 +1554,61 @@
      "official": "nn::audio::detail::IAudioDevice",
      "url": "https://switchbrew.org/wiki/Audio_services",
      "referenced": true,
-     "implemented": [
-      0,
-      1,
-      2,
-      3,
-      4,
-      5,
-      6,
-      7,
-      8,
-      10,
-      11,
-      12,
-      13
-     ],
-     "constant": [
-      1,
-      5,
-      7
-     ],
+     "implemented": [],
+     "constant": [],
      "missing": [
+      {
+       "id": 0,
+       "name": "ListAudioDeviceName"
+      },
+      {
+       "id": 1,
+       "name": "SetAudioDeviceOutputVolume"
+      },
+      {
+       "id": 2,
+       "name": "GetAudioDeviceOutputVolume"
+      },
+      {
+       "id": 3,
+       "name": "GetActiveAudioDeviceName"
+      },
+      {
+       "id": 4,
+       "name": "QueryAudioDeviceSystemEvent"
+      },
+      {
+       "id": 5,
+       "name": "GetActiveChannelCount"
+      },
+      {
+       "id": 6,
+       "name": "ListAudioDeviceNameAuto"
+      },
+      {
+       "id": 7,
+       "name": "SetAudioDeviceOutputVolumeAuto"
+      },
+      {
+       "id": 8,
+       "name": "GetAudioDeviceOutputVolumeAuto"
+      },
+      {
+       "id": 10,
+       "name": "GetActiveAudioDeviceNameAuto"
+      },
+      {
+       "id": 11,
+       "name": "QueryAudioDeviceInputEvent"
+      },
+      {
+       "id": 12,
+       "name": "QueryAudioDeviceOutputEvent"
+      },
+      {
+       "id": 13,
+       "name": "GetActiveAudioOutputDeviceName"
+      },
       {
        "id": 14,
        "name": "ListAudioOutputDeviceName"
@@ -1611,24 +1651,53 @@
      "official": "nn::audio::detail::IAudioRenderer",
      "url": "https://switchbrew.org/wiki/Audio_services",
      "referenced": true,
-     "implemented": [
-      0,
-      1,
-      2,
-      3,
-      4,
-      5,
-      6,
-      7,
-      8,
-      9,
-      10
-     ],
-     "constant": [
-      8,
-      9
-     ],
+     "implemented": [],
+     "constant": [],
      "missing": [
+      {
+       "id": 0,
+       "name": "GetSampleRate"
+      },
+      {
+       "id": 1,
+       "name": "GetSampleCount"
+      },
+      {
+       "id": 2,
+       "name": "GetMixBufferCount"
+      },
+      {
+       "id": 3,
+       "name": "GetState"
+      },
+      {
+       "id": 4,
+       "name": "RequestUpdate"
+      },
+      {
+       "id": 5,
+       "name": "Start"
+      },
+      {
+       "id": 6,
+       "name": "Stop"
+      },
+      {
+       "id": 7,
+       "name": "QuerySystemEvent"
+      },
+      {
+       "id": 8,
+       "name": "SetRenderingTimeLimit"
+      },
+      {
+       "id": 9,
+       "name": "GetRenderingTimeLimit"
+      },
+      {
+       "id": 10,
+       "name": "RequestUpdateAuto"
+      },
       {
        "id": 11,
        "name": "ExecuteAudioRendererRendering"
@@ -1805,6 +1874,7 @@
      "referenced": true,
      "implemented": [
       1,
+      2,
       18,
       22,
       23,
@@ -1845,10 +1915,6 @@
       {
        "id": 0,
        "name": "OpenFileSystem"
-      },
-      {
-       "id": 2,
-       "name": "OpenDataFileSystemByCurrentProcess"
       },
       {
        "id": 7,
