@@ -1,0 +1,13 @@
+[package]
+name = "kirikae-maxwell"
+description = "Maxwell (Tegra X1) shader decoder and translator to SPIR-V"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rspirv = "0.13"
+
+[dev-dependencies]
+naga = { version = "30", features = ["spv-in"] }
+rspirv = "0.13"
