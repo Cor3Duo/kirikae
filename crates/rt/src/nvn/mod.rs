@@ -80,6 +80,17 @@ fn wrap(p: &'static Process, trace: &Arc<Trace>, name: &str, real: u64) -> u64 {
                     }),
                 )
             }
+            None if trace.shadow && shadow::recorded_elsewhere(name) => {
+                let name: &'static str = Box::leak(name.to_string().into_boxed_str());
+                p.hle.add(
+                    name,
+                    Arc::new(move |c| {
+                        calls.fetch_add(1, Ordering::Relaxed);
+                        shadow::unsupported(name, c.x[0]);
+                        c.pc = real;
+                    }),
+                )
+            }
             None => p.hle.add(
                 name,
                 Arc::new(move |c| {

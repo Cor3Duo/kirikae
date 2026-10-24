@@ -82,6 +82,10 @@ struct Model {
     expected: VecDeque<Work>,
     decoded: VecDeque<Work>,
     held: Option<Draw>,
+    command_memory: HashMap<u64, u64>,
+    missing: HashMap<u64, Vec<&'static str>>,
+    unsupported: std::collections::HashSet<u64>,
+    unsupported_calls: HashMap<&'static str, u64>,
     stats: Stats,
 }
 
@@ -108,6 +112,74 @@ struct Stats {
 
 static MODEL: Mutex<Option<Model>> = Mutex::new(None);
 
+#[derive(Default)]
+struct Segments {
+    ranges: std::collections::BTreeMap<u64, (u64, u64, bool)>,
+    words_supported: u64,
+    words_in_lists: u64,
+    words_elsewhere: u64,
+    entries_in_lists: u64,
+    entries_elsewhere: u64,
+}
+
+impl Segments {
+    fn insert(&mut self, start: u64, end: u64, handle: u64, supported: bool) {
+        let overlapping: Vec<u64> = self.ranges.range(..end).rev().take_while(|(_, r)| r.0 > start).map(|(s, _)| *s).collect();
+        for s in overlapping {
+            self.ranges.remove(&s);
+        }
+        self.ranges.insert(start, (end, handle, supported));
+    }
+
+    fn find(&self, va: u64, len: u64) -> Option<(u64, bool)> {
+        self.ranges.range(..=va).next_back().filter(|(_, r)| va + len <= r.0).map(|(_, r)| (r.1, r.2))
+    }
+}
+
+static SEGMENTS: Mutex<Segments> = Mutex::new(Segments { ranges: std::collections::BTreeMap::new(), words_supported: 0, words_in_lists: 0, words_elsewhere: 0, entries_in_lists: 0, entries_elsewhere: 0 });
+
+const NOT_RECORDED: [&str; 12] = [
+    "nvnCommandBufferInitialize",
+    "nvnCommandBufferFinalize",
+    "nvnCommandBufferSetDebugLabel",
+    "nvnCommandBufferSetMemoryCallback",
+    "nvnCommandBufferSetMemoryCallbackData",
+    "nvnCommandBufferAddControlMemory",
+    "nvnCommandBufferGetCommandMemoryUsed",
+    "nvnCommandBufferGetControlMemoryUsed",
+    "nvnCommandBufferGetCommandMemoryFree",
+    "nvnCommandBufferGetControlMemoryFree",
+    "nvnCommandBufferGetCommandMemorySize",
+    "nvnCommandBufferGetControlMemorySize",
+];
+
+pub fn recorded_elsewhere(name: &str) -> bool {
+    name.starts_with("nvnCommandBuffer") && !NOT_RECORDED.contains(&name)
+}
+
+pub fn unsupported(name: &'static str, cmdbuf: u64) {
+    with(|m| {
+        *m.unsupported_calls.entry(name).or_default() += 1;
+        if let Some(v) = m.missing.get_mut(&cmdbuf) {
+            v.push(name);
+        }
+    });
+}
+
+pub fn cp_entry(va: u64, words: u64) {
+    let mut s = SEGMENTS.lock().unwrap();
+    if let Some((_, supported)) = s.find(va, words * 4) {
+        s.words_in_lists += words;
+        if supported {
+            s.words_supported += words;
+        }
+        s.entries_in_lists += 1;
+    } else {
+        s.words_elsewhere += words;
+        s.entries_elsewhere += 1;
+    }
+}
+
 fn with<R>(f: impl FnOnce(&mut Model) -> R) -> R {
     let mut m = MODEL.lock().unwrap();
     f(m.get_or_insert_with(Model::default))
@@ -117,6 +189,7 @@ fn with<R>(f: impl FnOnce(&mut Model) -> R) -> R {
 pub enum Hook {
     BeginRecording,
     EndRecording,
+    AddCommandMemory,
     CallCommands,
     QueueSubmitCommands,
     ProgramSetShaders,
@@ -152,6 +225,7 @@ pub fn hook(name: &str) -> Option<Hook> {
     Some(match name {
         "nvnCommandBufferBeginRecording" => Hook::BeginRecording,
         "nvnCommandBufferEndRecording" => Hook::EndRecording,
+        "nvnCommandBufferAddCommandMemory" => Hook::AddCommandMemory,
         "nvnCommandBufferCallCommands" | "nvnCommandBufferCopyCommands" => Hook::CallCommands,
         "nvnQueueSubmitCommands" => Hook::QueueSubmitCommands,
         "nvnProgramSetShaders" => Hook::ProgramSetShaders,
@@ -215,13 +289,36 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
     match hook {
         Hook::BeginRecording => with(|m| {
             m.recording.insert(a[0], Vec::new());
+            m.missing.insert(a[0], Vec::new());
         }),
+        Hook::AddCommandMemory => {
+            let mem = &c.process().memory;
+            let read = |at: u64, len: u64| mem.read(at, len);
+            with(|m| {
+                if let Some(va) = m.res.pool_address(a[1], &read) {
+                    m.command_memory.insert(a[0], va + a[2]);
+                }
+            });
+        }
         Hook::EndRecording => {
             call_guest(c, real, false);
             let handle = c.x[0];
+            let used = real_of("nvnCommandBufferGetCommandMemoryUsed").map(|f| query(c, f, &[a[0]]));
             with(|m| {
                 let list = m.recording.remove(&a[0]).unwrap_or_default();
+                let calls_unsupported = list.iter().any(|c| matches!(c, Cmd::Call(h) if h.iter().any(|h| m.unsupported.contains(h) || !m.lists.contains_key(h))));
+                if m.missing.remove(&a[0]).is_some_and(|v| !v.is_empty()) || calls_unsupported {
+                    m.unsupported.insert(handle);
+                } else {
+                    m.unsupported.remove(&handle);
+                }
                 m.lists.insert(handle, Arc::new(list));
+                if let (Some(&va), Some(used)) = (m.command_memory.get(&a[0]), used)
+                    && used > 0
+                {
+                    let supported = !m.unsupported.contains(&handle);
+                    SEGMENTS.lock().unwrap().insert(va, va + used, handle, supported);
+                }
             });
             c.pc = c.x[30];
             return;
@@ -734,6 +831,20 @@ pub fn report() {
             s.texture_addresses
         );
         eprintln!("kirikae:         nvn shadow resources: {:?}, {} texture pools", m.res.checks, m.res.texture_pools.len());
+        let seg = SEGMENTS.lock().unwrap();
+        eprintln!(
+            "kirikae:         nvn command memory: {} pushbuffer entries ({} words, {} from lists the host fully models) inside recorded lists, {} entries ({} words) elsewhere; {} list ranges known",
+            seg.entries_in_lists,
+            seg.words_in_lists,
+            seg.words_supported,
+            seg.entries_elsewhere,
+            seg.words_elsewhere,
+            seg.ranges.len()
+        );
+        let mut calls: Vec<_> = m.unsupported_calls.iter().collect();
+        calls.sort_by_key(|c| std::cmp::Reverse(*c.1));
+        let calls: Vec<String> = calls.iter().take(20).map(|(n, k)| format!("{} {k}", n.trim_start_matches("nvnCommandBuffer"))).collect();
+        eprintln!("kirikae:         nvn commands the model does not follow yet: {}", calls.join(", "));
         eprint!("{}", m.learned.report());
         eprint!("{}", m.learned.odd_examples());
     });

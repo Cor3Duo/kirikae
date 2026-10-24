@@ -557,6 +557,10 @@ impl Resources {
         ))
     }
 
+    pub fn pool_address(&mut self, obj: u64, read: &dyn Fn(u64, u64) -> Option<Vec<u8>>) -> Option<u64> {
+        self.pool(obj, read).map(|p| p.pitch)
+    }
+
     pub fn pool_memory(&self, builder: u64) -> u64 {
         self.pool_builders.get(&builder).map_or(0, |b| b.0)
     }

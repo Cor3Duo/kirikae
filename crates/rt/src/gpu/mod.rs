@@ -285,6 +285,9 @@ impl Gpu {
                 continue;
             }
             self.cpu_access(va, words * 4);
+            if crate::nvn::shadow::ON.load(Ordering::Relaxed) {
+                crate::nvn::shadow::cp_entry(va, words);
+            }
             let bytes = self.bytes(mem, va, words * 4).ok_or_else(|| format!("pushbuffer at GPU address {va:#x} is not mapped"))?;
             let w: Vec<u32> = bytes.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)).collect();
             self.run_pushbuffer(mem, &w);
