@@ -36,6 +36,7 @@ pub mod reg {
     pub const PRIMITIVE_RESTART: usize = 0x591;
     pub const DRAW_INDEX_BUFFER: u32 = 0x5f8;
     pub const DRAW_INDEX_BUFFER_INLINE: std::ops::RangeInclusive<u32> = 0x5f9..=0x5fe;
+    pub const TOPOLOGY_OVERRIDE: usize = 0x65c;
     pub const CLEAR_SURFACE: u32 = 0x674;
     pub const REPORT_SEMAPHORE: usize = 0x6c0;
     pub const REPORT_SEMAPHORE_D: u32 = 0x6c3;
@@ -207,7 +208,8 @@ impl Gpu {
         }
     }
 
-    pub(super) fn draw(&self, mem: &GuestMemory, regs: &[u32], cbs: &[[Option<(u64, u32)>; CB_SLOTS]; 5], draw: Draw) {
+    pub(super) fn draw(&self, mem: &GuestMemory, regs: &[u32], cbs: &[[Option<(u64, u32)>; CB_SLOTS]; 5], mut draw: Draw) {
+        draw.topology = topology(regs[reg::TOPOLOGY_OVERRIDE], draw.topology);
         let n = self.stats.draws.fetch_add(1, Ordering::Relaxed);
         if crate::nvn::exec::CHECK.load(Ordering::Relaxed) {
             crate::nvn::exec::cp_draw(regs, cbs, &draw);
@@ -334,5 +336,28 @@ impl Gpu {
             b.extend_from_slice(&super::report_ticks().to_le_bytes());
             self.write(mem, addr, &b);
         }
+    }
+}
+
+fn topology(forced: u32, begin: u32) -> u32 {
+    match forced {
+        0 => begin,
+        1 => 0,
+        2 => 1,
+        v => v,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::topology;
+
+    #[test]
+    fn topology_override_wins() {
+        assert_eq!(topology(0, 7), 7);
+        assert_eq!(topology(4, 0), 4);
+        assert_eq!(topology(5, 0), 5);
+        assert_eq!(topology(1, 4), 0);
+        assert_eq!(topology(2, 4), 1);
     }
 }
