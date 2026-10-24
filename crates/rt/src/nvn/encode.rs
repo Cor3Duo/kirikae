@@ -143,7 +143,7 @@ pub fn predict(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u64
                 }
             }
             Kind::BlendColor => put(0x4c7 + i, u32::MAX, r),
-            Kind::Viewport | Kind::Scissor | Kind::TargetFormat | Kind::BlendRegister | Kind::AttribCount | Kind::StreamCount => {}
+            Kind::Viewport | Kind::Scissor | Kind::TargetFormat | Kind::BlendRegister | Kind::AttribCount | Kind::StreamCount | Kind::DepthFormat => {}
         }
     }
     if let Some(c) = cull {
@@ -168,6 +168,41 @@ pub fn predict(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u64
         r(at, 0xff, (a >> 32) as u32);
         r(at + 1, u32::MAX, a as u32);
     };
+    let colors = d.surfaces.iter().filter(|s| s.0 < 8).map(|s| s.0 as u32 + 1).max().unwrap_or(0);
+    put(reg::CT_SELECT, u32::MAX, 0xfac_6880 | colors);
+    put(0x54e, 1, d.surfaces.iter().any(|s| s.0 == 8) as u32);
+    for &(k, s) in &d.surfaces {
+        let format = learned.usual(if k < 8 { Kind::TargetFormat } else { Kind::DepthFormat }, s.format as u64);
+        let memory = match s.pitch {
+            Some(_) => 0x1000,
+            None => s.block_height_log2 << 4,
+        };
+        let width = if s.bytes > 0 { (s.width * s.bytes).div_ceil(64) * 64 / s.bytes } else { s.width };
+        let width = if s.pitch.is_some() { s.width } else { width };
+        if k < 8 {
+            let base = reg::COLOR_TARGET + 16 * k as usize;
+            address(&mut put, base, d.all_targets[k as usize]);
+            put(base + 2, u32::MAX, s.pitch.unwrap_or(width));
+            put(base + 3, 0x1_ffff, s.height);
+            if let Some(f) = format {
+                put(base + 4, u32::MAX, f as u32);
+            }
+            put(base + 5, 0x1070, memory);
+        } else {
+            put(0x48a, u32::MAX, width);
+            put(0x48b, 0x1_ffff, s.height);
+            if let Some(f) = format {
+                put(0x3fa, u32::MAX, f as u32);
+            }
+            put(0x3fb, 0x70, memory);
+        }
+    }
+    if viewport[2] != 0 {
+        for at in [0x300, 0x3fd] {
+            put(at, u32::MAX, viewport[0] as u32 | (viewport[2] as u32) << 16);
+            put(at + 1, u32::MAX, viewport[1] as u32 | (viewport[3] as u32) << 16);
+        }
+    }
     if d.targets[0] != 0 {
         let slot = (regs[reg::CT_SELECT] >> 4 & 7) as usize;
         address(&mut put, reg::COLOR_TARGET + 16 * slot, d.targets[0]);

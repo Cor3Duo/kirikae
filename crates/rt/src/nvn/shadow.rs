@@ -39,6 +39,8 @@ pub struct Draw {
     pub texture_addresses: Vec<((u8, u16), u64)>,
     pub vertex_sizes: Vec<(u8, u64)>,
     pub index_type: u8,
+    pub surfaces: Vec<(u8, resources::Surface)>,
+    pub all_targets: [u64; 9],
 }
 
 impl Draw {
@@ -54,7 +56,7 @@ enum Cmd {
     Vertex { index: u8, address: u64, size: u64 },
     Texture { stage: u8, index: u16, handle: u64 },
     State(Vec<(Field, u64)>),
-    Targets([u64; 9]),
+    Targets([u64; 9], [Option<resources::Surface>; 9]),
     Clear(Clear),
     Draw(Draw),
     Dispatch([u32; 3]),
@@ -68,6 +70,7 @@ struct Model {
     programs: HashMap<u64, Arc<Vec<u64>>>,
     program: Arc<Vec<u64>>,
     targets: [u64; 9],
+    surfaces: [Option<resources::Surface>; 9],
     uniforms: std::collections::BTreeMap<(u8, u8), (u64, u64)>,
     vertex: std::collections::BTreeMap<u8, u64>,
     vertex_sizes: std::collections::BTreeMap<u8, u64>,
@@ -251,12 +254,13 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
             textures.push(a[4]);
             views.push(a[5]);
             let mut targets = [0u64; 9];
+            let mut surfaces = [None; 9];
             for i in 0..9 {
                 if textures[i] != 0 {
-                    targets[i] = target_address(c, textures[i], views[i], real_of);
+                    (targets[i], surfaces[i]) = target_address(c, textures[i], views[i], real_of);
                 }
             }
-            record(Cmd::Targets(targets));
+            record(Cmd::Targets(targets, surfaces));
         }
         Hook::ClearColor => {
             let words = c.process().memory.read(a[2], 16).unwrap_or_default();
@@ -389,7 +393,7 @@ impl Model {
                         self.textures.insert((g, *index), *handle);
                     }
                 }
-                Cmd::Targets(t) => self.targets = *t,
+                Cmd::Targets(t, s) => (self.targets, self.surfaces) = (*t, *s),
                 Cmd::Clear(cl) => {
                     let index = (cl.what >> 6 & 7) as usize;
                     let target = if cl.what & 0x3c != 0 { self.targets[index] } else { self.targets[8] };
@@ -403,7 +407,9 @@ impl Model {
                         vertex: self.vertex.iter().map(|(k, v)| (*k, *v)).collect(),
                         vertex_sizes: self.vertex_sizes.iter().map(|(k, v)| (*k, *v)).collect(),
                         textures: self.textures.iter().map(|(k, v)| (*k, *v)).collect(),
-                        state: self.state.iter().map(|(k, v)| (*k, *v)).collect(),
+                        state: self.target_state(),
+                        surfaces: self.surfaces.iter().enumerate().filter_map(|(k, s)| s.map(|s| (k as u8, s))).collect(),
+                        all_targets: self.targets,
                         ..d.clone()
                     };
                     self.expected.push_back(Work::Draw(d));
@@ -426,6 +432,16 @@ impl Model {
             Some(Work::Draw(e)) if (e.indexed, e.count, e.start, e.base_vertex) == (d.indexed, d.count, d.start, d.base_vertex) => Some(e),
             _ => None,
         }
+    }
+
+    fn target_state(&self) -> Vec<(Field, u64)> {
+        let mut state: Vec<(Field, u64)> = self.state.iter().map(|(k, v)| (*k, *v)).collect();
+        for (k, s) in self.surfaces.iter().enumerate() {
+            if let Some(s) = s {
+                state.push(if k < 8 { (Field(state::Kind::TargetFormat, k as u8), s.format as u64) } else { (Field(state::Kind::DepthFormat, 0), s.format as u64) });
+            }
+        }
+        state
     }
 
     fn decoded(&mut self, w: Work, instance: u32) {
@@ -576,7 +592,7 @@ fn stage_group(stage: u8) -> Option<u8> {
     [0, 4, 3, 1, 2].get(stage as usize).copied()
 }
 
-fn target_address(c: &mut Cpu, tex: u64, view: u64, real_of: &dyn Fn(&str) -> Option<u64>) -> u64 {
+fn target_address(c: &mut Cpu, tex: u64, view: u64, real_of: &dyn Fn(&str) -> Option<u64>) -> (u64, Option<resources::Surface>) {
     let mem = &c.process().memory;
     let read = |at: u64, len: u64| mem.read(at, len);
     let (t, v) = with(|m| (m.res.texture(tex, &read), if view == 0 { resources::View::default() } else { m.res.view(view, &read) }));
@@ -599,7 +615,7 @@ fn target_address(c: &mut Cpu, tex: u64, view: u64, real_of: &dyn Fn(&str) -> Op
             }
         }
     });
-    model.or(driver.map(|d| d + driver_offset)).unwrap_or(0)
+    (model.or(driver.map(|d| d + driver_offset)).unwrap_or(0), t.map(|t| t.surface(&v)))
 }
 
 pub fn cp_clear(regs: &[u32], v: u32) {

@@ -225,6 +225,22 @@ impl Texture {
         size
     }
 
+    pub fn surface(&self, view: &View) -> Surface {
+        let level = view.base_level.min(self.levels.saturating_sub(1));
+        let (_, block_height_log2, _, _, _) = self.level_layout(level);
+        let (bytes, _, _) = format(self.format);
+        let width = (self.width >> level).max(1);
+        Surface {
+            format: if view.format != 0 { view.format } else { self.format },
+            width,
+            height: (self.height >> level).max(1),
+            block_height_log2,
+            pitch: self.pitch.then_some(width * bytes),
+            layers: if view.layers != 0 { view.layers } else { self.layers },
+            bytes,
+        }
+    }
+
     pub fn view_offset(&self, view: &View) -> u64 {
         if self.pitch {
             return 0;
@@ -238,6 +254,17 @@ impl Texture {
         }
         self.layer_size() * view.min_layer as u64 + level
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Surface {
+    pub format: u32,
+    pub width: u32,
+    pub height: u32,
+    pub block_height_log2: u32,
+    pub pitch: Option<u32>,
+    pub layers: u32,
+    pub bytes: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

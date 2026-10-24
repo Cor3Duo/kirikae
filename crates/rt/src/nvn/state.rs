@@ -38,6 +38,7 @@ pub enum Kind {
     BlendRegister,
     AttribCount,
     StreamCount,
+    DepthFormat,
 }
 
 #[derive(Default)]
@@ -324,6 +325,9 @@ pub fn from_registers(regs: &[u32]) -> Vec<(Field, u64)> {
             put(Kind::BlendSrcAlpha, k, asrc as u64);
             put(Kind::BlendDstAlpha, k, adst as u64);
         }
+    }
+    if regs[0x54e] & 1 == 1 {
+        put(Kind::DepthFormat, 0, regs[0x3fa] as u64);
     }
     let depth = regs[0x4b3] & 1;
     put(Kind::DepthTest, 0, depth as u64);
