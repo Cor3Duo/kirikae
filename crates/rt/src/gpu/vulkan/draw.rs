@@ -495,9 +495,7 @@ impl Renderer {
             if changed(&mut b.cull, cull) {
                 d.cmd_set_cull_mode(cmd, cull);
             }
-            let ccw = regs[0x647] != 0x900;
-            let flip = regs[0x4eb] >> 4 & 1 == 1;
-            let front = if ccw != flip { vk::FrontFace::COUNTER_CLOCKWISE } else { vk::FrontFace::CLOCKWISE };
+            let front = if regs[0x647] != 0x900 { vk::FrontFace::COUNTER_CLOCKWISE } else { vk::FrontFace::CLOCKWISE };
             if changed(&mut b.front, front) {
                 d.cmd_set_front_face(cmd, front);
             }
