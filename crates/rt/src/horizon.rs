@@ -366,6 +366,16 @@ fn break_(c: &mut Cpu) {
         c.x[2],
         p.describe(c.pc - 4)
     );
+    let mut fp = c.x[29];
+    for _ in 0..16 {
+        let (Some(next), Some(lr)) = (p.memory.read(fp, 8), p.memory.read(fp + 8, 8)) else { break };
+        let (next, lr) = (u64::from_le_bytes(next.try_into().unwrap()), u64::from_le_bytes(lr.try_into().unwrap()));
+        if lr < 4 || next <= fp {
+            break;
+        }
+        let _ = writeln!(std::io::stderr(), "kirikae:   called from {}", p.describe(lr - 4));
+        fp = next;
+    }
     c.halt();
 }
 
