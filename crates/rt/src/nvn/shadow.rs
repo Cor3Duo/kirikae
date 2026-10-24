@@ -142,6 +142,7 @@ pub enum Hook {
     SetBlendColor,
     SetViewport,
     SetScissor,
+    SetPolygonOffset,
     ClearColor,
     ClearDepthStencil,
     Resource(resources::Call),
@@ -175,6 +176,7 @@ pub fn hook(name: &str) -> Option<Hook> {
         "nvnCommandBufferSetBlendColor" => Hook::SetBlendColor,
         "nvnCommandBufferSetViewport" => Hook::SetViewport,
         "nvnCommandBufferSetScissor" => Hook::SetScissor,
+        "nvnCommandBufferSetPolygonOffsetClamp" => Hook::SetPolygonOffset,
         "nvnCommandBufferClearColor" => Hook::ClearColor,
         "nvnCommandBufferClearDepthStencil" => Hook::ClearDepthStencil,
         _ => return state::setter(name).map(Hook::Setter).or_else(|| resources::call(name).map(Hook::Resource)),
@@ -361,6 +363,7 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
             let color = words.chunks(4).enumerate().map(|(i, w)| (Field(state::Kind::BlendColor, i as u8), u32::from_le_bytes(w.try_into().unwrap()) as u64));
             record(Cmd::State(color.collect()));
         }
+        Hook::SetPolygonOffset => record(Cmd::State((0..3).map(|i| (Field(state::Kind::PolygonOffset, i as u8), c.v[i][0] as u32 as u64)).collect())),
         Hook::SetViewport | Hook::SetScissor => {
             let k = if matches!(hook, Hook::SetViewport) { state::Kind::Viewport } else { state::Kind::Scissor };
             record(Cmd::State((0..4).map(|i| (Field(k, i as u8), a[1 + i] as u32 as i32 as i64 as u64)).collect()));

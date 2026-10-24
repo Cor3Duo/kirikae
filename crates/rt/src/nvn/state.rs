@@ -39,6 +39,7 @@ pub enum Kind {
     AttribCount,
     StreamCount,
     DepthFormat,
+    PolygonOffset,
 }
 
 #[derive(Default)]
@@ -348,6 +349,11 @@ pub fn from_registers(regs: &[u32]) -> Vec<(Field, u64)> {
     put(Kind::CullFace, 0, if regs[0x646] & 1 == 1 { regs[0x648] as u64 } else { 0 });
     put(Kind::FrontFace, 0, regs[0x647] as u64);
     put(Kind::PolygonOffsetEnables, 0, ((regs[0x370] & 1) | (regs[0x371] & 1) << 1 | (regs[0x372] & 1) << 2) as u64);
+    if regs[0x370..0x373].iter().any(|r| r & 1 == 1) {
+        for (i, r) in [0x56f, 0x55b, 0x61f].into_iter().enumerate() {
+            put(Kind::PolygonOffset, i as u8, regs[r] as u64);
+        }
+    }
     for i in 0..32u8 {
         let a = regs[reg::VERTEX_ATTRIBUTE + i as usize];
         if a >> 6 & 1 == 1 {

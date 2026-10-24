@@ -83,6 +83,7 @@ pub fn predict(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u64
     let mut cull = None;
     let count = |k: Kind| d.state.iter().find(|x| x.0 == Field(k, 0)).map(|x| x.1 as usize);
     let (attribs, streams) = (count(Kind::AttribCount).unwrap_or(32), count(Kind::StreamCount).unwrap_or(16));
+    let offset = d.state.iter().find(|x| x.0 == Field(Kind::PolygonOffsetEnables, 0)).and_then(|x| learned.usual(Kind::PolygonOffsetEnables, x.1)).is_some_and(|r| r != 0);
     let depth_test = d.state.iter().find(|x| x.0 == Field(Kind::DepthTest, 0)).and_then(|x| learned.usual(Kind::DepthTest, x.1)) == Some(1);
     for i in attribs..ATTRIBUTES {
         put(0x458 + i, 0x40, 0x40);
@@ -101,6 +102,7 @@ pub fn predict(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u64
             Kind::AttribFormat | Kind::AttribOffset | Kind::AttribStream => i >= attribs,
             Kind::StreamStride | Kind::StreamDivisor => i >= streams,
             Kind::DepthWrite | Kind::DepthFunc => !depth_test,
+            Kind::PolygonOffset => !offset,
             _ => false,
         };
         if stale {
@@ -143,6 +145,7 @@ pub fn predict(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u64
                 }
             }
             Kind::BlendColor => put(0x4c7 + i, u32::MAX, r),
+            Kind::PolygonOffset => put([0x56f, 0x55b, 0x61f][i], u32::MAX, r),
             Kind::Viewport | Kind::Scissor | Kind::TargetFormat | Kind::BlendRegister | Kind::AttribCount | Kind::StreamCount | Kind::DepthFormat => {}
         }
     }
