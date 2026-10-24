@@ -40,6 +40,16 @@ pub enum Kind {
     StreamCount,
     DepthFormat,
     PolygonOffset,
+    StencilRef,
+    StencilValueMask,
+    StencilMask,
+    DepthClamp,
+    RasterizerDiscard,
+    PointSize,
+    LineWidth,
+    DepthBoundsEnable,
+    DepthBoundsMin,
+    DepthBoundsMax,
 }
 
 #[derive(Default)]
@@ -340,6 +350,21 @@ pub fn from_registers(regs: &[u32]) -> Vec<(Field, u64)> {
     put(Kind::StencilTest, 0, stencil as u64);
     let front = [regs[0x4e1], regs[0x4e2], regs[0x4e3], regs[0x4e4]];
     let back = if regs[0x565] & 1 == 1 { [regs[0x566], regs[0x567], regs[0x568], regs[0x569]] } else { front };
+    let two_sided = regs[0x565] & 1 == 1;
+    for (f, values) in [[0x4e5, 0x4e6, 0x4e7], if two_sided { [0x3d5, 0x3d7, 0x3d6] } else { [0x4e5, 0x4e6, 0x4e7] }].into_iter().enumerate().filter(|_| stencil == 1) {
+        put(Kind::StencilRef, f as u8, (regs[values[0]] & 0xff) as u64);
+        put(Kind::StencilValueMask, f as u8, (regs[values[1]] & 0xff) as u64);
+        put(Kind::StencilMask, f as u8, (regs[values[2]] & 0xff) as u64);
+    }
+    put(Kind::DepthClamp, 0, regs[reg::VIEW_VOLUME_CLIP_CTRL] as u64);
+    put(Kind::RasterizerDiscard, 0, regs[0xdf] as u64);
+    put(Kind::PointSize, 0, regs[0x546] as u64);
+    put(Kind::LineWidth, 0, regs[0x4ec] as u64);
+    put(Kind::DepthBoundsEnable, 0, (regs[0x66f] & 1) as u64);
+    if regs[0x66f] & 1 == 1 {
+        put(Kind::DepthBoundsMin, 0, regs[0x3e7] as u64);
+        put(Kind::DepthBoundsMax, 0, regs[0x3e8] as u64);
+    }
     for (f, s) in [front, back].into_iter().enumerate().filter(|_| stencil == 1) {
         put(Kind::StencilFunc, f as u8, s[3] as u64);
         put(Kind::StencilFail, f as u8, s[0] as u64);

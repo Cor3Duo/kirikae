@@ -84,6 +84,7 @@ pub fn predict(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u64
     let count = |k: Kind| d.state.iter().find(|x| x.0 == Field(k, 0)).map(|x| x.1 as usize);
     let (attribs, streams) = (count(Kind::AttribCount).unwrap_or(32), count(Kind::StreamCount).unwrap_or(16));
     let offset = d.state.iter().find(|x| x.0 == Field(Kind::PolygonOffsetEnables, 0)).and_then(|x| learned.usual(Kind::PolygonOffsetEnables, x.1)).is_some_and(|r| r != 0);
+    let stencil_test = d.state.iter().find(|x| x.0 == Field(Kind::StencilTest, 0)).and_then(|x| learned.usual(Kind::StencilTest, x.1)) == Some(1);
     let depth_test = d.state.iter().find(|x| x.0 == Field(Kind::DepthTest, 0)).and_then(|x| learned.usual(Kind::DepthTest, x.1)) == Some(1);
     for i in attribs..ATTRIBUTES {
         put(0x458 + i, 0x40, 0x40);
@@ -102,6 +103,7 @@ pub fn predict(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u64
             Kind::AttribFormat | Kind::AttribOffset | Kind::AttribStream => i >= attribs,
             Kind::StreamStride | Kind::StreamDivisor => i >= streams,
             Kind::DepthWrite | Kind::DepthFunc => !depth_test,
+            Kind::StencilRef | Kind::StencilValueMask | Kind::StencilMask => !stencil_test,
             Kind::PolygonOffset => !offset,
             _ => false,
         };
@@ -146,6 +148,16 @@ pub fn predict(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u64
             }
             Kind::BlendColor => put(0x4c7 + i, u32::MAX, r),
             Kind::PolygonOffset => put([0x56f, 0x55b, 0x61f][i], u32::MAX, r),
+            Kind::StencilRef => put([0x4e5, 0x3d5][i], 0xff, r),
+            Kind::StencilValueMask => put([0x4e6, 0x3d7][i], 0xff, r),
+            Kind::StencilMask => put([0x4e7, 0x3d6][i], 0xff, r),
+            Kind::DepthClamp => put(reg::VIEW_VOLUME_CLIP_CTRL, u32::MAX, r),
+            Kind::RasterizerDiscard => put(0xdf, u32::MAX, r),
+            Kind::PointSize => put(0x546, u32::MAX, r),
+            Kind::LineWidth => put(0x4ec, u32::MAX, r),
+            Kind::DepthBoundsEnable => put(0x66f, 1, r),
+            Kind::DepthBoundsMin => put(0x3e7, u32::MAX, r),
+            Kind::DepthBoundsMax => put(0x3e8, u32::MAX, r),
             Kind::Viewport | Kind::Scissor | Kind::TargetFormat | Kind::BlendRegister | Kind::AttribCount | Kind::StreamCount | Kind::DepthFormat => {}
         }
     }
@@ -171,6 +183,11 @@ pub fn predict(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u64
         r(at, 0xff, (a >> 32) as u32);
         r(at + 1, u32::MAX, a as u32);
     };
+    for (pool, at) in d.pools.iter().zip([reg::TEX_HEADER_POOL, reg::TEX_SAMPLER_POOL]) {
+        if *pool != 0 {
+            address(&mut put, at, *pool);
+        }
+    }
     let colors = d.surfaces.iter().filter(|s| s.0 < 8).map(|s| s.0 as u32 + 1).max().unwrap_or(0);
     put(reg::CT_SELECT, u32::MAX, 0xfac_6880 | colors);
     put(0x54e, 1, d.surfaces.iter().any(|s| s.0 == 8) as u32);

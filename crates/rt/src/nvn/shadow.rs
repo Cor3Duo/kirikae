@@ -41,6 +41,7 @@ pub struct Draw {
     pub index_type: u8,
     pub surfaces: Vec<(u8, resources::Surface)>,
     pub all_targets: [u64; 9],
+    pub pools: [u64; 2],
 }
 
 impl Draw {
@@ -61,6 +62,13 @@ enum Cmd {
     Draw(Draw),
     Dispatch([u32; 3]),
     Call(Vec<u64>),
+    UniformUpdate { address: u64, data: Arc<Vec<u8>> },
+    Storage { stage: u8, index: u8, address: u64, size: u64 },
+    Barrier(u64),
+    Report { counter: u64, address: u64 },
+    Pool { texture: bool, address: u64 },
+    Multisample(u64),
+    Scratch { address: u64, size: u64 },
 }
 
 #[derive(Default)]
@@ -84,6 +92,10 @@ struct Model {
     held: Option<Draw>,
     command_memory: HashMap<u64, u64>,
     missing: HashMap<u64, Vec<&'static str>>,
+    pool_vas: HashMap<u64, u64>,
+    pools: [u64; 2],
+    storage: std::collections::BTreeMap<(u8, u8), (u64, u64)>,
+    scratch: (u64, u64),
     unsupported: std::collections::HashSet<u64>,
     unsupported_calls: HashMap<&'static str, u64>,
     stats: Stats,
@@ -107,6 +119,12 @@ struct Stats {
     extra: u64,
     missing: u64,
     unknown_lists: u64,
+    uniform_updates: u64,
+    uniform_bytes: u64,
+    uniform_last: u64,
+    barriers: u64,
+    reports: Vec<(u64, u64)>,
+    multisample: u64,
     logged: HashMap<&'static str, u32>,
 }
 
@@ -216,6 +234,18 @@ pub enum Hook {
     SetViewport,
     SetScissor,
     SetPolygonOffset,
+    Stencil(state::Kind),
+    Flag(state::Kind),
+    Float(state::Kind),
+    DepthBounds,
+    BindMultisampleState,
+    Barrier,
+    UpdateUniformBuffer,
+    BindStorageBuffer,
+    ReportCounter,
+    SetPool(bool),
+    PoolInitialize(bool),
+    SetShaderScratchMemory,
     ClearColor,
     ClearDepthStencil,
     Resource(resources::Call),
@@ -251,6 +281,24 @@ pub fn hook(name: &str) -> Option<Hook> {
         "nvnCommandBufferSetViewport" => Hook::SetViewport,
         "nvnCommandBufferSetScissor" => Hook::SetScissor,
         "nvnCommandBufferSetPolygonOffsetClamp" => Hook::SetPolygonOffset,
+        "nvnCommandBufferSetStencilRef" => Hook::Stencil(state::Kind::StencilRef),
+        "nvnCommandBufferSetStencilValueMask" => Hook::Stencil(state::Kind::StencilValueMask),
+        "nvnCommandBufferSetStencilMask" => Hook::Stencil(state::Kind::StencilMask),
+        "nvnCommandBufferSetDepthClamp" => Hook::Flag(state::Kind::DepthClamp),
+        "nvnCommandBufferSetRasterizerDiscard" => Hook::Flag(state::Kind::RasterizerDiscard),
+        "nvnCommandBufferSetPointSize" => Hook::Float(state::Kind::PointSize),
+        "nvnCommandBufferSetLineWidth" => Hook::Float(state::Kind::LineWidth),
+        "nvnCommandBufferSetDepthBounds" => Hook::DepthBounds,
+        "nvnCommandBufferBindMultisampleState" => Hook::BindMultisampleState,
+        "nvnCommandBufferBarrier" => Hook::Barrier,
+        "nvnCommandBufferUpdateUniformBuffer" => Hook::UpdateUniformBuffer,
+        "nvnCommandBufferBindStorageBuffer" => Hook::BindStorageBuffer,
+        "nvnCommandBufferReportCounter" => Hook::ReportCounter,
+        "nvnCommandBufferSetTexturePool" => Hook::SetPool(true),
+        "nvnCommandBufferSetSamplerPool" => Hook::SetPool(false),
+        "nvnCommandBufferSetShaderScratchMemory" => Hook::SetShaderScratchMemory,
+        "nvnTexturePoolInitialize" => Hook::PoolInitialize(true),
+        "nvnSamplerPoolInitialize" => Hook::PoolInitialize(false),
         "nvnCommandBufferClearColor" => Hook::ClearColor,
         "nvnCommandBufferClearDepthStencil" => Hook::ClearDepthStencil,
         _ => return state::setter(name).map(Hook::Setter).or_else(|| resources::call(name).map(Hook::Resource)),
@@ -266,6 +314,8 @@ fn index_size(ty: u64) -> u64 {
 }
 
 const TEXTURE_HANDLES: u64 = 0x20;
+
+const MAX_UNIFORM_UPDATE: u64 = 0x10000;
 
 const PROGRAM_HEADER: u64 = 0x30;
 
@@ -460,6 +510,45 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
             let color = words.chunks(4).enumerate().map(|(i, w)| (Field(state::Kind::BlendColor, i as u8), u32::from_le_bytes(w.try_into().unwrap()) as u64));
             record(Cmd::State(color.collect()));
         }
+        Hook::Stencil(kind) => record(Cmd::State((0..2u8).filter(|f| a[1] >> f & 1 == 1).map(|f| (Field(kind, f), a[2] & 0xff)).collect())),
+        Hook::Flag(kind) => record(Cmd::State(vec![(Field(kind, 0), a[1] & 0xff)])),
+        Hook::Float(kind) => record(Cmd::State(vec![(Field(kind, 0), c.v[0][0] as u32 as u64)])),
+        Hook::DepthBounds => {
+            let on = a[1] & 0xff;
+            let mut fields = vec![(Field(state::Kind::DepthBoundsEnable, 0), on)];
+            if on != 0 {
+                fields.push((Field(state::Kind::DepthBoundsMin, 0), c.v[0][0] as u32 as u64));
+                fields.push((Field(state::Kind::DepthBoundsMax, 0), c.v[1][0] as u32 as u64));
+            }
+            record(Cmd::State(fields));
+        }
+        Hook::BindMultisampleState => record(Cmd::Multisample(a[1])),
+        Hook::Barrier => record(Cmd::Barrier(a[1])),
+        Hook::UpdateUniformBuffer => {
+            let data = c.process().memory.read(a[5], a[4].min(MAX_UNIFORM_UPDATE)).unwrap_or_default();
+            record(Cmd::UniformUpdate { address: a[1] + a[3], data: Arc::new(data) });
+        }
+        Hook::BindStorageBuffer => record(Cmd::Storage { stage: a[1] as u8, index: a[2] as u8, address: a[3], size: a[4] }),
+        Hook::ReportCounter => record(Cmd::Report { counter: a[1], address: a[2] }),
+        Hook::SetPool(texture) => {
+            let address = with(|m| m.pool_vas.get(&a[1]).copied().unwrap_or(0));
+            record(Cmd::Pool { texture, address });
+        }
+        Hook::SetShaderScratchMemory => {
+            let mem = &c.process().memory;
+            let read = |at: u64, len: u64| mem.read(at, len);
+            let address = with(|m| m.res.pool_address(a[1], &read)).map_or(0, |va| va + a[2]);
+            record(Cmd::Scratch { address, size: a[3] });
+        }
+        Hook::PoolInitialize(_) => {
+            let mem = &c.process().memory;
+            let read = |at: u64, len: u64| mem.read(at, len);
+            with(|m| {
+                if let Some(va) = m.res.pool_address(a[1], &read) {
+                    m.pool_vas.insert(a[0], va + a[2]);
+                }
+            });
+        }
         Hook::SetPolygonOffset => record(Cmd::State((0..3).map(|i| (Field(state::Kind::PolygonOffset, i as u8), c.v[i][0] as u32 as u64)).collect())),
         Hook::SetViewport | Hook::SetScissor => {
             let k = if matches!(hook, Hook::SetViewport) { state::Kind::Viewport } else { state::Kind::Scissor };
@@ -510,6 +599,7 @@ impl Model {
                         state: self.target_state(),
                         surfaces: self.surfaces.iter().enumerate().filter_map(|(k, s)| s.map(|s| (k as u8, s))).collect(),
                         all_targets: self.targets,
+                        pools: self.pools,
                         ..d.clone()
                     };
                     self.expected.push_back(Work::Draw(Box::new(d)));
@@ -521,6 +611,21 @@ impl Model {
                     }
                 }
                 Cmd::Call(_) => {}
+                Cmd::Pool { texture, address } => self.pools[usize::from(!*texture)] = *address,
+                Cmd::UniformUpdate { address, data } => {
+                    self.stats.uniform_updates += 1;
+                    self.stats.uniform_bytes += data.len() as u64;
+                    self.stats.uniform_last = *address;
+                }
+                Cmd::Storage { stage, index, address, size } => {
+                    if let Some(g) = stage_group(*stage) {
+                        self.storage.insert((g, *index), (*address, *size));
+                    }
+                }
+                Cmd::Barrier(bits) => self.stats.barriers |= *bits,
+                Cmd::Report { counter, address } => self.stats.reports.push((*counter, *address)),
+                Cmd::Multisample(state) => self.stats.multisample = *state,
+                Cmd::Scratch { address, size } => self.scratch = (*address, *size),
             }
         }
     }
@@ -831,6 +936,18 @@ pub fn report() {
             s.texture_addresses
         );
         eprintln!("kirikae:         nvn shadow resources: {:?}, {} texture pools", m.res.checks, m.res.texture_pools.len());
+        eprintln!(
+            "kirikae:         nvn model commands: {} uniform updates ({} bytes, last at {:#x}), barrier bits seen {:#x}, {} counter reports, {} storage buffers bound, multisample state {:#x}, shader scratch {:x?}",
+            m.stats.uniform_updates,
+            m.stats.uniform_bytes,
+            m.stats.uniform_last,
+            m.stats.barriers,
+            m.stats.reports.len(),
+            m.storage.len(),
+            m.stats.multisample,
+            m.scratch
+        );
+        m.stats.reports.clear();
         let seg = SEGMENTS.lock().unwrap();
         eprintln!(
             "kirikae:         nvn command memory: {} pushbuffer entries ({} words, {} from lists the host fully models) inside recorded lists, {} entries ({} words) elsewhere; {} list ranges known",
