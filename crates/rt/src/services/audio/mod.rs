@@ -1,6 +1,9 @@
 mod dsp;
 mod mixer;
+mod out;
 mod output;
+
+pub use out::AudioOutManager;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
