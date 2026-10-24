@@ -410,6 +410,9 @@ impl Gpu {
 
     fn flush_cb_upload(&self, mem: &GuestMemory, eng: &mut Engines) {
         if !eng.cb_upload.1.is_empty() {
+            if crate::nvn::shadow::ON.load(Ordering::Relaxed) {
+                crate::nvn::shadow::cp_upload(eng.cb_upload.0, &eng.cb_upload.1);
+            }
             self.write(mem, eng.cb_upload.0, &eng.cb_upload.1);
             eng.cb_upload.1.clear();
         }

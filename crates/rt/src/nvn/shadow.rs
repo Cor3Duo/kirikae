@@ -39,9 +39,11 @@ pub struct Draw {
     pub texture_addresses: Vec<((u8, u16), u64)>,
     pub vertex_sizes: Vec<(u8, u64)>,
     pub index_type: u8,
+    pub base_instance: u32,
     pub surfaces: Vec<(u8, resources::Surface)>,
     pub all_targets: [u64; 9],
     pub pools: [u64; 2],
+    pub program: u64,
 }
 
 impl Draw {
@@ -52,7 +54,7 @@ impl Draw {
 
 #[derive(Clone, Debug)]
 enum Cmd {
-    Program(Arc<Vec<u64>>),
+    Program(u64, Arc<Vec<u64>>),
     Uniform { stage: u8, index: u8, range: (u64, u64) },
     Vertex { index: u8, address: u64, size: u64 },
     Texture { stage: u8, index: u16, handle: u64 },
@@ -97,6 +99,9 @@ struct Model {
     storage: std::collections::BTreeMap<(u8, u8), (u64, u64)>,
     scratch: (u64, u64),
     list_ranges: HashMap<u64, (u64, u64)>,
+    program_object: u64,
+    program_constants: HashMap<u64, [Option<(u64, u32)>; 5]>,
+    support: (Option<u64>, [Option<u64>; 5]),
     unsupported: std::collections::HashSet<u64>,
     unsupported_calls: HashMap<&'static str, u64>,
     stats: Stats,
@@ -121,6 +126,12 @@ struct Stats {
     missing: u64,
     unknown_lists: u64,
     uniform_updates: u64,
+    constants_checked: u64,
+    constants_learned: u64,
+    constants_differ: u64,
+    words_checked: u64,
+    words_missing: HashMap<String, u64>,
+    words_extra: HashMap<&'static str, u64>,
     segments: u64,
     segments_off: u64,
     uniform_bytes: u64,
@@ -216,6 +227,14 @@ pub struct Plan {
     va: u64,
     draws: u64,
     clears: u64,
+    words: Vec<(u64, u32, &'static str)>,
+}
+
+static UPLOADS: Mutex<Vec<(u64, u32)>> = Mutex::new(Vec::new());
+
+pub fn cp_upload(at: u64, bytes: &[u8]) {
+    let mut u = UPLOADS.lock().unwrap();
+    u.extend(bytes.as_chunks::<4>().0.iter().enumerate().map(|(i, w)| (at + 4 * i as u64, u32::from_le_bytes(*w))));
 }
 
 pub fn cp_entry(va: u64, words: u64) -> Option<Plan> {
@@ -243,22 +262,72 @@ pub fn cp_entry(va: u64, words: u64) -> Option<Plan> {
     }
     {
         let (mut draws, mut clears) = (0, 0);
+        let support = with(|m| m.support);
+        let mut predicted = Vec::new();
         for (at, cmd) in list.iter() {
             if *at < va || *at >= va + words * 4 {
                 continue;
             }
             match cmd {
-                Cmd::Draw(d) => draws += d.instances as u64,
+                Cmd::Draw(d) => {
+                    draws += d.instances as u64;
+                    if let Some(base) = support.0
+                        && (d.base_vertex != 0 || d.base_instance != 0)
+                    {
+                        predicted.extend([(base + BASE_VERTEX, d.base_vertex as u32, "base vertex"), (base + BASE_VERTEX, 0, "base vertex")]);
+                        predicted.extend([(base + BASE_VERTEX + 4, d.base_instance, "base instance"), (base + BASE_VERTEX + 4, 0, "base instance")]);
+                    }
+                }
                 Cmd::Clear(_) => clears += 1,
+                Cmd::Texture { stage, index, handle } => {
+                    if let Some(base) = stage_group(*stage).and_then(|g| support.1[g as usize]) {
+                        predicted.push((base + TEXTURE_HANDLES + 8 * *index as u64, *handle as u32, "texture handle"));
+                    }
+                }
+                Cmd::Storage { index, address, size, .. } => {
+                    if let Some(base) = support.0 {
+                        let at = base + STORAGE_BUFFERS + 0x10 * *index as u64;
+                        predicted.extend([(at, *address as u32, "storage buffer"), (at + 4, (*address >> 32) as u32, "storage buffer"), (at + 8, *size as u32, "storage buffer")]);
+                    }
+                }
+                Cmd::Multisample(_) => {
+                    if let Some(base) = support.0 {
+                        predicted.extend((0..8).map(|i| (base + 0x620 + 4 * i, 0, "multisample")));
+                    }
+                }
+                Cmd::UniformUpdate { address, data } => {
+                    predicted.extend(data.as_chunks::<4>().0.iter().enumerate().map(|(i, w)| (address + 4 * i as u64, u32::from_le_bytes(*w), "uniform update")));
+                }
                 _ => {}
             }
         }
-        Some(Plan { handle, va, draws, clears })
+        UPLOADS.lock().unwrap().clear();
+        Some(Plan { handle, va, draws, clears, words: predicted })
     }
 }
 
 pub fn cp_entry_done(plan: Plan, draws: u64, clears: u64) {
+    let uploads = std::mem::take(&mut *UPLOADS.lock().unwrap());
     with(|m| {
+        let seen: std::collections::HashSet<(u64, u32)> = uploads.iter().copied().collect();
+        let predicted: std::collections::HashSet<(u64, u32)> = plan.words.iter().map(|w| (w.0, w.1)).collect();
+        m.stats.words_checked += uploads.len() as u64;
+        let support = m.support;
+        for &(at, value) in &uploads {
+            if !predicted.contains(&(at, value)) {
+                let key = match support.0 {
+                    Some(s0) if at >= s0 && at < s0 + 0x5f00 => format!("driver constants +{:#x}", at - s0),
+                    _ if support.1.iter().flatten().any(|&s2| at >= s2 && at < s2 + 0x200) => "texture handles".to_string(),
+                    _ => format!("other {at:#x}"),
+                };
+                *m.stats.words_missing.entry(key).or_default() += 1;
+            }
+        }
+        for &(at, value, kind) in &plan.words {
+            if !seen.contains(&(at, value)) {
+                *m.stats.words_extra.entry(kind).or_default() += 1;
+            }
+        }
         m.stats.segments += 1;
         if plan.draws != draws || plan.clears > clears {
             m.stats.segments_off += 1;
@@ -393,6 +462,11 @@ fn index_size(ty: u64) -> u64 {
 
 const TEXTURE_HANDLES: u64 = 0x20;
 
+const BASE_VERTEX: u64 = 0x640;
+
+const STORAGE_BUFFERS: u64 = 0x110;
+
+
 const MAX_UNIFORM_UPDATE: u64 = 0x10000;
 
 const PROGRAM_HEADER: u64 = 0x30;
@@ -475,7 +549,7 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
         }
         Hook::BindProgram => {
             let p = with(|m| m.programs.get(&a[1]).cloned().unwrap_or_default());
-            record(Cmd::Program(p));
+            record(Cmd::Program(a[1], p));
         }
         Hook::SetRenderTargets => {
             let n = a[1].min(8);
@@ -564,17 +638,17 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
             }
         }
         Hook::DrawElements | Hook::DrawElementsBaseVertex | Hook::DrawElementsInstanced => {
-            let (base_vertex, instances) = match hook {
-                Hook::DrawElements => (0, 1),
-                Hook::DrawElementsBaseVertex => (a[5] as i32, 1),
-                _ => (a[5] as i32, a[7] as u32),
+            let (base_vertex, base_instance, instances) = match hook {
+                Hook::DrawElements => (0, 0, 1),
+                Hook::DrawElementsBaseVertex => (a[5] as i32, 0, 1),
+                _ => (a[5] as i32, a[6] as u32, a[7] as u32),
             };
             let _ = index_size(a[2]);
-            record(Cmd::Draw(Draw { indexed: true, count: a[3] as u32, start: a[4], base_vertex, instances, index_type: a[2] as u8, ..Default::default() }));
+            record(Cmd::Draw(Draw { indexed: true, count: a[3] as u32, start: a[4], base_vertex, base_instance, instances, index_type: a[2] as u8, ..Default::default() }));
         }
         Hook::DrawArrays | Hook::DrawArraysInstanced => {
-            let instances = if matches!(hook, Hook::DrawArrays) { 1 } else { a[5] as u32 };
-            record(Cmd::Draw(Draw { indexed: false, count: a[3] as u32, start: a[2], instances, ..Default::default() }));
+            let (base_instance, instances) = if matches!(hook, Hook::DrawArrays) { (0, 1) } else { (a[4] as u32, a[5] as u32) };
+            record(Cmd::Draw(Draw { indexed: false, count: a[3] as u32, start: a[2], base_instance, instances, ..Default::default() }));
         }
         Hook::DispatchCompute => record(Cmd::Dispatch([a[1] as u32, a[2] as u32, a[3] as u32])),
         Hook::BindUniformBuffer => record(Cmd::Uniform { stage: a[1] as u8, index: a[2] as u8, range: (a[3], a[4]) }),
@@ -665,7 +739,7 @@ impl Model {
         };
         for (_, cmd) in list.iter() {
             match cmd {
-                Cmd::Program(p) => self.program = p.clone(),
+                Cmd::Program(object, p) => (self.program_object, self.program) = (*object, p.clone()),
                 Cmd::State(fields) => self.state.extend(fields.iter().copied()),
                 Cmd::Uniform { stage, index, range } => {
                     if let Some(g) = stage_group(*stage) {
@@ -699,6 +773,7 @@ impl Model {
                         surfaces: self.surfaces.iter().enumerate().filter_map(|(k, s)| s.map(|s| (k as u8, s))).collect(),
                         all_targets: self.targets,
                         pools: self.pools,
+                        program: self.program_object,
                         ..d.clone()
                     };
                     self.expected.push_back(Work::Draw(Box::new(d)));
@@ -985,6 +1060,29 @@ pub fn cp_draw(regs: &[u32], cbs: &[[Option<(u64, u32)>; crate::gpu::threed::CB_
     let state = state::from_registers(regs);
     let d = Draw { indexed: draw.index_size.is_some(), count: draw.count, start, base_vertex, instances: 1, programs, targets: [color, depth], uniforms, vertex, textures, state, texture_addresses, ..Default::default() };
     with(|m| {
+        m.support = (cbs[0][0].map(|b| b.0), std::array::from_fn(|g| cbs[g][2].map(|b| b.0)));
+        if let Some(e) = m.pending_draw(&d, draw.instance).filter(|e| e.program != 0) {
+            let (program, codes) = (e.program, e.programs.clone());
+            for code in codes {
+                let Some(ty) = read(code, 4).map(|b| (u32::from_le_bytes(b[..4].try_into().unwrap()) >> 10 & 0xf) as usize) else { continue };
+                let Some(g) = [None, Some(0), Some(1), Some(2), Some(3), Some(4)].get(ty).copied().flatten() else { continue };
+                let seen = cbs[g][1];
+                let known = m.program_constants.entry(program).or_insert([None; 5]);
+                match known[g] {
+                    None => {
+                        known[g] = seen;
+                        m.stats.constants_learned += 1;
+                    }
+                    Some(k) => {
+                        m.stats.constants_checked += 1;
+                        if Some(k) != seen {
+                            m.stats.constants_differ += 1;
+                            m.log("program constants", format!("program {program:#x} group {g}: learned {k:x?}, command processor {seen:x?}"));
+                        }
+                    }
+                }
+            }
+        }
         if super::encode::ON.load(Ordering::Relaxed) {
             let prediction = m.pending_draw(&d, draw.instance).map(|e| super::encode::predict(e, &m.learned, regs, read));
             super::encode::check(prediction, regs);
@@ -1058,6 +1156,18 @@ pub fn report() {
             seg.submitted.len(),
             m.stats.segments,
             m.stats.segments_off
+        );
+        let mut missing: Vec<_> = m.stats.words_missing.iter().collect();
+        missing.sort_by_key(|w| std::cmp::Reverse(*w.1));
+        let missing: Vec<String> = missing.iter().take(12).map(|(k, n)| format!("{k} {n}")).collect();
+        eprintln!(
+            "kirikae:         nvn program constants: {} learned, {} checked, {} differ; driver uploads: {} words seen, not predicted: {}; predicted but not seen: {:?}",
+            m.stats.constants_learned,
+            m.stats.constants_checked,
+            m.stats.constants_differ,
+            m.stats.words_checked,
+            missing.join(", "),
+            m.stats.words_extra
         );
         let mut calls: Vec<_> = m.unsupported_calls.iter().collect();
         calls.sort_by_key(|c| std::cmp::Reverse(*c.1));
