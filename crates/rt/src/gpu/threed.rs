@@ -207,8 +207,11 @@ impl Gpu {
         }
     }
 
-    fn draw(&self, mem: &GuestMemory, regs: &[u32], cbs: &[[Option<(u64, u32)>; CB_SLOTS]; 5], draw: Draw) {
+    pub(super) fn draw(&self, mem: &GuestMemory, regs: &[u32], cbs: &[[Option<(u64, u32)>; CB_SLOTS]; 5], draw: Draw) {
         let n = self.stats.draws.fetch_add(1, Ordering::Relaxed);
+        if crate::nvn::exec::CHECK.load(Ordering::Relaxed) {
+            crate::nvn::exec::cp_draw(regs, cbs, &draw);
+        }
         if trace() {
             let base = address(regs, reg::PROGRAM_REGION);
             let stages: Vec<String> = (0..STAGES)
@@ -260,7 +263,11 @@ impl Gpu {
         self.with_renderer(|r| r.draw(self, mem, regs, cbs, draw));
     }
 
-    fn clear(&self, mem: &GuestMemory, regs: &[u32], v: u32) {
+    pub(super) fn clear(&self, mem: &GuestMemory, regs: &[u32], v: u32) {
+        if crate::nvn::exec::CHECK.load(Ordering::Relaxed) {
+            let cbs = [[None; CB_SLOTS]; 5];
+            crate::nvn::exec::cp_draw(regs, &cbs, &Draw { topology: crate::nvn::exec::CLEAR, first: v, count: 0, index_size: None, instance: 0 });
+        }
         self.stats.clears.fetch_add(1, Ordering::Relaxed);
         if crate::nvn::shadow::ON.load(Ordering::Relaxed) {
             crate::nvn::shadow::cp_clear(regs, v);

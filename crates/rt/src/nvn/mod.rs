@@ -1,4 +1,5 @@
 pub mod encode;
+pub mod exec;
 pub mod resources;
 pub mod shadow;
 pub mod state;
@@ -26,6 +27,14 @@ pub fn install(p: &'static Process) {
         Some("shadow") => true,
         Some("encode") => {
             encode::ON.store(true, Ordering::Relaxed);
+            true
+        }
+        Some("exec") => {
+            exec::ON.store(true, Ordering::Relaxed);
+            true
+        }
+        Some("check") => {
+            exec::CHECK.store(true, Ordering::Relaxed);
             true
         }
         _ => return,
@@ -108,6 +117,7 @@ pub fn report(frames: u64) {
     let Some(trace) = TRACE.get() else { return };
     shadow::report();
     encode::report();
+    exec::report();
     static LAST: Mutex<Vec<u64>> = Mutex::new(Vec::new());
     let functions = trace.functions.lock().unwrap();
     let mut last = LAST.lock().unwrap();

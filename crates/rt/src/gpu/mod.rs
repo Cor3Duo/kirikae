@@ -286,10 +286,28 @@ impl Gpu {
             }
             self.cpu_access(va, words * 4);
             let plan = if crate::nvn::shadow::ON.load(Ordering::Relaxed) { crate::nvn::shadow::cp_entry(va, words) } else { None };
+            if let Some(p) = plan.as_ref().filter(|_| crate::nvn::exec::ON.load(Ordering::Relaxed))
+                && self.execute(mem, p)
+            {
+                continue;
+            }
+            let simulated = plan.as_ref().filter(|_| crate::nvn::exec::CHECK.load(Ordering::Relaxed)).and_then(|p| self.simulate(mem, p));
             let before = (self.stats.draws.load(Ordering::Relaxed), self.stats.clears.load(Ordering::Relaxed));
             let bytes = self.bytes(mem, va, words * 4).ok_or_else(|| format!("pushbuffer at GPU address {va:#x} is not mapped"))?;
             let w: Vec<u32> = bytes.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)).collect();
             self.run_pushbuffer(mem, &w);
+            if crate::nvn::exec::CHECK.load(Ordering::Relaxed) {
+                crate::nvn::exec::segment_done();
+            }
+            if let Some((regs, cbs, writes)) = simulated {
+                let eng = self.engines.lock().unwrap();
+                if let Some(actual) = eng.regs.get(&CLASS_3D) {
+                    crate::nvn::exec::checked(&regs, actual, &cbs, &eng.threed.constant_buffers);
+                }
+                drop(eng);
+                let differ = writes.iter().filter(|(at, w)| self.read(mem, **at, 4).is_none_or(|b| u32::from_le_bytes(b[..4].try_into().unwrap()) != **w)).count();
+                crate::nvn::exec::writes_checked(writes.len(), differ);
+            }
             if let Some(plan) = plan {
                 let (draws, clears) = (self.stats.draws.load(Ordering::Relaxed) - before.0, self.stats.clears.load(Ordering::Relaxed) - before.1);
                 crate::nvn::shadow::cp_entry_done(plan, draws, clears);
@@ -406,6 +424,63 @@ impl Gpu {
             self.run_macro(mem, eng, p);
         }
         self.flush_cb_upload(mem, eng);
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn simulate(&self, mem: &GuestMemory, plan: &crate::nvn::shadow::Plan) -> Option<(Vec<u32>, [[Option<(u64, u32)>; threed::CB_SLOTS]; 5], std::collections::BTreeMap<u64, u32>)> {
+        use crate::nvn::exec::Step;
+        let eng = self.engines.lock().unwrap();
+        let mut regs = eng.regs.get(&CLASS_3D)?.clone();
+        let mut cbs = eng.threed.constant_buffers;
+        let steps = crate::nvn::shadow::exec_steps(plan, &regs, &|va, len| self.read(mem, va, len))?;
+        let mut writes = std::collections::BTreeMap::new();
+        for step in steps {
+            match step {
+                Step::Regs(values) => {
+                    for (r, mask, v) in values {
+                        regs[r] = regs[r] & !mask | v;
+                    }
+                }
+                Step::Bind { group, slot, binding } => cbs[group][slot] = binding,
+                Step::Draw(d) => crate::nvn::exec::expect_draw(regs.clone(), cbs, d),
+                Step::Clear(v) => crate::nvn::exec::expect_draw(regs.clone(), [[None; threed::CB_SLOTS]; 5], threed::Draw { topology: crate::nvn::exec::CLEAR, first: v, count: 0, index_size: None, instance: 0 }),
+                Step::Write { at, words } => {
+                    for (i, w) in words.into_iter().enumerate() {
+                        writes.insert(at + 4 * i as u64, w);
+                    }
+                }
+            }
+        }
+        Some((regs, cbs, writes))
+    }
+
+    fn execute(&self, mem: &GuestMemory, plan: &crate::nvn::shadow::Plan) -> bool {
+        use crate::nvn::exec::Step;
+        let mut guard = self.engines.lock().unwrap();
+        let eng = &mut *guard;
+        let Some(regs) = eng.regs.get(&CLASS_3D) else { return false };
+        let Some(steps) = crate::nvn::shadow::exec_steps(plan, regs, &|va, len| self.read(mem, va, len)) else { return false };
+        for step in steps {
+            match step {
+                Step::Regs(values) => {
+                    let regs = eng.regs.get_mut(&CLASS_3D).expect("3D registers");
+                    for (r, mask, v) in values {
+                        regs[r] = regs[r] & !mask | v;
+                    }
+                }
+                Step::Bind { group, slot, binding } => eng.threed.constant_buffers[group][slot] = binding,
+                Step::Write { at, words } => {
+                    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+                    self.write(mem, at, &bytes);
+                }
+                Step::Draw(d) => {
+                    let cbs = eng.threed.constant_buffers;
+                    self.draw(mem, &eng.regs[&CLASS_3D], &cbs, d);
+                }
+                Step::Clear(v) => self.clear(mem, &eng.regs[&CLASS_3D], v),
+            }
+        }
+        true
     }
 
     fn flush_cb_upload(&self, mem: &GuestMemory, eng: &mut Engines) {

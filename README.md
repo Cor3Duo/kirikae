@@ -202,7 +202,9 @@ advances by frame).
 **NVN on the host (in progress).** `KIRIKAE_NVN=trace` counts the calls into the game's graphics
 driver, and `KIRIKAE_NVN=shadow` builds a host model of everything the game asks NVN for and checks
 it draw by draw against what the command processor decodes: the groundwork for replacing the game's
-driver with a direct Vulkan implementation.
+driver with a direct Vulkan implementation. `KIRIKAE_NVN=exec` already draws the command lists the
+model fully understands straight from it and leaves only the rest to the command processor. `KIRIKAE_NVN=exec` already draws the command lists the
+model fully understands straight from it and leaves only the rest to the command processor.
 
 ## Configuration
 
@@ -225,6 +227,8 @@ driver with a direct Vulkan implementation.
 | `KIRIKAE_NO_FRAME_LIMIT=1` | ignores the swap interval the game asks for and lets it run past 60 fps (games whose world advances by frame speed up) |
 | `KIRIKAE_KEEP_NOOP_DRAWS=1` | keeps draws that write nothing (all color masked, no depth, stencil or memory writes), skipped by default |
 | `KIRIKAE_NVN=trace` / `shadow` / `encode` | NVN call counting / host model checked against the command processor (see [Features](#features); slower) / also predicts the 3D registers of every draw from the model and reports the mismatches and the registers not predicted yet |
+| `KIRIKAE_NVN=exec` / `check` | runs the command list segments the model supports on the host instead of the command processor (falls back per segment) / runs everything on the command processor but checks every draw, clear, register and buffer write the host would have produced |
+| `KIRIKAE_NVN=exec` / `check` | runs the command list segments the model supports on the host instead of the command processor (falls back per segment) / runs everything on the command processor but checks every draw, clear, register and buffer write the host would have produced |
 | `KIRIKAE_NO_CHECKED=1` | re-checks every constant buffer and vertex stream on each draw instead of reusing checks within a batch |
 | `KIRIKAE_NO_BUFFER_CACHE=1` | copies vertex, index and constant buffers on every draw, without the GPU-side cache |
 | `KIRIKAE_SAVES=<folder>` | save folder; each game uses `<folder>\<title id>` (default `%APPDATA%\kirikae\saves`) |

@@ -88,6 +88,8 @@ pub fn after(c: Call) -> bool {
 }
 
 pub const TEXTURE_BYTES: u64 = 0xc0;
+
+const TEXTURE_LAYOUT: u64 = 0x94;
 pub const POOL_BYTES: u64 = 0x100;
 pub const VIEW_BYTES: u64 = 0x28;
 
@@ -484,7 +486,13 @@ impl Resources {
                     };
                     base + b.offset
                 });
-                let t = Texture::new(&b, address);
+                let mut t = Texture::new(&b, address);
+                if let Some(w) = read(a[0] + TEXTURE_LAYOUT, 4) {
+                    let bhl = u32::from_le_bytes(w[..4].try_into().unwrap()) >> 8 & 0xf;
+                    if bhl <= 5 {
+                        t.block_height_log2 = bhl;
+                    }
+                }
                 let bytes = read(a[0], TEXTURE_BYTES).map(|b| hash(&b));
                 if let Some(h) = bytes {
                     self.textures_by_bytes.insert(h, t);

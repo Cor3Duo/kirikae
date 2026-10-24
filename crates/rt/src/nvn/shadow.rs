@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use super::exec::{Step, Tracker};
 use super::resources::{self, Resources};
 use super::state::{self, Field};
 use crate::cpu::Cpu;
@@ -40,10 +41,12 @@ pub struct Draw {
     pub vertex_sizes: Vec<(u8, u64)>,
     pub index_type: u8,
     pub base_instance: u32,
+    pub mode: u32,
     pub surfaces: Vec<(u8, resources::Surface)>,
     pub all_targets: [u64; 9],
     pub pools: [u64; 2],
     pub program: u64,
+    pub program_id: u32,
 }
 
 impl Draw {
@@ -53,8 +56,8 @@ impl Draw {
 }
 
 #[derive(Clone, Debug)]
-enum Cmd {
-    Program(u64, Arc<Vec<u64>>),
+pub(super) enum Cmd {
+    Program(u64, u32, Arc<Vec<u64>>),
     Uniform { stage: u8, index: u8, range: (u64, u64) },
     Vertex { index: u8, address: u64, size: u64 },
     Texture { stage: u8, index: u16, handle: u64 },
@@ -78,14 +81,8 @@ struct Model {
     recording: HashMap<u64, Vec<(u64, Cmd)>>,
     lists: HashMap<u64, Arc<Vec<(u64, Cmd)>>>,
     programs: HashMap<u64, Arc<Vec<u64>>>,
-    program: Arc<Vec<u64>>,
-    targets: [u64; 9],
-    surfaces: [Option<resources::Surface>; 9],
-    uniforms: std::collections::BTreeMap<(u8, u8), (u64, u64)>,
-    vertex: std::collections::BTreeMap<u8, u64>,
-    vertex_sizes: std::collections::BTreeMap<u8, u64>,
-    textures: std::collections::BTreeMap<(u8, u16), u64>,
-    state: std::collections::BTreeMap<Field, u64>,
+    tracker: Tracker,
+    exec: Tracker,
     objects: state::Objects,
     learned: state::Learned,
     res: Resources,
@@ -95,12 +92,8 @@ struct Model {
     command_memory: HashMap<u64, u64>,
     missing: HashMap<u64, Vec<&'static str>>,
     pool_vas: HashMap<u64, u64>,
-    pools: [u64; 2],
-    storage: std::collections::BTreeMap<(u8, u8), (u64, u64)>,
-    scratch: (u64, u64),
     list_ranges: HashMap<u64, (u64, u64)>,
-    program_object: u64,
-    program_constants: HashMap<u64, [Option<(u64, u32)>; 5]>,
+    stage_constants: HashMap<u64, u64>,
     support: (Option<u64>, [Option<u64>; 5]),
     unsupported: std::collections::HashSet<u64>,
     unsupported_calls: HashMap<&'static str, u64>,
@@ -126,8 +119,10 @@ struct Stats {
     missing: u64,
     unknown_lists: u64,
     uniform_updates: u64,
+    executed: u64,
+    topology_checked: u64,
+    topology_differ: u64,
     constants_checked: u64,
-    constants_learned: u64,
     constants_differ: u64,
     words_checked: u64,
     words_missing: HashMap<String, u64>,
@@ -224,6 +219,8 @@ pub fn unsupported(name: &'static str, cmdbuf: u64) {
 
 pub struct Plan {
     handle: u64,
+    list: List,
+    end: u64,
     va: u64,
     draws: u64,
     clears: u64,
@@ -302,13 +299,16 @@ pub fn cp_entry(va: u64, words: u64) -> Option<Plan> {
             }
         }
         UPLOADS.lock().unwrap().clear();
-        Some(Plan { handle, va, draws, clears, words: predicted })
+        Some(Plan { handle, list, end: va + words * 4, va, draws, clears, words: predicted })
     }
 }
 
 pub fn cp_entry_done(plan: Plan, draws: u64, clears: u64) {
     let uploads = std::mem::take(&mut *UPLOADS.lock().unwrap());
     with(|m| {
+        if super::exec::ON.load(Ordering::Relaxed) {
+            m.segment_end();
+        }
         let seen: std::collections::HashSet<(u64, u32)> = uploads.iter().copied().collect();
         let predicted: std::collections::HashSet<(u64, u32)> = plan.words.iter().map(|w| (w.0, w.1)).collect();
         m.stats.words_checked += uploads.len() as u64;
@@ -471,6 +471,12 @@ const MAX_UNIFORM_UPDATE: u64 = 0x10000;
 
 const PROGRAM_HEADER: u64 = 0x30;
 
+const CONTROL_CONSTANTS: u64 = 0x700;
+
+const PROGRAM_ID: u64 = 8;
+
+const CONSTANTS_SIZE: u32 = 0x10000;
+
 fn read_u64s(c: &Cpu, addr: u64, n: u64) -> Vec<u64> {
     let n = n.min(4096);
     c.process().memory.read(addr, 8 * n).map(|b| b.chunks(8).map(|w| u64::from_le_bytes(w.try_into().unwrap())).collect()).unwrap_or_default()
@@ -534,22 +540,33 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
                     m.flatten(h, 0, &mut flat);
                 }
                 SEGMENTS.lock().unwrap().submit(flat);
-                for h in handles {
-                    m.expand(h, 0);
+                if !super::exec::ON.load(Ordering::Relaxed) {
+                    for h in handles {
+                        m.expand(h, 0);
+                    }
+                    m.compare();
                 }
-                m.compare();
             });
         }
         Hook::ProgramSetShaders => {
             let stages = read_u64s(c, a[2], 2 * a[1]);
+            let constants: Vec<(u64, u64)> = stages
+                .chunks(2)
+                .filter_map(|s| {
+                    let delta = c.process().memory.read(s[1] + CONTROL_CONSTANTS, 4)?;
+                    Some((s[0] + PROGRAM_HEADER, s[0] + u32::from_le_bytes(delta[..4].try_into().unwrap()) as u64))
+                })
+                .collect();
             let code: Vec<u64> = stages.chunks(2).map(|s| s[0] + PROGRAM_HEADER).collect();
             with(|m| {
                 m.programs.insert(a[0], Arc::new(code));
+                m.stage_constants.extend(constants);
             });
         }
         Hook::BindProgram => {
             let p = with(|m| m.programs.get(&a[1]).cloned().unwrap_or_default());
-            record(Cmd::Program(a[1], p));
+            let id = c.process().memory.read(a[1] + PROGRAM_ID, 4).map_or(u32::MAX, |b| u32::from_le_bytes(b[..4].try_into().unwrap()));
+            record(Cmd::Program(a[1], id, p));
         }
         Hook::SetRenderTargets => {
             let n = a[1].min(8);
@@ -644,11 +661,11 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
                 _ => (a[5] as i32, a[6] as u32, a[7] as u32),
             };
             let _ = index_size(a[2]);
-            record(Cmd::Draw(Draw { indexed: true, count: a[3] as u32, start: a[4], base_vertex, base_instance, instances, index_type: a[2] as u8, ..Default::default() }));
+            record(Cmd::Draw(Draw { indexed: true, count: a[3] as u32, start: a[4], base_vertex, base_instance, instances, index_type: a[2] as u8, mode: a[1] as u32, ..Default::default() }));
         }
         Hook::DrawArrays | Hook::DrawArraysInstanced => {
             let (base_instance, instances) = if matches!(hook, Hook::DrawArrays) { (0, 1) } else { (a[4] as u32, a[5] as u32) };
-            record(Cmd::Draw(Draw { indexed: false, count: a[3] as u32, start: a[2], base_instance, instances, ..Default::default() }));
+            record(Cmd::Draw(Draw { indexed: false, count: a[3] as u32, start: a[2], base_instance, instances, mode: a[1] as u32, ..Default::default() }));
         }
         Hook::DispatchCompute => record(Cmd::Dispatch([a[1] as u32, a[2] as u32, a[3] as u32])),
         Hook::BindUniformBuffer => record(Cmd::Uniform { stage: a[1] as u8, index: a[2] as u8, range: (a[3], a[4]) }),
@@ -738,68 +755,25 @@ impl Model {
             return;
         };
         for (_, cmd) in list.iter() {
+            self.tracker.apply(cmd);
             match cmd {
-                Cmd::Program(object, p) => (self.program_object, self.program) = (*object, p.clone()),
-                Cmd::State(fields) => self.state.extend(fields.iter().copied()),
-                Cmd::Uniform { stage, index, range } => {
-                    if let Some(g) = stage_group(*stage) {
-                        self.uniforms.insert((g, index + 3), *range);
-                    }
-                }
-                Cmd::Vertex { index, address, size } => {
-                    self.vertex.insert(*index, *address);
-                    self.vertex_sizes.insert(*index, *size);
-                }
-                Cmd::Texture { stage, index, handle } => {
-                    if let Some(g) = stage_group(*stage) {
-                        self.textures.insert((g, *index), *handle);
-                    }
-                }
-                Cmd::Targets(t, s) => (self.targets, self.surfaces) = (*t, *s),
-                Cmd::Clear(cl) => {
-                    let index = (cl.what >> 6 & 7) as usize;
-                    let target = if cl.what & 0x3c != 0 { self.targets[index] } else { self.targets[8] };
-                    self.expected.push_back(Work::Clear(Clear { target, ..cl.clone() }));
-                }
-                Cmd::Draw(d) => {
-                    let d = Draw {
-                        programs: self.program.to_vec(),
-                        targets: [self.targets[0], self.targets[8]],
-                        uniforms: self.uniforms.iter().map(|(k, v)| (*k, *v)).collect(),
-                        vertex: self.vertex.iter().map(|(k, v)| (*k, *v)).collect(),
-                        vertex_sizes: self.vertex_sizes.iter().map(|(k, v)| (*k, *v)).collect(),
-                        textures: self.textures.iter().map(|(k, v)| (*k, *v)).collect(),
-                        state: self.target_state(),
-                        surfaces: self.surfaces.iter().enumerate().filter_map(|(k, s)| s.map(|s| (k as u8, s))).collect(),
-                        all_targets: self.targets,
-                        pools: self.pools,
-                        program: self.program_object,
-                        ..d.clone()
-                    };
-                    self.expected.push_back(Work::Draw(Box::new(d)));
-                }
+                Cmd::Clear(cl) => self.expected.push_back(Work::Clear(self.tracker.clear(cl))),
+                Cmd::Draw(d) => self.expected.push_back(Work::Draw(Box::new(self.tracker.draw(d)))),
                 Cmd::Dispatch(g) => self.expected.push_back(Work::Dispatch(*g)),
                 Cmd::Call(handles) if depth < 8 => {
                     for &h in handles {
                         self.expand(h, depth + 1);
                     }
                 }
-                Cmd::Call(_) => {}
-                Cmd::Pool { texture, address } => self.pools[usize::from(!*texture)] = *address,
                 Cmd::UniformUpdate { address, data } => {
                     self.stats.uniform_updates += 1;
                     self.stats.uniform_bytes += data.len() as u64;
                     self.stats.uniform_last = *address;
                 }
-                Cmd::Storage { stage, index, address, size } => {
-                    if let Some(g) = stage_group(*stage) {
-                        self.storage.insert((g, *index), (*address, *size));
-                    }
-                }
                 Cmd::Barrier(bits) => self.stats.barriers |= *bits,
                 Cmd::Report { counter, address } => self.stats.reports.push((*counter, *address)),
                 Cmd::Multisample(state) => self.stats.multisample = *state,
-                Cmd::Scratch { address, size } => self.scratch = (*address, *size),
+                _ => {}
             }
         }
     }
@@ -811,16 +785,6 @@ impl Model {
             Some(Work::Draw(e)) if (e.indexed, e.count, e.start, e.base_vertex) == (d.indexed, d.count, d.start, d.base_vertex) => Some(e),
             _ => None,
         }
-    }
-
-    fn target_state(&self) -> Vec<(Field, u64)> {
-        let mut state: Vec<(Field, u64)> = self.state.iter().map(|(k, v)| (*k, *v)).collect();
-        for (k, s) in self.surfaces.iter().enumerate() {
-            if let Some(s) = s {
-                state.push(if k < 8 { (Field(state::Kind::TargetFormat, k as u8), s.format as u64) } else { (Field(state::Kind::DepthFormat, 0), s.format as u64) });
-            }
-        }
-        state
     }
 
     fn decoded(&mut self, w: Work, instance: u32) {
@@ -840,6 +804,25 @@ impl Model {
             other => self.decoded.push_back(other),
         }
         self.compare();
+    }
+
+    fn constant_bindings(&self, programs: &[u64], read: &dyn Fn(u64, u64) -> Option<Vec<u8>>) -> Option<Vec<Step>> {
+        let mut out = Vec::new();
+        for &code in programs {
+            let ty = read(code, 4).map_or(99, |b| (u32::from_le_bytes(b[..4].try_into().unwrap()) >> 10 & 0xf) as usize);
+            let Some(g) = [None, Some(0), Some(1), Some(2), Some(3), Some(4)].get(ty).copied().flatten() else { continue };
+            out.push(Step::Bind { group: g, slot: 1, binding: Some((*self.stage_constants.get(&code)?, CONSTANTS_SIZE)) });
+        }
+        Some(out)
+    }
+
+    fn segment_end(&mut self) {
+        if let Some(h) = self.held.take() {
+            self.decoded.push_back(Work::Draw(Box::new(h)));
+        }
+        self.compare();
+        self.expected.clear();
+        self.decoded.clear();
     }
 
     fn same(a: &Work, b: &Work) -> bool {
@@ -967,7 +950,7 @@ impl Model {
     }
 }
 
-fn stage_group(stage: u8) -> Option<u8> {
+pub(super) fn stage_group(stage: u8) -> Option<u8> {
     [0, 4, 3, 1, 2].get(stage as usize).copied()
 }
 
@@ -1061,25 +1044,25 @@ pub fn cp_draw(regs: &[u32], cbs: &[[Option<(u64, u32)>; crate::gpu::threed::CB_
     let d = Draw { indexed: draw.index_size.is_some(), count: draw.count, start, base_vertex, instances: 1, programs, targets: [color, depth], uniforms, vertex, textures, state, texture_addresses, ..Default::default() };
     with(|m| {
         m.support = (cbs[0][0].map(|b| b.0), std::array::from_fn(|g| cbs[g][2].map(|b| b.0)));
+        if let Some(mode) = m.pending_draw(&d, draw.instance).map(|e| e.mode) {
+            m.stats.topology_checked += 1;
+            if mode != draw.topology {
+                m.stats.topology_differ += 1;
+                let msg = format!("draw mode {mode:#x}, command processor topology {:#x}", draw.topology);
+                m.log("topology", msg);
+            }
+        }
         if let Some(e) = m.pending_draw(&d, draw.instance).filter(|e| e.program != 0) {
             let (program, codes) = (e.program, e.programs.clone());
             for code in codes {
                 let Some(ty) = read(code, 4).map(|b| (u32::from_le_bytes(b[..4].try_into().unwrap()) >> 10 & 0xf) as usize) else { continue };
                 let Some(g) = [None, Some(0), Some(1), Some(2), Some(3), Some(4)].get(ty).copied().flatten() else { continue };
                 let seen = cbs[g][1];
-                let known = m.program_constants.entry(program).or_insert([None; 5]);
-                match known[g] {
-                    None => {
-                        known[g] = seen;
-                        m.stats.constants_learned += 1;
-                    }
-                    Some(k) => {
-                        m.stats.constants_checked += 1;
-                        if Some(k) != seen {
-                            m.stats.constants_differ += 1;
-                            m.log("program constants", format!("program {program:#x} group {g}: learned {k:x?}, command processor {seen:x?}"));
-                        }
-                    }
+                let model = m.stage_constants.get(&code).map(|&a| (a, CONSTANTS_SIZE));
+                m.stats.constants_checked += 1;
+                if model != seen {
+                    m.stats.constants_differ += 1;
+                    m.log("program constants", format!("program {program:#x} group {g}: model {model:x?}, command processor {seen:x?}"));
                 }
             }
         }
@@ -1140,9 +1123,9 @@ pub fn report() {
             m.stats.uniform_last,
             m.stats.barriers,
             m.stats.reports.len(),
-            m.storage.len(),
+            m.tracker.storage.len(),
             m.stats.multisample,
-            m.scratch
+            m.tracker.scratch
         );
         m.stats.reports.clear();
         let seg = SEGMENTS.lock().unwrap();
@@ -1161,10 +1144,11 @@ pub fn report() {
         missing.sort_by_key(|w| std::cmp::Reverse(*w.1));
         let missing: Vec<String> = missing.iter().take(12).map(|(k, n)| format!("{k} {n}")).collect();
         eprintln!(
-            "kirikae:         nvn program constants: {} learned, {} checked, {} differ; driver uploads: {} words seen, not predicted: {}; predicted but not seen: {:?}",
-            m.stats.constants_learned,
+            "kirikae:         nvn program constants: {} checked, {} differ; draw topology: {} checked, {} differ; driver uploads: {} words seen, not predicted: {}; predicted but not seen: {:?}",
             m.stats.constants_checked,
             m.stats.constants_differ,
+            m.stats.topology_checked,
+            m.stats.topology_differ,
             m.stats.words_checked,
             missing.join(", "),
             m.stats.words_extra
@@ -1176,4 +1160,123 @@ pub fn report() {
         eprint!("{}", m.learned.report());
         eprint!("{}", m.learned.odd_examples());
     });
+}
+
+pub fn exec_steps(plan: &Plan, regs: &[u32], read: &dyn Fn(u64, u64) -> Option<Vec<u8>>) -> Option<Vec<Step>> {
+    with(|m| {
+        let cmds: Vec<&Cmd> = plan.list.iter().filter(|(at, _)| *at >= plan.va && *at < plan.end).map(|(_, c)| c).collect();
+        let (slot0, slot2) = m.support;
+        let mut why = match () {
+            _ if slot0.is_none() => Some("driver constants unknown".to_string()),
+            _ if cmds.iter().any(|c| matches!(c, Cmd::Dispatch(_))) => Some("dispatch".to_string()),
+            _ if cmds.iter().any(|c| matches!(c, Cmd::Report { .. })) => Some("report".to_string()),
+            _ => None,
+        };
+        let mut steps = Vec::new();
+        let mut works = Vec::new();
+        for cmd in cmds {
+            m.exec.apply(cmd);
+            match cmd {
+                Cmd::Draw(d) => works.push(Work::Draw(Box::new(m.exec.draw(d)))),
+                Cmd::Clear(cl) => works.push(Work::Clear(m.exec.clear(cl))),
+                _ => {}
+            }
+            if why.is_some() {
+                continue;
+            }
+            let base = slot0.unwrap_or(0);
+            match cmd {
+                Cmd::Draw(d) => {
+                    let full = m.exec.draw(d);
+                    let regs_now = match super::encode::predict_complete(&full, &m.learned, regs, read) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            why = Some(format!("draw: {e}"));
+                            continue;
+                        }
+                    };
+                    let Some(bindings) = m.constant_bindings(&full.programs, read) else {
+                        why = Some("program constants unknown".to_string());
+                        continue;
+                    };
+                    steps.push(Step::Regs(regs_now));
+                    steps.extend(bindings);
+                    for (&(g, slot), &(address, size)) in &m.exec.uniforms {
+                        steps.push(Step::Bind { group: g as usize, slot: slot as usize, binding: Some((address, size as u32)) });
+                    }
+                    let based = d.base_vertex != 0 || d.base_instance != 0;
+                    if based {
+                        steps.push(Step::Write { at: base + BASE_VERTEX, words: vec![d.base_vertex as u32, d.base_instance] });
+                    }
+                    let index_size = d.indexed.then(|| 1 << (d.index_type & 3));
+                    let first = if d.indexed { 0 } else { d.start as u32 };
+                    for instance in 0..d.instances.max(1) {
+                        steps.push(Step::Draw(crate::gpu::threed::Draw { topology: d.mode, first, count: d.count, index_size, instance }));
+                    }
+                    if based {
+                        steps.push(Step::Write { at: base + BASE_VERTEX, words: vec![0, 0] });
+                    }
+                    if d.indexed && d.base_vertex != 0 {
+                        steps.push(Step::Regs(vec![(crate::gpu::threed::reg::VB_ELEMENT_BASE, u32::MAX, 0), (0x446, u32::MAX, 0)]));
+                    }
+                }
+                Cmd::Clear(cl) => {
+                    let full = m.exec.draw(&Draw::default());
+                    let mut regs_now = match super::encode::predict_complete(&full, &m.learned, regs, read) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            why = Some(format!("clear: {e}"));
+                            continue;
+                        }
+                    };
+                    if cl.what & 0x3c != 0 {
+                        regs_now.extend((0..4).map(|i| (crate::gpu::threed::reg::CLEAR_COLOR + i, u32::MAX, cl.values[i])));
+                    } else {
+                        regs_now.push((0x364, u32::MAX, cl.values[0]));
+                        regs_now.push((0x368, 0xff, cl.values[1]));
+                    }
+                    steps.push(Step::Regs(regs_now));
+                    for layer in 0..m.exec.layers(cl) {
+                        steps.push(Step::Clear(cl.what | layer << 10));
+                    }
+                }
+                Cmd::Texture { stage, index, handle } => match stage_group(*stage).and_then(|g| slot2[g as usize]) {
+                    Some(s2) => steps.push(Step::Write { at: s2 + TEXTURE_HANDLES + 8 * *index as u64, words: vec![*handle as u32] }),
+                    None => why = Some("texture handles unknown".to_string()),
+                },
+                Cmd::UniformUpdate { address, data } => {
+                    steps.push(Step::Write { at: *address, words: data.as_chunks::<4>().0.iter().map(|w| u32::from_le_bytes(*w)).collect() });
+                }
+                Cmd::Storage { index, address, size, .. } => {
+                    steps.push(Step::Write { at: base + STORAGE_BUFFERS + 0x10 * *index as u64, words: vec![*address as u32, (*address >> 32) as u32, *size as u32] });
+                }
+                Cmd::Multisample(_) => steps.push(Step::Write { at: base + 0x620, words: vec![0; 8] }),
+                _ => {}
+            }
+        }
+        if why.is_none() {
+            let full = m.exec.draw(&Draw::default());
+            match super::encode::predict_complete(&full, &m.learned, regs, read) {
+                Ok(regs_now) => {
+                    steps.push(Step::Regs(regs_now));
+                    steps.extend(m.constant_bindings(&full.programs, read).unwrap_or_default());
+                    for (&(g, slot), &(address, size)) in &m.exec.uniforms {
+                        steps.push(Step::Bind { group: g as usize, slot: slot as usize, binding: Some((address, size as u32)) });
+                    }
+                }
+                Err(e) => why = Some(format!("segment end: {e}")),
+            }
+        }
+        if why.is_none() {
+            m.stats.executed += works.len() as u64;
+        } else if super::exec::ON.load(Ordering::Relaxed) {
+            m.expected.extend(works);
+        }
+        super::exec::counted(why.as_deref());
+        why.is_none().then_some(steps)
+    })
+}
+
+pub fn executed_report() -> String {
+    with(|m| format!(" ({} draws and clears)", m.stats.executed))
 }

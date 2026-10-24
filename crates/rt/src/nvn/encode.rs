@@ -75,7 +75,24 @@ pub fn report() {
 
 pub type Prediction = Vec<(usize, u32, u32)>;
 
+const MACRO_PROGRAM: usize = 0xd1d;
+
+const MACRO_DEPTH_TARGET: usize = 0xd29;
+
 pub fn predict(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u64) -> Option<Vec<u8>>) -> Prediction {
+    predict_inner(d, learned, regs, read).0
+}
+
+pub fn predict_complete(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u64) -> Option<Vec<u8>>) -> Result<Prediction, String> {
+    let (p, missing) = predict_inner(d, learned, regs, read);
+    match missing {
+        None => Ok(p),
+        Some(m) => Err(m),
+    }
+}
+
+fn predict_inner(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u64) -> Option<Vec<u8>>) -> (Prediction, Option<String>) {
+    let mut missing = None;
     let mut out: Prediction = Vec::with_capacity(256);
     let mut put = |r: usize, mask: u32, value: u32| out.push((r, mask, value & mask));
     let mut viewport = [0i64; 4];
@@ -86,8 +103,14 @@ pub fn predict(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u64
     let offset = d.state.iter().find(|x| x.0 == Field(Kind::PolygonOffsetEnables, 0)).and_then(|x| learned.usual(Kind::PolygonOffsetEnables, x.1)).is_some_and(|r| r != 0);
     let stencil_test = d.state.iter().find(|x| x.0 == Field(Kind::StencilTest, 0)).and_then(|x| learned.usual(Kind::StencilTest, x.1)) == Some(1);
     let depth_test = d.state.iter().find(|x| x.0 == Field(Kind::DepthTest, 0)).and_then(|x| learned.usual(Kind::DepthTest, x.1)) == Some(1);
-    for i in attribs..ATTRIBUTES {
-        put(0x458 + i, 0x40, 0x40);
+    let field = |k: Kind, i: usize| d.state.iter().find(|x| x.0 == Field(k, i as u8)).and_then(|x| learned.usual(k, x.1));
+    let bound = |i: usize| d.surfaces.iter().any(|s| s.0 as usize == i);
+    let blended = |i: usize| field(Kind::BlendEnable, i) == Some(1);
+    let alpha = |i: usize| field(Kind::ChannelMask, i).is_some_and(|m| m & 8 != 0);
+    let disabled = |i: usize| d.state.iter().any(|x| x.0 == Field(Kind::AttribFormat, i as u8) && x.1 == 0);
+    for i in 0..ATTRIBUTES {
+        let constant = i >= attribs || disabled(i);
+        put(0x458 + i, 0x40, (constant as u32) << 6);
     }
     for s in 0..16 {
         put(0x700 + 4 * s, 0x1000, ((s < streams) as u32) << 12);
@@ -100,17 +123,31 @@ pub fn predict(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u64
             _ => {}
         }
         let stale = match kind {
-            Kind::AttribFormat | Kind::AttribOffset | Kind::AttribStream => i >= attribs,
+            Kind::AttribFormat | Kind::AttribOffset | Kind::AttribStream => i >= attribs || disabled(i),
             Kind::StreamStride | Kind::StreamDivisor => i >= streams,
-            Kind::DepthWrite | Kind::DepthFunc => !depth_test,
-            Kind::StencilRef | Kind::StencilValueMask | Kind::StencilMask => !stencil_test,
-            Kind::PolygonOffset => !offset,
             _ => false,
         };
         if stale {
             continue;
         }
-        let Some(r) = learned.usual(kind, v) else { continue };
+        let unused = match kind {
+            Kind::ChannelMask | Kind::BlendEnable => !bound(i),
+            Kind::DepthWrite | Kind::DepthFunc => !depth_test,
+            Kind::StencilRef | Kind::StencilValueMask | Kind::StencilMask | Kind::StencilFunc | Kind::StencilFail | Kind::StencilDepthFail | Kind::StencilPass => !stencil_test,
+            Kind::BlendEquation | Kind::BlendSrc | Kind::BlendDst => !bound(i) || !blended(i),
+            Kind::BlendEquationAlpha | Kind::BlendSrcAlpha | Kind::BlendDstAlpha => !bound(i) || !blended(i) || !alpha(i),
+            Kind::PolygonOffset => !offset,
+            _ => false,
+        };
+        let Some(r) = learned.usual(kind, v) else {
+            if unused {
+                continue;
+            }
+            if !matches!(kind, Kind::Viewport | Kind::Scissor | Kind::AttribCount | Kind::StreamCount) {
+                missing.get_or_insert_with(|| format!("{kind:?} {v:#x}"));
+            }
+            continue;
+        };
         let r = r as u32;
         match kind {
             Kind::ChannelMask => put(0x680 + i, 0x1111, (r & 1) | (r & 2) << 3 | (r & 4) << 6 | (r & 8) << 9),
@@ -191,6 +228,9 @@ pub fn predict(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u64
     let colors = d.surfaces.iter().filter(|s| s.0 < 8).map(|s| s.0 as u32 + 1).max().unwrap_or(0);
     put(reg::CT_SELECT, u32::MAX, 0xfac_6880 | colors);
     put(0x54e, 1, d.surfaces.iter().any(|s| s.0 == 8) as u32);
+    for k in (0..8).filter(|&k| !bound(k)) {
+        put(reg::COLOR_TARGET + 16 * k + 4, u32::MAX, 0);
+    }
     for &(k, s) in &d.surfaces {
         let format = learned.usual(if k < 8 { Kind::TargetFormat } else { Kind::DepthFormat }, s.format as u64);
         let memory = match s.pitch {
@@ -204,15 +244,17 @@ pub fn predict(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u64
             address(&mut put, base, d.all_targets[k as usize]);
             put(base + 2, u32::MAX, s.pitch.unwrap_or(width));
             put(base + 3, 0x1_ffff, s.height);
-            if let Some(f) = format {
-                put(base + 4, u32::MAX, f as u32);
+            match format {
+                Some(f) => put(base + 4, u32::MAX, f as u32),
+                None => _ = missing.get_or_insert_with(|| format!("target format {:#x}", s.format)),
             }
             put(base + 5, 0x1070, memory);
         } else {
             put(0x48a, u32::MAX, width);
             put(0x48b, 0x1_ffff, s.height);
-            if let Some(f) = format {
-                put(0x3fa, u32::MAX, f as u32);
+            match format {
+                Some(f) => put(0x3fa, u32::MAX, f as u32),
+                None => _ = missing.get_or_insert_with(|| format!("depth format {:#x}", s.format)),
             }
             put(0x3fb, 0x70, memory);
         }
@@ -248,14 +290,26 @@ pub fn predict(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u64
         put(0x446, u32::MAX, d.base_vertex as u32);
     }
     let base = crate::gpu::threed::address(regs, reg::PROGRAM_REGION);
+    let mut offsets = [0u32; 6];
     for &p in &d.programs {
         let Some(sph) = read(p, 4) else { continue };
         let ty = (u32::from_le_bytes(sph[..4].try_into().unwrap()) >> 10 & 0xf) as usize;
         if ty < 6 && p >= base {
             put(reg::PIPELINE + 16 * ty + 1, u32::MAX, (p - base) as u32);
+            offsets[ty] = (p - base) as u32;
         }
     }
-    out
+    if !d.programs.is_empty() {
+        put(MACRO_PROGRAM, u32::MAX, d.program_id);
+        put(MACRO_PROGRAM + 4, u32::MAX, d.program_id);
+        for (s, o) in offsets.into_iter().enumerate() {
+            put(MACRO_PROGRAM + 5 + s, u32::MAX, o);
+        }
+    }
+    if d.targets[1] != 0 {
+        put(MACRO_DEPTH_TARGET, u32::MAX, (d.targets[1] >> 8) as u32);
+    }
+    (out, missing)
 }
 
 #[derive(Default)]
