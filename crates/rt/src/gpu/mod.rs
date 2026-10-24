@@ -285,12 +285,15 @@ impl Gpu {
                 continue;
             }
             self.cpu_access(va, words * 4);
-            if crate::nvn::shadow::ON.load(Ordering::Relaxed) {
-                crate::nvn::shadow::cp_entry(va, words);
-            }
+            let plan = if crate::nvn::shadow::ON.load(Ordering::Relaxed) { crate::nvn::shadow::cp_entry(va, words) } else { None };
+            let before = (self.stats.draws.load(Ordering::Relaxed), self.stats.clears.load(Ordering::Relaxed));
             let bytes = self.bytes(mem, va, words * 4).ok_or_else(|| format!("pushbuffer at GPU address {va:#x} is not mapped"))?;
             let w: Vec<u32> = bytes.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)).collect();
             self.run_pushbuffer(mem, &w);
+            if let Some(plan) = plan {
+                let (draws, clears) = (self.stats.draws.load(Ordering::Relaxed) - before.0, self.stats.clears.load(Ordering::Relaxed) - before.1);
+                crate::nvn::shadow::cp_entry_done(plan, draws, clears);
+            }
         }
         let mut r = self.renderer.lock().unwrap();
         if let Some(r) = r.0.as_mut() {

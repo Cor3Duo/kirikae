@@ -73,8 +73,8 @@ enum Cmd {
 
 #[derive(Default)]
 struct Model {
-    recording: HashMap<u64, Vec<Cmd>>,
-    lists: HashMap<u64, Arc<Vec<Cmd>>>,
+    recording: HashMap<u64, Vec<(u64, Cmd)>>,
+    lists: HashMap<u64, Arc<Vec<(u64, Cmd)>>>,
     programs: HashMap<u64, Arc<Vec<u64>>>,
     program: Arc<Vec<u64>>,
     targets: [u64; 9],
@@ -120,6 +120,8 @@ struct Stats {
     missing: u64,
     unknown_lists: u64,
     uniform_updates: u64,
+    segments: u64,
+    segments_off: u64,
     uniform_bytes: u64,
     uniform_last: u64,
     barriers: u64,
@@ -184,18 +186,70 @@ pub fn unsupported(name: &'static str, cmdbuf: u64) {
     });
 }
 
-pub fn cp_entry(va: u64, words: u64) {
-    let mut s = SEGMENTS.lock().unwrap();
-    if let Some((_, supported)) = s.find(va, words * 4) {
-        s.words_in_lists += words;
-        if supported {
-            s.words_supported += words;
+pub struct Plan {
+    handle: u64,
+    va: u64,
+    draws: u64,
+    clears: u64,
+}
+
+pub fn cp_entry(va: u64, words: u64) -> Option<Plan> {
+    let found = {
+        let mut s = SEGMENTS.lock().unwrap();
+        let found = s.find(va, words * 4);
+        match found {
+            Some((_, supported)) => {
+                s.words_in_lists += words;
+                if supported {
+                    s.words_supported += words;
+                }
+                s.entries_in_lists += 1;
+            }
+            None => {
+                s.words_elsewhere += words;
+                s.entries_elsewhere += 1;
+            }
         }
-        s.entries_in_lists += 1;
-    } else {
-        s.words_elsewhere += words;
-        s.entries_elsewhere += 1;
+        found
+    };
+    let (handle, supported) = found?;
+    if !supported {
+        return None;
     }
+    with(|m| {
+        let list = m.lists.get(&handle)?.clone();
+        let (mut draws, mut clears) = (0, 0);
+        for (at, cmd) in list.iter() {
+            if *at < va || *at >= va + words * 4 {
+                continue;
+            }
+            match cmd {
+                Cmd::Draw(d) => draws += d.instances as u64,
+                Cmd::Clear(_) => clears += 1,
+                _ => {}
+            }
+        }
+        Some(Plan { handle, va, draws, clears })
+    })
+}
+
+pub fn cp_entry_done(plan: Plan, draws: u64, clears: u64) {
+    with(|m| {
+        m.stats.segments += 1;
+        if plan.draws != draws || plan.clears > clears {
+            m.stats.segments_off += 1;
+            m.log("segments", format!("segment at {:#x} of list {:#x}: model {} draws {} clears, command processor {draws} draws {clears} clears", plan.va, plan.handle, plan.draws, plan.clears));
+        }
+    });
+}
+
+const COMMAND_WRITE: u64 = 0x18;
+const COMMAND_BASE: u64 = 0x50;
+const COMMAND_GPU_BASE: u64 = 0x60;
+
+fn command_position(c: &Cpu, cmdbuf: u64) -> u64 {
+    let read = |at: u64| c.process().memory.read(cmdbuf + at, 8).map_or(0, |b| u64::from_le_bytes(b.try_into().unwrap()));
+    read(COMMAND_GPU_BASE) + read(COMMAND_WRITE).wrapping_sub(read(COMMAND_BASE))
 }
 
 fn with<R>(f: impl FnOnce(&mut Model) -> R) -> R {
@@ -335,7 +389,8 @@ fn query(c: &mut Cpu, real: u64, args: &[u64]) -> u64 {
 
 pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<u64>) {
     let a = c.x;
-    let record = |cmd: Cmd| with(|m| m.recording.entry(a[0]).or_default().push(cmd));
+    let at = command_position(c, a[0]);
+    let record = |cmd: Cmd| with(|m| m.recording.entry(a[0]).or_default().push((at, cmd)));
     match hook {
         Hook::BeginRecording => with(|m| {
             m.recording.insert(a[0], Vec::new());
@@ -356,7 +411,7 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
             let used = real_of("nvnCommandBufferGetCommandMemoryUsed").map(|f| query(c, f, &[a[0]]));
             with(|m| {
                 let list = m.recording.remove(&a[0]).unwrap_or_default();
-                let calls_unsupported = list.iter().any(|c| matches!(c, Cmd::Call(h) if h.iter().any(|h| m.unsupported.contains(h) || !m.lists.contains_key(h))));
+                let calls_unsupported = list.iter().any(|(_, c)| matches!(c, Cmd::Call(h) if h.iter().any(|h| m.unsupported.contains(h) || !m.lists.contains_key(h))));
                 if m.missing.remove(&a[0]).is_some_and(|v| !v.is_empty()) || calls_unsupported {
                     m.unsupported.insert(handle);
                 } else {
@@ -564,7 +619,7 @@ impl Model {
             self.stats.unknown_lists += 1;
             return;
         };
-        for cmd in list.iter() {
+        for (_, cmd) in list.iter() {
             match cmd {
                 Cmd::Program(p) => self.program = p.clone(),
                 Cmd::State(fields) => self.state.extend(fields.iter().copied()),
@@ -950,13 +1005,15 @@ pub fn report() {
         m.stats.reports.clear();
         let seg = SEGMENTS.lock().unwrap();
         eprintln!(
-            "kirikae:         nvn command memory: {} pushbuffer entries ({} words, {} from lists the host fully models) inside recorded lists, {} entries ({} words) elsewhere; {} list ranges known",
+            "kirikae:         nvn command memory: {} pushbuffer entries ({} words, {} from lists the host fully models) inside recorded lists, {} entries ({} words) elsewhere; {} list ranges known; {} segments of modeled lists checked, {} with other draw or clear counts",
             seg.entries_in_lists,
             seg.words_in_lists,
             seg.words_supported,
             seg.entries_elsewhere,
             seg.words_elsewhere,
-            seg.ranges.len()
+            seg.ranges.len(),
+            m.stats.segments,
+            m.stats.segments_off
         );
         let mut calls: Vec<_> = m.unsupported_calls.iter().collect();
         calls.sort_by_key(|c| std::cmp::Reverse(*c.1));
