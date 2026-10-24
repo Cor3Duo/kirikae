@@ -102,7 +102,8 @@ impl Service for AudioOut {
             5 | 8 => {
                 let Some(out) = req.out_buf(0) else { return Reply::ok().u32(0) };
                 let n = ((out.size / 8) as usize).min(s.released.len());
-                let tags: Vec<u8> = s.released.drain(..n).flat_map(|t| t.to_le_bytes()).collect();
+                let mut tags: Vec<u8> = s.released.drain(..n).flat_map(|t| t.to_le_bytes()).collect();
+                tags.resize(out.size as usize, 0);
                 p.memory.write(out.addr, &tags);
                 Reply::ok().u32(n as u32)
             }
