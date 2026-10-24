@@ -2160,7 +2160,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "kirikae"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "kirikae-a64",
  "kirikae-loader",
@@ -2171,11 +2171,11 @@ dependencies = [
 
 [[package]]
 name = "kirikae-a64"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "kirikae-gui"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "eframe",
  "rfd",
@@ -2183,11 +2183,11 @@ dependencies = [
 
 [[package]]
 name = "kirikae-loader"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "kirikae-maxwell"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "naga 30.0.1",
  "rspirv",
@@ -2195,7 +2195,7 @@ dependencies = [
 
 [[package]]
 name = "kirikae-recomp"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -2211,7 +2211,7 @@ dependencies = [
 
 [[package]]
 name = "kirikae-rt"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ash",
  "cpal",
@@ -2231,7 +2231,7 @@ dependencies = [
 
 [[package]]
 name = "kirikae-testkit"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "kirikae-a64",
  "kirikae-loader",
