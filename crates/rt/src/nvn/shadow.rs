@@ -96,6 +96,7 @@ struct Model {
     pools: [u64; 2],
     storage: std::collections::BTreeMap<(u8, u8), (u64, u64)>,
     scratch: (u64, u64),
+    list_ranges: HashMap<u64, (u64, u64)>,
     unsupported: std::collections::HashSet<u64>,
     unsupported_calls: HashMap<&'static str, u64>,
     stats: Stats,
@@ -132,9 +133,21 @@ struct Stats {
 
 static MODEL: Mutex<Option<Model>> = Mutex::new(None);
 
-#[derive(Default)]
+type List = Arc<Vec<(u64, Cmd)>>;
+
+struct Pending {
+    start: u64,
+    end: u64,
+    handle: u64,
+    list: List,
+    supported: bool,
+    batch: u64,
+    consumed: u64,
+}
+
 struct Segments {
-    ranges: std::collections::BTreeMap<u64, (u64, u64, bool)>,
+    submitted: VecDeque<Pending>,
+    batch: u64,
     words_supported: u64,
     words_in_lists: u64,
     words_elsewhere: u64,
@@ -143,20 +156,32 @@ struct Segments {
 }
 
 impl Segments {
-    fn insert(&mut self, start: u64, end: u64, handle: u64, supported: bool) {
-        let overlapping: Vec<u64> = self.ranges.range(..end).rev().take_while(|(_, r)| r.0 > start).map(|(s, _)| *s).collect();
-        for s in overlapping {
-            self.ranges.remove(&s);
+    fn submit(&mut self, lists: Vec<(u64, u64, u64, List, bool)>) {
+        self.batch += 1;
+        for (start, end, handle, list, supported) in lists {
+            self.submitted.push_back(Pending { start, end, handle, list, supported, batch: self.batch, consumed: start });
         }
-        self.ranges.insert(start, (end, handle, supported));
+        while self.submitted.len() > MAX_SUBMITTED {
+            self.submitted.pop_front();
+        }
     }
 
-    fn find(&self, va: u64, len: u64) -> Option<(u64, bool)> {
-        self.ranges.range(..=va).next_back().filter(|(_, r)| va + len <= r.0).map(|(_, r)| (r.1, r.2))
+    fn find(&mut self, va: u64, len: u64) -> Option<(u64, List, bool)> {
+        let inside = |p: &Pending| va >= p.start && va + len <= p.end;
+        let i = self.submitted.iter().position(|p| inside(p) && va >= p.consumed).or_else(|| self.submitted.iter().position(inside))?;
+        let p = &mut self.submitted[i];
+        p.consumed = p.consumed.max(va + len);
+        let (handle, list, supported, batch) = (p.handle, p.list.clone(), p.supported, p.batch);
+        while self.submitted.front().is_some_and(|p| p.batch < batch) {
+            self.submitted.pop_front();
+        }
+        Some((handle, list, supported))
     }
 }
 
-static SEGMENTS: Mutex<Segments> = Mutex::new(Segments { ranges: std::collections::BTreeMap::new(), words_supported: 0, words_in_lists: 0, words_elsewhere: 0, entries_in_lists: 0, entries_elsewhere: 0 });
+const MAX_SUBMITTED: usize = 100_000;
+
+static SEGMENTS: Mutex<Segments> = Mutex::new(Segments { submitted: VecDeque::new(), batch: 0, words_supported: 0, words_in_lists: 0, words_elsewhere: 0, entries_in_lists: 0, entries_elsewhere: 0 });
 
 const NOT_RECORDED: [&str; 12] = [
     "nvnCommandBufferInitialize",
@@ -198,7 +223,7 @@ pub fn cp_entry(va: u64, words: u64) -> Option<Plan> {
         let mut s = SEGMENTS.lock().unwrap();
         let found = s.find(va, words * 4);
         match found {
-            Some((_, supported)) => {
+            Some((_, _, supported)) => {
                 s.words_in_lists += words;
                 if supported {
                     s.words_supported += words;
@@ -212,12 +237,11 @@ pub fn cp_entry(va: u64, words: u64) -> Option<Plan> {
         }
         found
     };
-    let (handle, supported) = found?;
+    let (handle, list, supported) = found?;
     if !supported {
         return None;
     }
-    with(|m| {
-        let list = m.lists.get(&handle)?.clone();
+    {
         let (mut draws, mut clears) = (0, 0);
         for (at, cmd) in list.iter() {
             if *at < va || *at >= va + words * 4 {
@@ -230,7 +254,7 @@ pub fn cp_entry(va: u64, words: u64) -> Option<Plan> {
             }
         }
         Some(Plan { handle, va, draws, clears })
-    })
+    }
 }
 
 pub fn cp_entry_done(plan: Plan, draws: u64, clears: u64) {
@@ -421,8 +445,7 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
                 if let (Some(&va), Some(used)) = (m.command_memory.get(&a[0]), used)
                     && used > 0
                 {
-                    let supported = !m.unsupported.contains(&handle);
-                    SEGMENTS.lock().unwrap().insert(va, va + used, handle, supported);
+                    m.list_ranges.insert(handle, (va, va + used));
                 }
             });
             c.pc = c.x[30];
@@ -432,6 +455,11 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
         Hook::QueueSubmitCommands => {
             let handles = read_u64s(c, a[2], a[1]);
             with(|m| {
+                let mut flat = Vec::new();
+                for &h in &handles {
+                    m.flatten(h, 0, &mut flat);
+                }
+                SEGMENTS.lock().unwrap().submit(flat);
                 for h in handles {
                     m.expand(h, 0);
                 }
@@ -614,6 +642,22 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
 }
 
 impl Model {
+    fn flatten(&self, handle: u64, depth: u32, out: &mut Vec<(u64, u64, u64, List, bool)>) {
+        let Some(list) = self.lists.get(&handle) else { return };
+        if let Some(&(start, end)) = self.list_ranges.get(&handle) {
+            out.push((start, end, handle, list.clone(), !self.unsupported.contains(&handle)));
+        }
+        for (_, cmd) in list.iter() {
+            if let Cmd::Call(handles) = cmd
+                && depth < 8
+            {
+                for &h in handles {
+                    self.flatten(h, depth + 1, out);
+                }
+            }
+        }
+    }
+
     fn expand(&mut self, handle: u64, depth: u32) {
         let Some(list) = self.lists.get(&handle).cloned() else {
             self.stats.unknown_lists += 1;
@@ -1005,13 +1049,13 @@ pub fn report() {
         m.stats.reports.clear();
         let seg = SEGMENTS.lock().unwrap();
         eprintln!(
-            "kirikae:         nvn command memory: {} pushbuffer entries ({} words, {} from lists the host fully models) inside recorded lists, {} entries ({} words) elsewhere; {} list ranges known; {} segments of modeled lists checked, {} with other draw or clear counts",
+            "kirikae:         nvn command memory: {} pushbuffer entries ({} words, {} from lists the host fully models) inside submitted lists, {} entries ({} words) elsewhere; {} submitted lists pending; {} segments of modeled lists checked, {} with other draw or clear counts",
             seg.entries_in_lists,
             seg.words_in_lists,
             seg.words_supported,
             seg.entries_elsewhere,
             seg.words_elsewhere,
-            seg.ranges.len(),
+            seg.submitted.len(),
             m.stats.segments,
             m.stats.segments_off
         );
