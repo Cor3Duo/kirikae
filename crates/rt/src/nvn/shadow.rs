@@ -11,7 +11,7 @@ pub static ON: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Work {
-    Draw(Draw),
+    Draw(Box<Draw>),
     Dispatch([u32; 3]),
     Clear(Clear),
 }
@@ -412,7 +412,7 @@ impl Model {
                         all_targets: self.targets,
                         ..d.clone()
                     };
-                    self.expected.push_back(Work::Draw(d));
+                    self.expected.push_back(Work::Draw(Box::new(d)));
                 }
                 Cmd::Dispatch(g) => self.expected.push_back(Work::Dispatch(*g)),
                 Cmd::Call(handles) if depth < 8 => {
@@ -448,16 +448,16 @@ impl Model {
         if let (Work::Draw(d), Some(held)) = (&w, &mut self.held)
             && instance > 0
             && instance == held.instances
-            && (Draw { instances: held.instances, ..d.clone() }) == *held
+            && (Draw { instances: held.instances, ..(**d).clone() }) == *held
         {
             held.instances += 1;
             return;
         }
         if let Some(h) = self.held.take() {
-            self.decoded.push_back(Work::Draw(h));
+            self.decoded.push_back(Work::Draw(Box::new(h)));
         }
         match w {
-            Work::Draw(d) => self.held = Some(d),
+            Work::Draw(d) => self.held = Some(*d),
             other => self.decoded.push_back(other),
         }
         self.compare();
@@ -685,7 +685,7 @@ pub fn cp_draw(regs: &[u32], cbs: &[[Option<(u64, u32)>; crate::gpu::threed::CB_
             let prediction = m.pending_draw(&d, draw.instance).map(|e| super::encode::predict(e, &m.learned, regs, read));
             super::encode::check(prediction, regs);
         }
-        m.decoded(Work::Draw(d), draw.instance)
+        m.decoded(Work::Draw(Box::new(d)), draw.instance)
     });
 }
 

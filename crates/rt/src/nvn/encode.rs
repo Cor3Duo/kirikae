@@ -177,7 +177,7 @@ pub fn predict(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u64
             Some(_) => 0x1000,
             None => s.block_height_log2 << 4,
         };
-        let width = if s.bytes > 0 { (s.width * s.bytes).div_ceil(64) * 64 / s.bytes } else { s.width };
+        let width = ((s.width * s.bytes).div_ceil(64) * 64).checked_div(s.bytes).unwrap_or(s.width);
         let width = if s.pitch.is_some() { s.width } else { width };
         if k < 8 {
             let base = reg::COLOR_TARGET + 16 * k as usize;
