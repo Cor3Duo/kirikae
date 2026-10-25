@@ -130,7 +130,7 @@ pub static EXECUTED: AtomicU64 = AtomicU64::new(0);
 pub static FALLBACK: AtomicU64 = AtomicU64::new(0);
 
 pub enum Step {
-    Regs(Vec<(usize, u32, u32)>),
+    Regs(Arc<super::encode::Prediction>),
     Bind { group: usize, slot: usize, binding: Option<(u64, u32)> },
     Write { at: u64, words: Vec<u32> },
     Draw(crate::gpu::threed::Draw),
@@ -141,6 +141,7 @@ pub enum Step {
 pub(super) struct Tracker {
     pub(super) program: Arc<Vec<u64>>,
     pub(super) program_object: u64,
+    pub(super) generation: u64,
     program_id: u32,
     pub(super) targets: [u64; 9],
     surfaces: [Option<Surface>; 9],
@@ -157,24 +158,48 @@ pub(super) struct Tracker {
 impl Tracker {
     pub(super) fn apply(&mut self, cmd: &Cmd) {
         match cmd {
-            Cmd::Program(object, id, p) => (self.program_object, self.program_id, self.program) = (*object, *id, p.clone()),
-            Cmd::State(fields) => self.state.extend(fields.iter().copied()),
+            Cmd::Program(object, id, p) => {
+                if (self.program_object, self.program_id) != (*object, *id) || !Arc::ptr_eq(&self.program, p) {
+                    (self.program_object, self.program_id, self.program) = (*object, *id, p.clone());
+                    self.generation += 1;
+                }
+            }
+            Cmd::State(fields) => {
+                for &(f, v) in fields.iter() {
+                    if self.state.insert(f, v) != Some(v) {
+                        self.generation += 1;
+                    }
+                }
+            }
             Cmd::Uniform { stage, index, range } => {
                 if let Some(g) = stage_group(*stage) {
                     self.uniforms.insert((g, index + 3), (range.0, range.1.next_multiple_of(0x100).min(0x10000)));
                 }
             }
             Cmd::Vertex { index, address, size } => {
-                self.vertex.insert(*index, *address);
-                self.vertex_sizes.insert(*index, *size);
+                let moved = self.vertex.insert(*index, *address) != Some(*address);
+                let resized = self.vertex_sizes.insert(*index, *size) != Some(*size);
+                if moved || resized {
+                    self.generation += 1;
+                }
             }
             Cmd::Texture { stage, index, handle } => {
                 if let Some(g) = stage_group(*stage) {
                     self.textures.insert((g, *index), *handle);
                 }
             }
-            Cmd::Targets(t, s) => (self.targets, self.surfaces) = (*t, *s),
-            Cmd::Pool { texture, address } => self.pools[usize::from(!*texture)] = *address,
+            Cmd::Targets(t, s) => {
+                if (self.targets, self.surfaces) != (*t, *s) {
+                    (self.targets, self.surfaces) = (*t, *s);
+                    self.generation += 1;
+                }
+            }
+            Cmd::Pool { texture, address } => {
+                if self.pools[usize::from(!*texture)] != *address {
+                    self.pools[usize::from(!*texture)] = *address;
+                    self.generation += 1;
+                }
+            }
             Cmd::Storage { stage, index, address, size } => {
                 if let Some(g) = stage_group(*stage) {
                     self.storage.insert((g, *index), (*address, *size));

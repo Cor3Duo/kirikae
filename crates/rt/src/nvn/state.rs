@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::gpu::fxhash::FastMap as HashMap;
 
 use crate::gpu::threed::reg;
 
@@ -414,8 +414,15 @@ pub fn from_registers(regs: &[u32]) -> Vec<(Field, u64)> {
 }
 
 #[derive(Default)]
+struct Seen {
+    counts: Vec<(u64, u64)>,
+    usual: u64,
+}
+
+#[derive(Default)]
 pub struct Learned {
-    tables: HashMap<Kind, HashMap<u64, HashMap<u64, u64>>>,
+    tables: HashMap<(Kind, u64), Seen>,
+    pub generation: u64,
     pub conflicts: u64,
     pub checked: u64,
     pub examples: HashMap<(Kind, u64, u64), String>,
@@ -423,36 +430,48 @@ pub struct Learned {
 
 impl Learned {
     pub fn usual(&self, kind: Kind, value: u64) -> Option<u64> {
-        self.tables.get(&kind)?.get(&value)?.iter().max_by_key(|e| *e.1).map(|e| *e.0)
+        self.tables.get(&(kind, value)).map(|s| s.usual)
     }
 
     pub fn add(&mut self, model: &[(Field, u64)], regs: &[(Field, u64)]) -> Vec<(Field, u64, u64, u64)> {
+        let regs: HashMap<Field, u64> = regs.iter().copied().collect();
         let mut bad = Vec::new();
         for &(f, v) in model {
-            let Some(&(_, r)) = regs.iter().find(|x| x.0 == f) else { continue };
+            let Some(&r) = regs.get(&f) else { continue };
             self.checked += 1;
-            let seen = self.tables.entry(f.0).or_default().entry(v).or_default();
-            if let Some((&first, _)) = seen.iter().max_by_key(|e| *e.1)
-                && first != r
-            {
+            let seen = self.tables.entry((f.0, v)).or_default();
+            if !seen.counts.is_empty() && seen.usual != r {
                 self.conflicts += 1;
-                bad.push((f, v, first, r));
+                bad.push((f, v, seen.usual, r));
             }
-            *seen.entry(r).or_default() += 1;
+            let n = match seen.counts.iter_mut().find(|c| c.0 == r) {
+                Some(c) => {
+                    c.1 += 1;
+                    c.1
+                }
+                None => {
+                    seen.counts.push((r, 1));
+                    1
+                }
+            };
+            let best = seen.counts.iter().find(|c| c.0 == seen.usual).map_or(0, |c| c.1);
+            if (n > best || seen.counts.len() == 1) && seen.usual != r {
+                seen.usual = r;
+                self.generation += 1;
+            } else if seen.counts.len() == 1 && n == 1 {
+                self.generation += 1;
+            }
         }
         bad
     }
 
     pub fn odd_examples(&self) -> String {
         let mut out = String::new();
-        for (k, t) in &self.tables {
-            for (v, rs) in t {
-                let Some((&usual, _)) = rs.iter().max_by_key(|e| *e.1) else { continue };
-                for (&r, &n) in rs.iter().filter(|e| *e.0 != usual) {
-                    if let Some(e) = self.examples.get(&(*k, *v, r)) {
-                        out += &format!("kirikae:           odd {k:?}: NVN {v:#x} gave {r:#x} {n} times (usually {usual:#x}): {e}
-");
-                    }
+        for ((k, v), seen) in &self.tables {
+            for &(r, n) in seen.counts.iter().filter(|c| c.0 != seen.usual) {
+                if let Some(e) = self.examples.get(&(*k, *v, r)) {
+                    out += &format!("kirikae:           odd {k:?}: NVN {v:#x} gave {r:#x} {n} times (usually {:#x}): {e}
+", seen.usual);
                 }
             }
         }
@@ -460,23 +479,25 @@ impl Learned {
     }
 
     pub fn report(&self) -> String {
-        let mut kinds: Vec<_> = self.tables.iter().collect();
-        kinds.sort_by_key(|k| *k.0);
+        let mut kinds: std::collections::BTreeMap<Kind, Vec<(u64, &Seen)>> = std::collections::BTreeMap::new();
+        for (&(k, v), seen) in &self.tables {
+            kinds.entry(k).or_default().push((v, seen));
+        }
         let mut out = String::new();
-        for (k, t) in kinds {
-            let mut rows: Vec<_> = t.iter().collect();
-            rows.sort_by_key(|r| *r.0);
+        for (k, mut rows) in kinds {
+            rows.sort_by_key(|r| r.0);
             let shown: Vec<String> = rows
                 .iter()
                 .take(12)
-                .map(|(v, rs)| {
-                    let mut rs: Vec<_> = rs.iter().collect();
-                    rs.sort_by(|a, b| b.1.cmp(a.1));
+                .map(|(v, seen)| {
+                    let mut rs = seen.counts.clone();
+                    rs.sort_by_key(|r| std::cmp::Reverse(r.1));
                     let r: Vec<String> = rs.iter().map(|(r, n)| format!("{r:#x}x{n}")).collect();
                     format!("{v:#x}->{}", r.join("|"))
                 })
                 .collect();
-            out += &format!("kirikae:           {k:?}: {}{}\n", shown.join(" "), if rows.len() > 12 { format!(" (+{} values)", rows.len() - 12) } else { String::new() });
+            out += &format!("kirikae:           {k:?}: {}{}
+", shown.join(" "), if rows.len() > 12 { format!(" (+{} values)", rows.len() - 12) } else { String::new() });
         }
         out
     }

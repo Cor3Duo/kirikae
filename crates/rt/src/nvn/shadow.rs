@@ -1,4 +1,6 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
+
+use crate::gpu::fxhash::FastMap as HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -94,6 +96,7 @@ struct Model {
     pool_vas: HashMap<u64, u64>,
     list_ranges: HashMap<u64, (u64, u64)>,
     stage_constants: HashMap<u64, u64>,
+    predicted: Option<Cached>,
     support: (Option<u64>, [Option<u64>; 5]),
     unsupported: std::collections::HashSet<u64>,
     unsupported_calls: HashMap<&'static str, u64>,
@@ -141,6 +144,32 @@ static MODEL: Mutex<Option<Model>> = Mutex::new(None);
 
 type List = Arc<Vec<(u64, Cmd)>>;
 
+pub type Bindings = [[Option<(u64, u32)>; crate::gpu::threed::CB_SLOTS]; 5];
+
+type ConstantBindings = Vec<(usize, usize, (u64, u32))>;
+
+type Cached = (PredictKey, Arc<super::encode::Prediction>, Arc<ConstantBindings>);
+
+fn bind(steps: &mut Vec<Step>, bound: &mut Bindings, group: usize, slot: usize, binding: Option<(u64, u32)>) {
+    if bound[group][slot] != binding {
+        bound[group][slot] = binding;
+        steps.push(Step::Bind { group, slot, binding });
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PredictKey {
+    tracker: u64,
+    learned: u64,
+    regs: (u32, u32, u32),
+}
+
+fn segment(list: &[(u64, Cmd)], start: u64, end: u64) -> &[(u64, Cmd)] {
+    let from = list.partition_point(|c| c.0 < start);
+    let to = from + list[from..].partition_point(|c| c.0 < end);
+    &list[from..to]
+}
+
 struct Pending {
     start: u64,
     end: u64,
@@ -153,6 +182,7 @@ struct Pending {
 
 struct Segments {
     submitted: VecDeque<Pending>,
+    open: usize,
     batch: u64,
     words_supported: u64,
     words_in_lists: u64,
@@ -169,17 +199,23 @@ impl Segments {
         }
         while self.submitted.len() > MAX_SUBMITTED {
             self.submitted.pop_front();
+            self.open = self.open.saturating_sub(1);
         }
     }
 
     fn find(&mut self, va: u64, len: u64) -> Option<(u64, List, bool)> {
         let inside = |p: &Pending| va >= p.start && va + len <= p.end;
-        let i = self.submitted.iter().position(|p| inside(p) && va >= p.consumed).or_else(|| self.submitted.iter().position(inside))?;
+        let open = self.open.min(self.submitted.len());
+        let i = self.submitted.range(open..).position(|p| inside(p) && va >= p.consumed).map(|i| i + open).or_else(|| self.submitted.iter().position(inside))?;
         let p = &mut self.submitted[i];
         p.consumed = p.consumed.max(va + len);
         let (handle, list, supported, batch) = (p.handle, p.list.clone(), p.supported, p.batch);
+        while self.submitted.get(self.open).is_some_and(|p| p.consumed >= p.end) {
+            self.open += 1;
+        }
         while self.submitted.front().is_some_and(|p| p.batch < batch) {
             self.submitted.pop_front();
+            self.open = self.open.saturating_sub(1);
         }
         Some((handle, list, supported))
     }
@@ -187,7 +223,7 @@ impl Segments {
 
 const MAX_SUBMITTED: usize = 100_000;
 
-static SEGMENTS: Mutex<Segments> = Mutex::new(Segments { submitted: VecDeque::new(), batch: 0, words_supported: 0, words_in_lists: 0, words_elsewhere: 0, entries_in_lists: 0, entries_elsewhere: 0 });
+static SEGMENTS: Mutex<Segments> = Mutex::new(Segments { submitted: VecDeque::new(), open: 0, batch: 0, words_supported: 0, words_in_lists: 0, words_elsewhere: 0, entries_in_lists: 0, entries_elsewhere: 0 });
 
 const NOT_RECORDED: [&str; 12] = [
     "nvnCommandBufferInitialize",
@@ -261,10 +297,7 @@ pub fn cp_entry(va: u64, words: u64) -> Option<Plan> {
         let (mut draws, mut clears) = (0, 0);
         let support = with(|m| m.support);
         let mut predicted = Vec::new();
-        for (at, cmd) in list.iter() {
-            if *at < va || *at >= va + words * 4 {
-                continue;
-            }
+        for (_, cmd) in segment(&list, va, va + words * 4) {
             match cmd {
                 Cmd::Draw(d) => {
                     draws += d.instances as u64;
@@ -516,7 +549,8 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
             with(|m| {
                 let list = m.recording.remove(&a[0]).unwrap_or_default();
                 let calls_unsupported = list.iter().any(|(_, c)| matches!(c, Cmd::Call(h) if h.iter().any(|h| m.unsupported.contains(h) || !m.lists.contains_key(h))));
-                if m.missing.remove(&a[0]).is_some_and(|v| !v.is_empty()) || calls_unsupported {
+                let unsorted = !list.is_sorted_by_key(|c| c.0);
+                if m.missing.remove(&a[0]).is_some_and(|v| !v.is_empty()) || calls_unsupported || unsorted {
                     m.unsupported.insert(handle);
                 } else {
                     m.unsupported.remove(&handle);
@@ -806,14 +840,33 @@ impl Model {
         self.compare();
     }
 
-    fn constant_bindings(&self, programs: &[u64], read: &dyn Fn(u64, u64) -> Option<Vec<u8>>) -> Option<Vec<Step>> {
+    fn constant_bindings(&self, programs: &[u64], read: &dyn Fn(u64, u64) -> Option<Vec<u8>>) -> Option<ConstantBindings> {
         let mut out = Vec::new();
         for &code in programs {
             let ty = read(code, 4).map_or(99, |b| (u32::from_le_bytes(b[..4].try_into().unwrap()) >> 10 & 0xf) as usize);
             let Some(g) = [None, Some(0), Some(1), Some(2), Some(3), Some(4)].get(ty).copied().flatten() else { continue };
-            out.push(Step::Bind { group: g, slot: 1, binding: Some((*self.stage_constants.get(&code)?, CONSTANTS_SIZE)) });
+            out.push((g, 1, (*self.stage_constants.get(&code)?, CONSTANTS_SIZE)));
         }
         Some(out)
+    }
+
+    fn cached_prediction(&mut self, d: &Draw, regs: &[u32], read: &dyn Fn(u64, u64) -> Option<Vec<u8>>) -> Result<Cached, String> {
+        use crate::gpu::threed::reg;
+        let key = PredictKey {
+            tracker: self.exec.generation,
+            learned: self.learned.generation,
+            regs: (regs[reg::CT_SELECT], regs[reg::PROGRAM_REGION], regs[reg::PROGRAM_REGION + 1]),
+        };
+        if let Some((k, r, b)) = &self.predicted
+            && *k == key
+        {
+            return Ok((key, r.clone(), b.clone()));
+        }
+        let full = self.exec.draw(&Draw { indexed: false, ..d.clone() });
+        let predicted = Arc::new(super::encode::predict_complete(&full, &self.learned, regs, read).map_err(|e| format!("draw: {e}"))?);
+        let bindings = Arc::new(self.constant_bindings(&full.programs, read).ok_or_else(|| "program constants unknown".to_string())?);
+        self.predicted = Some((key, predicted.clone(), bindings.clone()));
+        Ok((key, predicted, bindings))
     }
 
     fn segment_end(&mut self) {
@@ -851,7 +904,9 @@ impl Model {
                         self.log("clear targets", format!("clear target: model {e:x?}, command processor {d:x?}"));
                     }
                 }
-                if let (Work::Draw(e), Work::Draw(d)) = (&e, &d) {
+                if let (Work::Draw(e), Work::Draw(d)) = (&e, &d)
+                    && !e.state.is_empty()
+                {
                     let programs_ok = d.programs.iter().all(|p| *p == 0 || e.programs.contains(p));
                     if !programs_ok {
                         self.stats.programs += 1;
@@ -1000,6 +1055,14 @@ pub fn cp_clear(regs: &[u32], v: u32) {
 
 pub fn cp_draw(regs: &[u32], cbs: &[[Option<(u64, u32)>; crate::gpu::threed::CB_SLOTS]; 5], read: &dyn Fn(u64, u64) -> Option<Vec<u8>>, draw: &crate::gpu::threed::Draw) {
     use crate::gpu::threed::{address, reg, stage_enabled};
+    if super::exec::ON.load(Ordering::Relaxed)
+        && with(|m| {
+            m.support = (cbs[0][0].map(|b| b.0), std::array::from_fn(|g| cbs[g][2].map(|b| b.0)));
+            m.expected.is_empty() && m.held.is_none()
+        })
+    {
+        return;
+    }
     let base = address(regs, reg::PROGRAM_REGION);
     let programs: Vec<u64> = [1, 5].iter().filter(|&&s| stage_enabled(regs, s)).map(|&s| base + regs[reg::PIPELINE + 16 * s + 1] as u64).collect();
     let (start, base_vertex) = match draw.index_size {
@@ -1162,9 +1225,10 @@ pub fn report() {
     });
 }
 
-pub fn exec_steps(plan: &Plan, regs: &[u32], read: &dyn Fn(u64, u64) -> Option<Vec<u8>>) -> Option<Vec<Step>> {
+pub fn exec_steps(plan: &Plan, regs: &[u32], cbs: &Bindings, read: &dyn Fn(u64, u64) -> Option<Vec<u8>>) -> Option<Vec<Step>> {
     with(|m| {
-        let cmds: Vec<&Cmd> = plan.list.iter().filter(|(at, _)| *at >= plan.va && *at < plan.end).map(|(_, c)| c).collect();
+        let mut bound = *cbs;
+        let cmds: Vec<&Cmd> = segment(&plan.list, plan.va, plan.end).iter().map(|(_, c)| c).collect();
         let (slot0, slot2) = m.support;
         let mut why = match () {
             _ if slot0.is_none() => Some("driver constants unknown".to_string()),
@@ -1174,9 +1238,11 @@ pub fn exec_steps(plan: &Plan, regs: &[u32], read: &dyn Fn(u64, u64) -> Option<V
         };
         let mut steps = Vec::new();
         let mut works = Vec::new();
+        let mut last = None;
         for cmd in cmds {
             m.exec.apply(cmd);
             match cmd {
+                Cmd::Draw(d) if why.is_none() => works.push(Work::Draw(Box::new(d.clone()))),
                 Cmd::Draw(d) => works.push(Work::Draw(Box::new(m.exec.draw(d)))),
                 Cmd::Clear(cl) => works.push(Work::Clear(m.exec.clear(cl))),
                 _ => {}
@@ -1187,22 +1253,36 @@ pub fn exec_steps(plan: &Plan, regs: &[u32], read: &dyn Fn(u64, u64) -> Option<V
             let base = slot0.unwrap_or(0);
             match cmd {
                 Cmd::Draw(d) => {
-                    let full = m.exec.draw(d);
-                    let regs_now = match super::encode::predict_complete(&full, &m.learned, regs, read) {
-                        Ok(r) => r,
+                    let (key, regs_now, bindings) = match m.cached_prediction(d, regs, read) {
+                        Ok(p) => p,
                         Err(e) => {
-                            why = Some(format!("draw: {e}"));
+                            why = Some(e);
+                            if let Some(w) = works.last_mut() {
+                                *w = Work::Draw(Box::new(m.exec.draw(d)));
+                            }
                             continue;
                         }
                     };
-                    let Some(bindings) = m.constant_bindings(&full.programs, read) else {
-                        why = Some("program constants unknown".to_string());
-                        continue;
-                    };
-                    steps.push(Step::Regs(regs_now));
-                    steps.extend(bindings);
+                    if last != Some(key) {
+                        steps.push(Step::Regs(regs_now));
+                        last = Some(key);
+                    }
+                    if d.indexed {
+                        use crate::gpu::threed::reg;
+                        let vertex = d.base_vertex as u32;
+                        steps.push(Step::Regs(Arc::new(vec![
+                            (reg::INDEX_BUFFER, 0xff, (d.start >> 32) as u32 & 0xff),
+                            (reg::INDEX_BUFFER + 1, u32::MAX, d.start as u32),
+                            (reg::INDEX_BUFFER + 4, 3, d.index_type as u32 & 3),
+                            (reg::VB_ELEMENT_BASE, u32::MAX, vertex),
+                            (0x446, u32::MAX, vertex),
+                        ])));
+                    }
+                    for &(g, slot, b) in bindings.iter() {
+                        bind(&mut steps, &mut bound, g, slot, Some(b));
+                    }
                     for (&(g, slot), &(address, size)) in &m.exec.uniforms {
-                        steps.push(Step::Bind { group: g as usize, slot: slot as usize, binding: Some((address, size as u32)) });
+                        bind(&mut steps, &mut bound, g as usize, slot as usize, Some((address, size as u32)));
                     }
                     let based = d.base_vertex != 0 || d.base_instance != 0;
                     if based {
@@ -1217,7 +1297,7 @@ pub fn exec_steps(plan: &Plan, regs: &[u32], read: &dyn Fn(u64, u64) -> Option<V
                         steps.push(Step::Write { at: base + BASE_VERTEX, words: vec![0, 0] });
                     }
                     if d.indexed && d.base_vertex != 0 {
-                        steps.push(Step::Regs(vec![(crate::gpu::threed::reg::VB_ELEMENT_BASE, u32::MAX, 0), (0x446, u32::MAX, 0)]));
+                        steps.push(Step::Regs(Arc::new(vec![(crate::gpu::threed::reg::VB_ELEMENT_BASE, u32::MAX, 0), (0x446, u32::MAX, 0)])));
                     }
                 }
                 Cmd::Clear(cl) => {
@@ -1235,7 +1315,8 @@ pub fn exec_steps(plan: &Plan, regs: &[u32], read: &dyn Fn(u64, u64) -> Option<V
                         regs_now.push((0x364, u32::MAX, cl.values[0]));
                         regs_now.push((0x368, 0xff, cl.values[1]));
                     }
-                    steps.push(Step::Regs(regs_now));
+                    steps.push(Step::Regs(Arc::new(regs_now)));
+                    last = None;
                     for layer in 0..m.exec.layers(cl) {
                         steps.push(Step::Clear(cl.what | layer << 10));
                     }
@@ -1255,13 +1336,16 @@ pub fn exec_steps(plan: &Plan, regs: &[u32], read: &dyn Fn(u64, u64) -> Option<V
             }
         }
         if why.is_none() {
-            let full = m.exec.draw(&Draw::default());
-            match super::encode::predict_complete(&full, &m.learned, regs, read) {
-                Ok(regs_now) => {
-                    steps.push(Step::Regs(regs_now));
-                    steps.extend(m.constant_bindings(&full.programs, read).unwrap_or_default());
+            match m.cached_prediction(&Draw::default(), regs, read) {
+                Ok((key, regs_now, bindings)) => {
+                    if last != Some(key) {
+                        steps.push(Step::Regs(regs_now));
+                    }
+                    for &(g, slot, b) in bindings.iter() {
+                        bind(&mut steps, &mut bound, g, slot, Some(b));
+                    }
                     for (&(g, slot), &(address, size)) in &m.exec.uniforms {
-                        steps.push(Step::Bind { group: g as usize, slot: slot as usize, binding: Some((address, size as u32)) });
+                        bind(&mut steps, &mut bound, g as usize, slot as usize, Some((address, size as u32)));
                     }
                 }
                 Err(e) => why = Some(format!("segment end: {e}")),
@@ -1269,7 +1353,7 @@ pub fn exec_steps(plan: &Plan, regs: &[u32], read: &dyn Fn(u64, u64) -> Option<V
         }
         if why.is_none() {
             m.stats.executed += works.len() as u64;
-        } else if super::exec::ON.load(Ordering::Relaxed) {
+        } else if super::exec::ON.load(Ordering::Relaxed) && why.as_deref().is_some_and(|w| w.contains(": ")) {
             m.expected.extend(works);
         }
         super::exec::counted(why.as_deref());

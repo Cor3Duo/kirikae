@@ -98,16 +98,17 @@ fn predict_inner(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u
     let mut viewport = [0i64; 4];
     let mut scissor = [0i64; 4];
     let mut cull = None;
-    let count = |k: Kind| d.state.iter().find(|x| x.0 == Field(k, 0)).map(|x| x.1 as usize);
-    let (attribs, streams) = (count(Kind::AttribCount).unwrap_or(32), count(Kind::StreamCount).unwrap_or(16));
-    let offset = d.state.iter().find(|x| x.0 == Field(Kind::PolygonOffsetEnables, 0)).and_then(|x| learned.usual(Kind::PolygonOffsetEnables, x.1)).is_some_and(|r| r != 0);
-    let stencil_test = d.state.iter().find(|x| x.0 == Field(Kind::StencilTest, 0)).and_then(|x| learned.usual(Kind::StencilTest, x.1)) == Some(1);
-    let depth_test = d.state.iter().find(|x| x.0 == Field(Kind::DepthTest, 0)).and_then(|x| learned.usual(Kind::DepthTest, x.1)) == Some(1);
-    let field = |k: Kind, i: usize| d.state.iter().find(|x| x.0 == Field(k, i as u8)).and_then(|x| learned.usual(k, x.1));
+    let fields: crate::gpu::fxhash::FastMap<Field, u64> = d.state.iter().copied().collect();
+    let raw = |k: Kind, i: usize| fields.get(&Field(k, i as u8)).copied();
+    let field = |k: Kind, i: usize| raw(k, i).and_then(|v| learned.usual(k, v));
+    let (attribs, streams) = (raw(Kind::AttribCount, 0).map_or(32, |v| v as usize), raw(Kind::StreamCount, 0).map_or(16, |v| v as usize));
+    let offset = field(Kind::PolygonOffsetEnables, 0).is_some_and(|r| r != 0);
+    let stencil_test = field(Kind::StencilTest, 0) == Some(1);
+    let depth_test = field(Kind::DepthTest, 0) == Some(1);
     let bound = |i: usize| d.surfaces.iter().any(|s| s.0 as usize == i);
     let blended = |i: usize| field(Kind::BlendEnable, i) == Some(1);
     let alpha = |i: usize| field(Kind::ChannelMask, i).is_some_and(|m| m & 8 != 0);
-    let disabled = |i: usize| d.state.iter().any(|x| x.0 == Field(Kind::AttribFormat, i as u8) && x.1 == 0);
+    let disabled = |i: usize| raw(Kind::AttribFormat, i) == Some(0);
     for i in 0..ATTRIBUTES {
         let constant = i >= attribs || disabled(i);
         put(0x458 + i, 0x40, (constant as u32) << 6);

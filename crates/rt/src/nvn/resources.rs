@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use crate::gpu::fxhash::FastMap as HashMap;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Call {

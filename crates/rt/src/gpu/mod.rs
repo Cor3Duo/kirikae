@@ -426,18 +426,17 @@ impl Gpu {
         self.flush_cb_upload(mem, eng);
     }
 
-    #[allow(clippy::type_complexity)]
-    fn simulate(&self, mem: &GuestMemory, plan: &crate::nvn::shadow::Plan) -> Option<(Vec<u32>, [[Option<(u64, u32)>; threed::CB_SLOTS]; 5], std::collections::BTreeMap<u64, u32>)> {
+    fn simulate(&self, mem: &GuestMemory, plan: &crate::nvn::shadow::Plan) -> Option<(Vec<u32>, crate::nvn::shadow::Bindings, std::collections::BTreeMap<u64, u32>)> {
         use crate::nvn::exec::Step;
         let eng = self.engines.lock().unwrap();
         let mut regs = eng.regs.get(&CLASS_3D)?.clone();
         let mut cbs = eng.threed.constant_buffers;
-        let steps = crate::nvn::shadow::exec_steps(plan, &regs, &|va, len| self.read(mem, va, len))?;
+        let steps = crate::nvn::shadow::exec_steps(plan, &regs, &cbs, &|va, len| self.read(mem, va, len))?;
         let mut writes = std::collections::BTreeMap::new();
         for step in steps {
             match step {
                 Step::Regs(values) => {
-                    for (r, mask, v) in values {
+                    for &(r, mask, v) in values.iter() {
                         regs[r] = regs[r] & !mask | v;
                     }
                 }
@@ -459,12 +458,13 @@ impl Gpu {
         let mut guard = self.engines.lock().unwrap();
         let eng = &mut *guard;
         let Some(regs) = eng.regs.get(&CLASS_3D) else { return false };
-        let Some(steps) = crate::nvn::shadow::exec_steps(plan, regs, &|va, len| self.read(mem, va, len)) else { return false };
+        let cbs = eng.threed.constant_buffers;
+        let Some(steps) = crate::nvn::shadow::exec_steps(plan, regs, &cbs, &|va, len| self.read(mem, va, len)) else { return false };
         for step in steps {
             match step {
                 Step::Regs(values) => {
                     let regs = eng.regs.get_mut(&CLASS_3D).expect("3D registers");
-                    for (r, mask, v) in values {
+                    for &(r, mask, v) in values.iter() {
                         regs[r] = regs[r] & !mask | v;
                     }
                 }
