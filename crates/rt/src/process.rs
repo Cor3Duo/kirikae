@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use kirikae_a64::Insn;
-use kirikae_loader::{Executable, Module, LOAD_BASE};
+use kirikae_loader::{Arch, Executable, Module, LOAD_BASE};
 
 use crate::cpu::Cpu;
 use crate::horizon::{MAIN_THREAD_HANDLE, MAIN_THREAD_ID, MAIN_THREAD_PRIORITY, STACK_REGION_BASE, TICK_HZ};
@@ -473,7 +473,7 @@ pub struct RunResult {
 pub fn run(file: &[u8], entries: &'static [Entry], opts: RunOptions) -> Result<RunResult, String> {
     let image = kirikae_loader::load(file, LOAD_BASE).map_err(|e| e.to_string())?;
     let entry = image.entry;
-    let exe = Executable { modules: vec![Module { name: "main".into(), image }], entry, title_id: None, main_stack_size: None, system_resource_size: 0, romfs: None };
+    let exe = Executable { modules: vec![Module { name: "main".into(), image, module_id: [0; 32] }], entry, arch: Arch::A64, title_id: None, main_stack_size: None, system_resource_size: 0, romfs: None, nacp: None, title_version: 0 };
     run_executable(&exe, entries, opts)
 }
 

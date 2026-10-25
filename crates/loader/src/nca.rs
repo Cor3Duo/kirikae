@@ -3,6 +3,11 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::Error;
 
 pub const CONTENT_PROGRAM: u8 = 0;
+pub const CONTENT_META: u8 = 1;
+pub const CONTENT_CONTROL: u8 = 2;
+pub const CONTENT_MANUAL: u8 = 3;
+pub const CONTENT_DATA: u8 = 4;
+pub const CONTENT_PUBLIC_DATA: u8 = 5;
 pub const FS_ROMFS: u8 = 0;
 pub const FS_PFS0: u8 = 1;
 const MEDIA: u64 = 0x200;
@@ -90,7 +95,8 @@ pub fn parse<R: Read + Seek>(r: &mut R, base: u64) -> Result<Nca, Error> {
             }
             _ => (0, end - start),
         };
-        let compression = (&fs[0x188..0x18c] == b"BKTR").then(|| (u64_at(fs, 0x178), u64_at(fs, 0x180)));
+        let compression =
+            (&fs[0x188..0x18c] == b"BKTR").then(|| (u64_at(fs, 0x178), u64_at(fs, 0x180)));
         sections.push(Section {
             index: i,
             fs_type,
@@ -120,7 +126,9 @@ impl Nca {
             return Ok(());
         }
         match s.crypto {
-            CRYPTO_BKTR | CRYPTO_BKTR_SKIP_HASH => Err(Error::Unsupported("this section is an update patch (BKTR); updates are not supported yet")),
+            CRYPTO_BKTR | CRYPTO_BKTR_SKIP_HASH => Err(Error::Unsupported(
+                "this section is an update patch (BKTR); updates are not supported yet",
+            )),
             _ => Err(Error::Encrypted),
         }
     }
