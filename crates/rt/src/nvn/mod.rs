@@ -14,6 +14,7 @@ pub mod shadow;
 pub mod state;
 pub mod textures;
 pub mod va;
+pub mod window;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

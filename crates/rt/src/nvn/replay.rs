@@ -15,6 +15,13 @@
 //!   queued (`nvn_replay.cpp:14-36`), and a handle that a list names resolves through that snapshot only (`MAX_DEPTH`).
 //! - **Inline copies.** `CopyCommands` inlines the callee's records at record time (`record.rs`), so the walker
 //!   processes them where they sit; it never re-reads the callee.
+//! - **Chained chunks.** A list can continue a chunk the driver closed under an internal pointer: the walker replays
+//!   that chunk first, in recording order, so the state it set is the state of the records that follow
+//!   (`record::List::chained`). This is what a pass split across an `EndRecording` needs.
+//! - **State across submits.** NVN state belongs to the command buffer, not to one submit: a frame sets its targets,
+//!   program and binds at the end of one list and the draw is the first command of the next submit on the same
+//!   buffer. The worker keeps one [`State`] per command buffer between submits and `nvnCommandBufferInitialize`
+//!   resets it (`reset_state`).
 //! - **Nothing is skipped silently.** A record the sink cannot replay yet is counted once with its reason and the
 //!   walk continues, so the log says what is missing instead of a draw disappearing.
 
@@ -95,9 +102,15 @@ pub struct Program {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ListSnapshot {
     pub handle: u64,
+    /// The guest command buffer the list was recorded on. NVN keeps one state per command buffer, so two roots
+    /// from different buffers must not share the render targets or binds of the buffer replayed before them.
+    pub command_buffer: u64,
     pub bytes: Vec<u8>,
     /// `(offset from the handle, bytes)` for each blob a record names.
     pub blobs: Vec<(u32, Vec<u8>)>,
+    /// Lists replayed before this one, in recording order. An implicit chunk the driver closed under an internal
+    /// pointer is one of these: the records that follow continue its state (`record.rs`, "Implicit lists").
+    pub chained: Vec<u64>,
 }
 
 impl ListSnapshot {
@@ -124,8 +137,13 @@ impl ListSnapshot {
         recorder: &super::record::Recorder,
         handle: u64,
         bytes: u64,
+        command_buffer: u64,
     ) -> Option<ListSnapshot> {
         let records = recorder.capture_bytes(mem, handle, bytes)?;
+        let chained = recorder
+            .list(handle)
+            .map(|list| list.chained.clone())
+            .unwrap_or_default();
         let mut blobs = Vec::new();
         for chunk in records.as_chunks::<{ RECORD_SIZE as usize }>().0 {
             let Some(record) = Record::decode(chunk) else {
@@ -142,8 +160,10 @@ impl ListSnapshot {
         }
         Some(ListSnapshot {
             handle,
+            command_buffer,
             bytes: records,
             blobs,
+            chained,
         })
     }
 }
@@ -231,6 +251,8 @@ pub struct State {
     pub program: u64,
     /// `c[3 + n]` per stage (0 vertex, 1 fragment): the GPU address and size `BindUniformBuffer` named.
     pub cbufs: [[Option<(u64, u64)>; 16]; 2],
+    /// Storage buffers per stage (0 vertex, 1 fragment): the GPU address and size `BindStorageBuffer` named.
+    pub storage: [[Option<(u64, u64)>; 16]; 2],
     /// Texture handle per sampler binding, per stage.
     pub textures: [[u32; 32]; 2],
     pub attribs: [Option<Attrib>; 32],
@@ -298,6 +320,8 @@ pub struct Stats {
     pub records: u64,
     pub calls: u64,
     pub copies: u64,
+    /// Chunks replayed as the prefix of a list that continues them.
+    pub chained: u64,
     pub draws: u64,
     pub draw_arrays: u64,
     pub draw_elements: u64,
@@ -318,10 +342,15 @@ impl Stats {
 /// The walker. Constructed per submit from the queued snapshots.
 pub struct Walker {
     pub state: State,
+    /// The state of every command buffer replayed so far, and the one `state` currently belongs to.
+    states: HashMap<u64, State>,
+    command_buffer: Option<u64>,
     snapshots: HashMap<u64, Arc<ListSnapshot>>,
     pub stats: Stats,
     /// Reasons already logged, so a handle called every frame is one line.
     logged: HashSet<String>,
+    /// Lists currently being walked, so a malformed chain or call cannot recurse forever.
+    walking: HashSet<u64>,
     pub log: Vec<String>,
 }
 
@@ -329,9 +358,12 @@ impl Walker {
     pub fn new(submit: &Submit) -> Walker {
         Walker {
             state: State::default(),
+            states: HashMap::new(),
+            command_buffer: None,
             snapshots: submit.callees.clone(),
             stats: Stats::default(),
             logged: HashSet::new(),
+            walking: HashSet::new(),
             log: Vec::new(),
         }
     }
@@ -347,13 +379,36 @@ impl Walker {
         }
         let roots: Vec<Arc<ListSnapshot>> = submit.roots.clone();
         for list in roots {
+            // A root starts on its own command buffer's state. A callee does not: `CallCommands` appends its
+            // commands to the caller's stream and the caller's state is the one the GPU runs them with.
+            self.switch(list.command_buffer);
             if let Err(why) = self.walk(&list, 0, sink) {
                 self.skip(&why);
             }
         }
+        if let Some(command_buffer) = self.command_buffer {
+            self.states.insert(command_buffer, self.state.clone());
+        }
         if let Err(why) = sink.finish() {
             self.skip(&why);
         }
+    }
+
+    /// Makes `command_buffer`'s state current, saving the one it replaces. A buffer seen for the first time starts
+    /// at NVN's defaults.
+    fn switch(&mut self, command_buffer: u64) {
+        if self.command_buffer == Some(command_buffer) {
+            return;
+        }
+        if let Some(active) = self.command_buffer {
+            self.states.insert(active, self.state.clone());
+        }
+        self.state = self
+            .states
+            .get(&command_buffer)
+            .cloned()
+            .unwrap_or_default();
+        self.command_buffer = Some(command_buffer);
     }
 
     fn walk(
@@ -362,8 +417,31 @@ impl Walker {
         depth: usize,
         sink: &mut dyn Sink,
     ) -> Result<(), String> {
+        if !self.walking.insert(list.handle) {
+            return Err(format!("list {:#x} is replayed inside itself", list.handle));
+        }
         self.stats.lists += 1;
-        self.run_records(list, 0, list.records(), depth, sink)
+        // The chunks this list continues were recorded earlier on the same command buffer and their state carries
+        // into these records. Replay them first, in recording order, as part of the same stream.
+        for handle in &list.chained {
+            if depth >= MAX_DEPTH {
+                self.skip(format!(
+                    "chained chunk {handle:#x} nested deeper than {MAX_DEPTH}"
+                ));
+                continue;
+            }
+            let Some(chained) = self.snapshots.get(handle).cloned() else {
+                self.skip(format!("chained chunk {handle:#x} has no snapshot"));
+                continue;
+            };
+            self.stats.chained += 1;
+            if let Err(why) = self.walk(&chained, depth + 1, sink) {
+                self.skip(format!("chained chunk {handle:#x}: {why}"));
+            }
+        }
+        let result = self.run_records(list, 0, list.records(), depth, sink);
+        self.walking.remove(&list.handle);
+        result
     }
 
     /// Runs the records in `[start, end)`. An inline copy is a nested range of records in the same list; a call is a
@@ -437,6 +515,16 @@ impl Walker {
                             Some((record.words[0], record.words[1]));
                     } else {
                         self.skip(format!("uniform block {index} outside c[3..19]"));
+                    }
+                }
+                Op::BindStorageBuffer => {
+                    let stage = record.ints[0].clamp(0, 1) as usize;
+                    let index = record.ints[1];
+                    if (0..16).contains(&index) {
+                        self.state.storage[stage][index as usize] =
+                            Some((record.words[0], record.words[1]));
+                    } else {
+                        self.skip(format!("storage buffer {index} outside 0..16"));
                     }
                 }
                 Op::SetSamplerPool => {}
@@ -748,6 +836,38 @@ pub fn replay(submit: &Submit, sink: &mut dyn Sink) -> Stats {
     walker.stats
 }
 
+/// The state of every command buffer the replay worker has seen. NVN state belongs to the command buffer and
+/// persists across submissions: a frame sets its render targets and program at the end of one list and the draw that
+/// uses them is the first command of the next submit on the same buffer (`docs/nvn/CONTRACT.md` §7). One replay
+/// worker, one state table.
+static STATES: Mutex<Option<HashMap<u64, State>>> = Mutex::new(None);
+
+/// Replays one submit on the worker, continuing each command buffer from where its previous submit left it.
+pub fn replay_resumed(submit: &Submit, sink: &mut dyn Sink) -> Stats {
+    let mut walker = Walker::new(submit);
+    if let Ok(mut states) = STATES.lock() {
+        walker.states = states.take().unwrap_or_default();
+    }
+    walker.run(submit, sink);
+    let stats = walker.stats.clone();
+    if let Ok(mut states) = STATES.lock() {
+        *states = Some(walker.states.clone());
+    }
+    for line in &walker.log {
+        eprintln!("{line}");
+    }
+    stats
+}
+
+/// `nvnCommandBufferInitialize`/`Finalize`: the buffer's recorded state goes with it.
+pub fn reset_state(command_buffer: u64) {
+    if let Ok(mut states) = STATES.lock()
+        && let Some(states) = states.as_mut()
+    {
+        states.remove(&command_buffer);
+    }
+}
+
 // ---- the worker ----------------------------------------------------------------------------------------------------
 
 enum Job {
@@ -877,6 +997,7 @@ fn stats_add(stats: Stats) {
     total.records += stats.records;
     total.calls += stats.calls;
     total.copies += stats.copies;
+    total.chained += stats.chained;
     total.draws += stats.draws;
     total.draw_arrays += stats.draw_arrays;
     total.draw_elements += stats.draw_elements;
@@ -918,12 +1039,13 @@ pub fn report(frames: u64) {
     }
     let per = |n: u64| n as f64 / frames.max(1) as f64;
     eprintln!(
-        "kirikae:         nvn replay: {} submits, {} lists, {} records, {} calls, {} copies; {} draws ({} arrays, {} elements), {} clears, {} dispatches; {} skipped",
+        "kirikae:         nvn replay: {} submits, {} lists, {} records, {} calls, {} copies, {} chained; {} draws ({} arrays, {} elements), {} clears, {} dispatches; {} skipped",
         total.submits,
         total.lists,
         total.records,
         total.calls,
         total.copies,
+        total.chained,
         total.draws,
         total.draw_arrays,
         total.draw_elements,
@@ -1012,8 +1134,20 @@ mod tests {
     }
 
     fn snapshot(mem: &FakeMemory, recorder: &Recorder, handle: u64) -> Arc<ListSnapshot> {
+        snapshot_on(mem, recorder, handle, 0)
+    }
+
+    fn snapshot_on(
+        mem: &FakeMemory,
+        recorder: &Recorder,
+        handle: u64,
+        command_buffer: u64,
+    ) -> Arc<ListSnapshot> {
         let list = recorder.list(handle).expect("list is live");
-        Arc::new(ListSnapshot::capture(mem, recorder, handle, list.bytes).expect("snapshot"))
+        Arc::new(
+            ListSnapshot::capture(mem, recorder, handle, list.bytes, command_buffer)
+                .expect("snapshot"),
+        )
     }
 
     /// Builds a callee (clear + draw) and a caller (targets + call + copy + draw), the shape of a frame.
@@ -1218,6 +1352,12 @@ mod tests {
         uniform.set_word(0, 0x9000);
         uniform.set_word(1, 0x100);
         recorder.emit(&mem, CMD, uniform).expect("uniform");
+        let mut storage = Record::new(Op::BindStorageBuffer);
+        storage.set_int(0, 1);
+        storage.set_int(1, 4);
+        storage.set_word(0, 0xa000);
+        storage.set_word(1, 0x200);
+        recorder.emit(&mem, CMD, storage).expect("storage");
         let mut draw = Record::new(Op::DrawArrays);
         draw.set_int(0, 4);
         draw.set_word(0, 0);
@@ -1248,6 +1388,8 @@ mod tests {
         assert_eq!(state.attribs[2], None);
         assert_eq!(state.textures[1][3], 0x0020_2007);
         assert_eq!(state.cbufs[1][2], Some((0x9000, 0x100)));
+        assert_eq!(state.storage[1][4], Some((0xa000, 0x200)));
+        assert_eq!(state.storage[0][4], None);
     }
 
     #[test]
@@ -1385,6 +1527,223 @@ mod tests {
         assert_eq!(
             sink.targets_seen[0].colors[0].map(|c| c.texture),
             Some(0x1111)
+        );
+    }
+
+    #[test]
+    fn a_draw_in_a_later_chunk_sees_the_chunks_it_continues() {
+        let mem = FakeMemory::new(BASE, 0x8000);
+        let mut recorder = Recorder::default();
+        // The chunk the driver ended under its internal pointer: a clear, then the program and targets the window
+        // pass set up.
+        recorder.begin_arena(&mem, CMD).expect("prefix");
+        let mut clear = Record::new(Op::ClearColor);
+        clear.set_int(0, 0);
+        clear.set_int(1, 0xf);
+        clear.set_float(3, 1.0);
+        recorder.emit(&mem, CMD, clear).expect("clear");
+        let blob: Vec<u8> = [0x1111u64, 0x2222, 0x3333, 0x4444]
+            .into_iter()
+            .flat_map(u64::to_le_bytes)
+            .collect();
+        let mut targets = Record::new(Op::SetRenderTargets);
+        targets.count = 1;
+        recorder
+            .emit_blob(&mem, CMD, targets, &blob)
+            .expect("targets");
+        let mut program = Record::new(Op::BindProgram);
+        program.set_word(0, 0x9000);
+        recorder.emit(&mem, CMD, program).expect("program");
+        let prefix = recorder.end_arena(&mem, CMD).expect("end prefix");
+
+        // The game handle's list only draws: without the chunk it continues, it has no targets and no program.
+        recorder.begin_arena(&mem, CMD).expect("successor");
+        let mut draw = Record::new(Op::DrawArrays);
+        draw.set_int(0, 4);
+        draw.set_word(0, 0);
+        draw.set_word(1, 3);
+        recorder.emit(&mem, CMD, draw).expect("draw");
+        let successor = recorder.end_arena(&mem, CMD).expect("end successor");
+
+        recorder.chain(successor, &[prefix]).expect("chain");
+        let handle = 0x2117_fc208u64;
+        assert!(recorder.refile(successor, handle));
+        let submit = Submit {
+            roots: vec![snapshot(&mem, &recorder, handle)],
+            callees: HashMap::from([(prefix, snapshot(&mem, &recorder, prefix))]),
+            ..Submit::default()
+        };
+        assert_eq!(submit.roots[0].chained, [prefix]);
+
+        let mut sink = Recording::default();
+        let stats = replay(&submit, &mut sink);
+        assert_eq!(stats.chained, 1);
+        assert_eq!(stats.skipped, 0);
+        assert_eq!(sink.draws, 1);
+        assert_eq!(
+            sink.events,
+            ["clear color 0", "targets 1", "draw 4 3 false"],
+            "the chunk replays before the records it continues"
+        );
+        assert_eq!(sink.states[0].program, 0x9000);
+        assert_eq!(
+            sink.states[0].targets.colors[0].map(|c| c.texture),
+            Some(0x1111)
+        );
+    }
+
+    #[test]
+    fn a_chained_chunk_without_a_snapshot_is_reported_and_the_list_still_runs() {
+        let (mem, recorder, _targets, draw) = targets_then_draw();
+        let mut root = (*snapshot_on(&mem, &recorder, draw, CMD)).clone();
+        root.chained = vec![0xdead_0000];
+        let submit = Submit {
+            roots: vec![Arc::new(root)],
+            ..Submit::default()
+        };
+        let mut sink = Recording::default();
+        let stats = replay(&submit, &mut sink);
+        assert_eq!(stats.chained, 0);
+        assert_eq!(stats.skipped, 1);
+        assert!(
+            stats
+                .reasons
+                .keys()
+                .any(|reason| reason.contains("chained chunk")),
+            "{:?}",
+            stats.reasons
+        );
+        assert_eq!(sink.draws, 1, "the list itself is still replayed");
+    }
+
+    #[test]
+    fn a_command_buffer_state_persists_across_submits_and_is_reset() {
+        let mem = FakeMemory::new(BASE, 0x8000);
+        let mut recorder = Recorder::default();
+        // The setup list: targets and program, no draw.
+        recorder.begin(&mem, CMD, BASE, 0x800).expect("setup");
+        let blob: Vec<u8> = [0x1111u64, 0x2222, 0, 0]
+            .into_iter()
+            .flat_map(u64::to_le_bytes)
+            .collect();
+        let mut targets = Record::new(Op::SetRenderTargets);
+        targets.count = 1;
+        recorder
+            .emit_blob(&mem, CMD, targets, &blob)
+            .expect("targets");
+        let mut program = Record::new(Op::BindProgram);
+        program.set_word(0, 0x9000);
+        recorder.emit(&mem, CMD, program).expect("program");
+        let setup = recorder.end(&mem, CMD).expect("end setup");
+
+        // The draw is the next submit's first command, on the same buffer.
+        recorder
+            .begin(&mem, CMD, BASE + 0x1000, 0x800)
+            .expect("draw");
+        let mut draw = Record::new(Op::DrawElements);
+        draw.set_int(0, 4);
+        draw.set_int(1, 2);
+        draw.set_word(0, 0x5555);
+        draw.set_word(1, 6);
+        recorder.emit(&mem, CMD, draw).expect("draw");
+        let drawn = recorder.end(&mem, CMD).expect("end draw");
+
+        let setup = Submit {
+            roots: vec![snapshot_on(&mem, &recorder, setup, CMD)],
+            ..Submit::default()
+        };
+        let drawn = Submit {
+            roots: vec![snapshot_on(&mem, &recorder, drawn, CMD)],
+            ..Submit::default()
+        };
+        reset_state(CMD);
+        let mut sink = Recording::default();
+        assert_eq!(replay_resumed(&setup, &mut sink).draws, 0);
+
+        let mut sink = Recording::default();
+        let stats = replay_resumed(&drawn, &mut sink);
+        assert_eq!(stats.skipped, 0, "the state of the buffer is continued");
+        assert_eq!(sink.draws, 1);
+        assert_eq!(sink.states[0].program, 0x9000);
+        assert_eq!(
+            sink.states[0].targets.colors[0].map(|color| color.texture),
+            Some(0x1111)
+        );
+
+        // Initializing the buffer forgets its state: the draw starts at NVN's defaults again.
+        reset_state(CMD);
+        let mut sink = Recording::default();
+        replay_resumed(&drawn, &mut sink);
+        assert_eq!(sink.states[0].program, 0);
+        assert!(sink.states[0].targets.colors.is_empty());
+        reset_state(CMD);
+    }
+
+    /// A list that only sets targets, and one that only draws, the way SMBW splits a command buffer around
+    /// `EndRecording`.
+    fn targets_then_draw() -> (FakeMemory, Recorder, u64, u64) {
+        let mem = FakeMemory::new(BASE, 0x8000);
+        let mut recorder = Recorder::default();
+        recorder.begin(&mem, OTHER, BASE, 0x800).expect("targets");
+        let blob: Vec<u8> = [0x11u64, 0x22, 0x33, 0x44]
+            .into_iter()
+            .flat_map(u64::to_le_bytes)
+            .collect();
+        let mut record = Record::new(Op::SetRenderTargets);
+        record.count = 1;
+        recorder
+            .emit_blob(&mem, OTHER, record, &blob)
+            .expect("targets");
+        let targets = recorder.end(&mem, OTHER).expect("end targets");
+
+        recorder
+            .begin(&mem, CMD, BASE + 0x2000, 0x800)
+            .expect("draw");
+        let mut draw = Record::new(Op::DrawArrays);
+        draw.set_int(0, 4);
+        draw.set_word(0, 0);
+        draw.set_word(1, 3);
+        recorder.emit(&mem, CMD, draw).expect("draw");
+        let draw = recorder.end(&mem, CMD).expect("end draw");
+        (mem, recorder, targets, draw)
+    }
+
+    #[test]
+    fn a_root_of_another_command_buffer_does_not_inherit_its_targets() {
+        let (mem, recorder, targets, draw) = targets_then_draw();
+        let submit = Submit {
+            roots: vec![
+                snapshot_on(&mem, &recorder, targets, OTHER),
+                snapshot_on(&mem, &recorder, draw, CMD),
+            ],
+            ..Submit::default()
+        };
+        let mut sink = Recording::default();
+        replay(&submit, &mut sink);
+        assert_eq!(sink.draws, 1);
+        assert!(
+            sink.states[0].targets.colors.is_empty(),
+            "the second buffer did not inherit the first one's targets"
+        );
+    }
+
+    #[test]
+    fn a_root_of_the_same_command_buffer_continues_its_state() {
+        let (mem, recorder, targets, draw) = targets_then_draw();
+        let submit = Submit {
+            roots: vec![
+                snapshot_on(&mem, &recorder, targets, CMD),
+                snapshot_on(&mem, &recorder, draw, CMD),
+            ],
+            ..Submit::default()
+        };
+        let mut sink = Recording::default();
+        let stats = replay(&submit, &mut sink);
+        assert_eq!(stats.skipped, 0);
+        assert_eq!(sink.draws, 1);
+        assert_eq!(
+            sink.states[0].targets.colors[0].map(|c| c.texture),
+            Some(0x11)
         );
     }
 }

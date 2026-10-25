@@ -288,8 +288,12 @@ fn print_sources(stats: &DiscoveryStats, entries: usize) {
         stats.promoted_cases,
     );
     println!(
-        "indirect control flow reached: {} `blr` · {} `br`, {} with a resolved jump table",
-        stats.indirect_calls, stats.indirect_jumps, stats.tables,
+        "indirect control flow reached: {} `blr` · {} `br`, {} with a resolved jump table ({} with no bound check, {} unresolved)",
+        stats.indirect_calls,
+        stats.indirect_jumps,
+        stats.tables,
+        stats.unbounded_tables,
+        stats.unresolved_jumps,
     );
 }
 

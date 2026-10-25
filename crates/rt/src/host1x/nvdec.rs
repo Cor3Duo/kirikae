@@ -33,8 +33,20 @@
 //!    [`write_picture`], which already handles both NV12 and P010.
 //! 4. Gate the reply on the feature: without `ffmpeg`, the error text points at
 //!    the missing feature rather than at a codec the runtime cannot decode.
+//!
+//! # H.264 picture to surface mapping
+//!
+//! NVDEC writes each decoded picture into the surface its own picture setup
+//! names. OpenH264 hands pictures back in display order and one submission
+//! after the access unit that produced them (it cannot be flushed per picture:
+//! see `h264::Decoder::new`), so the engine keeps the surface addresses of the
+//! pending access units and matches each output to the entry with the lowest
+//! picture order count. Entries of a previous IDR period are drained first,
+//! because the decoder still owes their pictures when a new period starts. A
+//! picture whose access unit fails is dropped with its entry; nothing is
+//! written to the guest until a full picture is available.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
@@ -62,9 +74,61 @@ const CODEC_AV1: u32 = 10;
 
 const SURFACE_BLOCK_HEIGHT_LOG2: u32 = 1;
 
+/// Access units waiting for their decoded picture, oldest submission first.
+///
+/// The decoder emits pictures in display order, so the surface an output has to
+/// be written to is not necessarily the one of the submission that produced it:
+/// with B-frames a picture is output after a later submission. Each entry keeps
+/// the surface addresses captured when the access unit was submitted, and the
+/// output is matched to the entry with the lowest picture order count (the next
+/// one in display order). Entries of an earlier IDR period are consumed first
+/// because the decoder still owes their pictures when a new period starts.
+const MAX_PENDING_PICTURES: usize = 8;
+
+struct PendingPicture {
+    luma: u32,
+    chroma: u32,
+    poc: i32,
+    period: u64,
+}
+
+impl PendingPicture {
+    fn take_for_output(
+        pending: &mut VecDeque<PendingPicture>,
+        period: u64,
+    ) -> Option<PendingPicture> {
+        let oldest_period = pending.front()?.period;
+        if oldest_period < period {
+            return pending.pop_front();
+        }
+        let index = pending
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, p)| p.poc)
+            .map(|(i, _)| i)?;
+        pending.remove(index)
+    }
+}
+
+struct H264Channel {
+    decoder: h264::Decoder,
+    pending: VecDeque<PendingPicture>,
+    period: u64,
+}
+
+impl H264Channel {
+    fn new() -> Result<H264Channel, String> {
+        Ok(H264Channel {
+            decoder: h264::Decoder::new()?,
+            pending: VecDeque::new(),
+            period: 0,
+        })
+    }
+}
+
 pub struct Nvdec {
     regs: Vec<u32>,
-    h264: HashMap<u32, h264::Decoder>,
+    h264: HashMap<u32, H264Channel>,
     vp9: Arc<Mutex<Vp9State>>,
     pictures: u64,
 }
@@ -133,6 +197,12 @@ impl Nvdec {
         if info.field_pic || !info.frame_mbs_only {
             return Err("NVDEC: interlaced H.264 is not supported".into());
         }
+        if slices.is_empty() {
+            if trace() {
+                eprintln!("nvdec: H.264 submit with an empty bitstream on channel {context}");
+            }
+            return Ok(());
+        }
         if let Some(dir) = std::env::var_os("KIRIKAE_VIDEO_DUMP") {
             let path = std::path::Path::new(&dir).join(format!("nvdec-{context}.h264"));
             if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -144,37 +214,79 @@ impl Nvdec {
                 let _ = f.write_all(&slices);
             }
         }
-        let decoder = match self.h264.entry(context) {
-            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-            std::collections::hash_map::Entry::Vacant(e) => e.insert(h264::Decoder::new()?),
-        };
-        let frame = decoder.decode(&info, &slices)?;
-        self.pictures += 1;
+        // The surface table is rewritten by the guest between submissions, so
+        // the addresses have to be captured with the access unit, not when its
+        // picture finally comes out.
         let surface = (info.output_surface as usize).min(16);
         let luma =
             self.regs[reg::PICTURE_LUMA as usize + surface].wrapping_add(info.luma_frame_offset);
         let chroma = self.regs[reg::PICTURE_CHROMA as usize + surface]
             .wrapping_add(info.chroma_frame_offset);
+
+        let channel = match self.h264.entry(context) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => e.insert(H264Channel::new()?),
+        };
+        if contains_idr(&slices) {
+            channel.period += 1;
+            let keep_from = channel.period.saturating_sub(1);
+            channel.pending.retain(|p| p.period >= keep_from);
+        }
+        channel.pending.push_back(PendingPicture {
+            luma,
+            chroma,
+            poc: info.field_order_cnt[0],
+            period: channel.period,
+        });
+        while channel.pending.len() > MAX_PENDING_PICTURES {
+            channel.pending.pop_front();
+        }
+        let frame = match channel.decoder.decode(&info, &slices) {
+            Ok(frame) => frame,
+            Err(e) => {
+                channel.pending.pop_back();
+                return Err(e);
+            }
+        };
+        self.pictures += 1;
+        let Some(picture) = frame else {
+            if trace() {
+                eprintln!(
+                    "nvdec: H.264 picture {} on channel {context}: {}x{} MBs, {} bytes in {} slices, frame_num {}, poc {}, surface {surface} -> no output yet",
+                    self.pictures,
+                    info.width_mbs,
+                    info.height_mbs,
+                    info.bitstream_size,
+                    info.num_slices,
+                    info.frame_num,
+                    info.field_order_cnt[0],
+                );
+            }
+            return Ok(());
+        };
+        let target = PendingPicture::take_for_output(&mut channel.pending, channel.period)
+            .ok_or_else(|| "NVDEC: decoded picture has no pending surface".to_string())?;
         if trace() {
             eprintln!(
-                "nvdec: H.264 picture {} on channel {context}: {}x{} MBs, {} bytes in {} slices, frame_num {}, surface {surface} (luma {:#x}, chroma {:#x}) -> {}",
+                "nvdec: H.264 picture {} on channel {context}: {}x{} MBs, {} bytes in {} slices, frame_num {}, poc {}, surface {surface} (poc {} at luma {:#x}, chroma {:#x}) -> decoded (8-bit)",
                 self.pictures,
                 info.width_mbs,
                 info.height_mbs,
                 info.bitstream_size,
                 info.num_slices,
                 info.frame_num,
-                (luma as u64) << 8,
-                (chroma as u64) << 8,
-                match &frame {
-                    Some(f) => format!("decoded ({}-bit)", f.bit_depth.bits()),
-                    None => "no output".into(),
-                }
+                info.field_order_cnt[0],
+                target.poc,
+                (target.luma as u64) << 8,
+                (target.chroma as u64) << 8,
             );
         }
-        let Some(picture) = frame else { return Ok(()) };
-        if !write_picture(dma, luma, chroma, &picture) {
-            return Err(format!("NVDEC: output surface {surface} is not mapped"));
+        if !write_picture(dma, target.luma, target.chroma, &picture) {
+            return Err(format!(
+                "NVDEC: output surface at luma {:#x} / chroma {:#x} is not mapped",
+                (target.luma as u64) << 8,
+                (target.chroma as u64) << 8
+            ));
         }
         clock::decoded();
         Ok(())
@@ -204,6 +316,24 @@ impl Nvdec {
             )
         })
     }
+}
+
+/// True when the access unit carries an IDR slice. Its picture order count
+/// starts a new period, so pictures still queued from the previous period have
+/// to keep their own entries (the decoder may still owe them).
+fn contains_idr(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 3 < bytes.len() {
+        if bytes[i] == 0 && bytes[i + 1] == 0 && bytes[i + 2] == 1 {
+            if bytes[i + 3] & 0x1f == 5 {
+                return true;
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    false
 }
 
 /// Writes a decoded picture into the guest surface the picture setup points at.
@@ -440,6 +570,72 @@ mod tests {
     }
 
     #[test]
+    fn pictures_come_out_in_display_order() {
+        let mut pending = VecDeque::from(vec![
+            PendingPicture {
+                luma: 1,
+                chroma: 2,
+                poc: 0,
+                period: 0,
+            },
+            PendingPicture {
+                luma: 3,
+                chroma: 4,
+                poc: 3,
+                period: 0,
+            },
+            PendingPicture {
+                luma: 5,
+                chroma: 6,
+                poc: 1,
+                period: 0,
+            },
+            PendingPicture {
+                luma: 7,
+                chroma: 8,
+                poc: 2,
+                period: 0,
+            },
+        ]);
+        let mut order = Vec::new();
+        while let Some(p) = PendingPicture::take_for_output(&mut pending, 0) {
+            order.push((p.poc, p.luma));
+        }
+        assert_eq!(order, [(0, 1), (1, 5), (2, 7), (3, 3)]);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn an_idr_period_keeps_what_the_decoder_still_owes() {
+        let mut pending = VecDeque::from(vec![
+            PendingPicture {
+                luma: 1,
+                chroma: 2,
+                poc: 60,
+                period: 1,
+            },
+            PendingPicture {
+                luma: 3,
+                chroma: 4,
+                poc: 0,
+                period: 2,
+            },
+        ]);
+        let first = PendingPicture::take_for_output(&mut pending, 2).unwrap();
+        assert_eq!(first.poc, 60, "the previous period's picture comes first");
+        let second = PendingPicture::take_for_output(&mut pending, 2).unwrap();
+        assert_eq!(second.poc, 0);
+    }
+
+    #[test]
+    fn finds_the_idr_slice_in_an_access_unit() {
+        assert!(contains_idr(&[0, 0, 0, 1, 0x65, 0x88, 0x80]));
+        assert!(contains_idr(&[0, 0, 1, 0x65, 0x88]));
+        assert!(!contains_idr(&[0, 0, 0, 1, 0x41, 0x9a]));
+        assert!(!contains_idr(&[0, 0, 0, 1, 0x67, 0x64]));
+    }
+
+    #[test]
     fn unsupported_codecs_fail_loudly() {
         let h = Harness::new();
         let mut nvdec = Nvdec::default();
@@ -456,5 +652,115 @@ mod tests {
             nvdec.write(&h.dma(), 0, reg::EXECUTE, 0).unwrap_err(),
             "NVDEC: codec 42 is not supported"
         );
+    }
+
+    /// End-to-end path: bitstream extraction from `IN_BUF_BASE` at the size the
+    /// picture setup reports, parameter set reconstruction, decode, and the
+    /// block-linear NV12 write into the surface the setup points at. The
+    /// decoder emits a picture one submission after the access unit that
+    /// produced it, so the surface is checked after the follow-up submission.
+    #[cfg(feature = "h264")]
+    #[test]
+    fn decodes_an_encoder_stream_into_the_surface() {
+        use crate::host1x::h264::support::{setup_from, write_setup};
+        use openh264::decoder::Decoder as OpenH264;
+        use openh264::encoder::Encoder;
+        use openh264::formats::{RgbSliceU8, YUVBuffer, YUVSource};
+
+        const SETUP: usize = 0x0000;
+        const BITSTREAM: usize = 0x1000;
+        let (w, h) = (96usize, 64usize);
+        let mut encoder = Encoder::new().unwrap();
+        let frames: Vec<Vec<u8>> = (0..2)
+            .map(|t| {
+                let rgb: Vec<u8> = (0..w * h)
+                    .flat_map(|i| {
+                        [
+                            (i % w * 2 + t * 11) as u8,
+                            (i / w * 4 + t * 7) as u8,
+                            (i * 5 + t * 3 % 251) as u8,
+                        ]
+                    })
+                    .collect();
+                encoder
+                    .encode(&YUVBuffer::from_rgb8_source(RgbSliceU8::new(&rgb, (w, h))))
+                    .unwrap()
+                    .to_vec()
+            })
+            .collect();
+        let nal_type = |n: &[u8]| n[n.iter().position(|&b| b == 1).unwrap() + 1] & 0x1f;
+        let body = |n: &[u8]| n[n.iter().position(|&b| b == 1).unwrap() + 2..].to_vec();
+        let nals: Vec<&[u8]> = openh264::nal_units(&frames[0]).collect();
+        let sps = body(nals.iter().find(|n| nal_type(n) == 7).unwrap());
+        let pps = body(nals.iter().find(|n| nal_type(n) == 8).unwrap());
+        let slices = |frame: &[u8]| -> Vec<u8> {
+            openh264::nal_units(frame)
+                .filter(|n| matches!(nal_type(n), 1 | 5))
+                .flatten()
+                .copied()
+                .collect()
+        };
+        let mut setup = setup_from(&sps, &pps);
+        setup.num_slices = 1;
+        setup.output_surface = 0;
+
+        let harness = Harness::new();
+        let mut nvdec = Nvdec::default();
+        let dma = harness.dma();
+        nvdec
+            .write(&dma, 0, reg::APPLICATION_ID, CODEC_H264)
+            .unwrap();
+        nvdec
+            .write(&dma, 0, reg::DRV_PIC_SETUP, harness.at(SETUP))
+            .unwrap();
+        nvdec
+            .write(&dma, 0, reg::IN_BUF_BASE, harness.at(BITSTREAM))
+            .unwrap();
+        nvdec
+            .write(&dma, 0, reg::PICTURE_LUMA, harness.at(LUMA))
+            .unwrap();
+        nvdec
+            .write(&dma, 0, reg::PICTURE_CHROMA, harness.at(CHROMA))
+            .unwrap();
+
+        for (i, frame) in frames.iter().enumerate() {
+            let au = slices(frame);
+            setup.bitstream_size = au.len() as u32;
+            assert!(
+                harness
+                    .mem
+                    .write(0x8000_0000 + SETUP as u64, &write_setup(&setup))
+            );
+            assert!(harness.mem.write(0x8000_0000 + BITSTREAM as u64, &au));
+            nvdec.write(&dma, 0, reg::EXECUTE, 0).unwrap();
+            if i == 0 {
+                assert_eq!(
+                    harness.read_plane(LUMA, w, h),
+                    vec![0u8; w * h],
+                    "the priming submission writes nothing"
+                );
+            }
+        }
+
+        let mut reference = OpenH264::new().unwrap();
+        let want = reference
+            .decode(&frames[0])
+            .unwrap()
+            .expect("reference picture");
+        let (sy, su, sv) = want.strides();
+        let mut expected = Vec::new();
+        for y in 0..h {
+            expected.extend_from_slice(&want.y()[y * sy..y * sy + w]);
+        }
+        let mut expected_uv = Vec::new();
+        for y in 0..h / 2 {
+            let u = &want.u()[y * su..y * su + w / 2];
+            let v = &want.v()[y * sv..y * sv + w / 2];
+            for x in 0..w / 2 {
+                expected_uv.extend_from_slice(&[u[x], v[x]]);
+            }
+        }
+        assert_eq!(harness.read_plane(LUMA, w, h), expected);
+        assert_eq!(harness.read_plane(CHROMA, w, h / 2), expected_uv);
     }
 }

@@ -6,6 +6,7 @@ use ash::vk;
 
 use super::buffer_cache::{self, BufferCache};
 use super::fxhash::FastMap as HashMap;
+use super::fxhash::FastSet;
 use super::tic;
 use crate::mem::GuestMemory;
 
@@ -122,6 +123,7 @@ pub struct Renderer {
     generation: u64,
     volumes: HashMap<(u64, vk::Format), Volume>,
     retired: Vec<ImageKey>,
+    present_misses: FastSet<u64>,
     pipeline_cache: vk::PipelineCache,
     compiler: Option<PipelineCompiler>,
     cache_file: Option<std::path::PathBuf>,
@@ -654,6 +656,7 @@ impl Renderer {
             generation: 0,
             volumes: HashMap::default(),
             retired: Vec::new(),
+            present_misses: FastSet::default(),
             pipeline_cache,
             compiler,
             cache_file,

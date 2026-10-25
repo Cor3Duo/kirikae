@@ -17,8 +17,9 @@ use std::collections::HashSet;
 use ash::vk;
 use kirikae_maxwell::{Kind, Stage as MaxwellStage};
 
+use super::Presented;
 use super::Renderer;
-use super::descriptors::{Descriptor, FRAGMENT_BASE, VERTEX_BASE};
+use super::descriptors::{Descriptor, FRAGMENT_BASE, MAX_STORAGE, STORAGE_OFFSET, VERTEX_BASE};
 use super::draw::{RenderTargets, admit_shader, changed};
 use super::images::{IDENTITY, ImageKey, aspect_of};
 use crate::gpu::threed::CB_SLOTS;
@@ -28,6 +29,7 @@ use crate::nvn::formats;
 use crate::nvn::replay::{
     self, DrawCall, IndexCall, Sink, Stage, State, Submit, Targets, TextureInfo, ViewInfo, ViewRef,
 };
+use crate::nvn::window::Rect;
 use crate::process::Process;
 
 /// A resolved attachment: the image the CPU address maps to, and the view the record selected.
@@ -64,7 +66,7 @@ pub struct NvnSink<'a> {
 pub fn replay_submit(p: &'static Process, submit: &Submit) -> replay::Stats {
     let Some(stats) = p.gpu.with_renderer(|renderer| {
         let mut sink = NvnSink::new(renderer, &p.gpu, &p.memory, submit);
-        let stats = replay::replay(submit, &mut sink);
+        let stats = replay::replay_resumed(submit, &mut sink);
         sink.finish_submit();
         stats
     }) else {
@@ -561,7 +563,17 @@ impl Renderer {
                 output_types[index] = formats::kind(color.nvn_format);
             }
         }
-        let vertex_cbufs = nvn_cbufs(state, 0);
+        let mut vertex_cbufs = nvn_cbufs(state, 0);
+        // `c[1]` is the stage's own constant data. The translator reads it as well as the descriptor does, because
+        // an indirect branch's jump table lives there: without it the table does not resolve and the draw is skipped
+        // for `brx`.
+        if let Some(constants) = vs_stage.constants {
+            vertex_cbufs[1] = Some(constants);
+        }
+        let mut fragment_cbufs = nvn_cbufs(state, 1);
+        if let Some(constants) = fs_stage.and_then(|stage| stage.constants) {
+            fragment_cbufs[1] = Some(constants);
+        }
         let vs = self.shader(
             gpu,
             mem,
@@ -580,7 +592,7 @@ impl Renderer {
                 &regs,
                 stage.code,
                 MaxwellStage::Fragment,
-                nvn_cbufs(state, 1),
+                fragment_cbufs,
                 attribute_types,
                 output_types,
                 None,
@@ -1028,8 +1040,77 @@ impl Renderer {
                 }
             }
         }
-        if shader.shader.storage != 0 {
-            return Err("the shader reads storage buffers, which are not recorded yet".into());
+        // Storage buffers: the translator numbers its bindings by the `c[0]` descriptor each instruction reads,
+        // so `storage_offsets` maps a shader slot back to the index `nvnCommandBufferBindStorageBuffer` named
+        // (`docs/nvn/CONTRACT.md` §5: graphics `0x110 + 0x100*stage + 0x10*n`, fragment stage 4).
+        let stage_base = if stage_index == 1 {
+            0x110 + 0x400
+        } else {
+            0x110
+        };
+        let ssbo_align = self.limits.min_storage_buffer_offset_alignment.max(16);
+        for slot in 0..16u32 {
+            if shader.shader.storage >> slot & 1 == 0 {
+                continue;
+            }
+            let Some(&descriptor) = shader.shader.storage_offsets.get(slot as usize) else {
+                return Err(format!(
+                    "the shader reads storage buffer {slot} but its descriptor offset is unknown"
+                ));
+            };
+            let Some(relative) = descriptor.checked_sub(stage_base) else {
+                return Err(format!(
+                    "storage buffer {slot} descriptor {descriptor:#x} is outside its stage's c[0] window"
+                ));
+            };
+            if relative % 0x10 != 0 {
+                return Err(format!(
+                    "storage buffer {slot} descriptor {descriptor:#x} is not 16-byte aligned"
+                ));
+            }
+            let index = (relative / 0x10) as usize;
+            let Some((address, size)) = state.storage[stage_index].get(index).copied().flatten()
+            else {
+                return Err(format!(
+                    "the shader reads storage buffer {index} but no BindStorageBuffer filled it"
+                ));
+            };
+            if address == 0 || size == 0 {
+                return Err(format!("storage buffer {index} is empty"));
+            }
+            let size = size.clamp(16, MAX_STORAGE).next_multiple_of(4);
+            let cpu = gpu.translate(address);
+            let offset = match cpu.and_then(|c| self.storage.get(&(c, size)).copied()) {
+                Some(offset) => offset,
+                None => {
+                    let offset = self
+                        .ring_guest(gpu, mem, address, size, ssbo_align, true)
+                        .map_err(|error| format!("storage buffer {index}: {error}"))?;
+                    if let Some(c) = cpu {
+                        self.storage.insert((c, size), offset);
+                    }
+                    offset
+                }
+            };
+            if shader.shader.storage_written >> slot & 1 == 1 {
+                self.draw_wrote_storage = true;
+                if let Some(c) = cpu
+                    && !self.write_back.contains(&(c, offset, size))
+                {
+                    self.write_back.push((c, offset, size));
+                    self.pending.push((c, size, self.serial, offset));
+                    self.pending_pages.add((c, size, self.serial, offset));
+                    self.pending_flag
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            out.push(Descriptor::Buffer(
+                base + STORAGE_OFFSET + slot,
+                vk::DescriptorType::STORAGE_BUFFER,
+                self.ring.buffer,
+                offset,
+                size,
+            ));
         }
         if !shader.shader.images.is_empty() {
             return Err("the shader writes storage images, which are not recorded yet".into());
@@ -1166,6 +1247,213 @@ impl Renderer {
             }
         }
     }
+
+    /// Presents the image the replay rendered into the window texture at `cpu`.
+    ///
+    /// This is the NVN present path, not the Maxwell/VI one: the driver's own submit was taken over by the replay,
+    /// so the display buffer it would have copied into is stale. The recorded frame is already an image, and the
+    /// swapchain takes it directly with a blit. `crop` is the part `nvnWindowSetCrop` selected; it is fitted into
+    /// the swapchain with bars when the aspect does not match (`docs/nvn/CONTRACT.md` §8).
+    pub fn nvn_present(
+        &mut self,
+        cpu: u64,
+        width: u32,
+        height: u32,
+        crop: Option<Rect>,
+    ) -> Presented {
+        if self.swapchain_fn.is_none() || self.present_failed {
+            return Presented::NoSwapchain;
+        }
+        let mut candidates: Vec<ImageKey> = self
+            .at(cpu)
+            .iter()
+            .copied()
+            .filter(|key| {
+                self.images[key].gpu_dirty && aspect_of(key.format) == vk::ImageAspectFlags::COLOR
+            })
+            .collect();
+        // The window texture's own level-0 image first, then the largest colour image at the same address: a view
+        // may have made the target a smaller or differently typed image, and the blit scales it anyway.
+        candidates.sort_by_key(|key| {
+            (
+                key.width != width || key.height != height,
+                std::cmp::Reverse(key.width * key.height),
+            )
+        });
+        let Some(key) = candidates.first().copied() else {
+            return Presented::NoImage;
+        };
+        let srgb = matches!(
+            key.format,
+            vk::Format::R8G8B8A8_SRGB
+                | vk::Format::B8G8R8A8_SRGB
+                | vk::Format::A8B8G8R8_SRGB_PACK32
+        );
+        let Some(index) = self.acquire(srgb) else {
+            return if self.swapchain.is_some() {
+                Presented::Shown
+            } else {
+                Presented::NoSwapchain
+            };
+        };
+        let sc = self.swapchain.as_ref().unwrap();
+        let (target, extent, done) = (
+            sc.images[index as usize],
+            sc.extent,
+            sc.done[index as usize],
+        );
+        let source = crop_source(crop, key.width, key.height);
+        let destination = present_rect(source, extent);
+        self.begin();
+        self.end_rendering();
+        self.barrier();
+        let range = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        let to_dst = [vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .image(target)
+            .subresource_range(range)];
+        let sub = vk::ImageSubresourceLayers {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            mip_level: 0,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        let region = [vk::ImageBlit::default()
+            .src_subresource(sub)
+            .src_offsets([
+                vk::Offset3D {
+                    x: source.x as i32,
+                    y: source.y as i32,
+                    z: 0,
+                },
+                vk::Offset3D {
+                    x: (source.x + source.width) as i32,
+                    y: (source.y + source.height) as i32,
+                    z: 1,
+                },
+            ])
+            .dst_subresource(sub)
+            .dst_offsets([
+                vk::Offset3D {
+                    x: destination.x as i32,
+                    y: destination.y as i32,
+                    z: 0,
+                },
+                vk::Offset3D {
+                    x: (destination.x + destination.width) as i32,
+                    y: (destination.y + destination.height) as i32,
+                    z: 1,
+                },
+            ])];
+        let to_present = [vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .image(target)
+            .subresource_range(range)];
+        let image = self.images[&key].image;
+        unsafe {
+            let d = &self.device;
+            d.cmd_pipeline_barrier(
+                self.cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &to_dst,
+            );
+            d.cmd_blit_image(
+                self.cmd,
+                image,
+                vk::ImageLayout::GENERAL,
+                target,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &region,
+                vk::Filter::LINEAR,
+            );
+            d.cmd_pipeline_barrier(
+                self.cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &to_present,
+            );
+        }
+        self.submit_wait = Some(self.batches[self.current].acquired);
+        self.submit_signal = Some(done);
+        self.flush();
+        let sc = self.swapchain.as_mut().unwrap();
+        let (waits, swapchains, indices) = ([done], [sc.handle], [index]);
+        let info = vk::PresentInfoKHR::default()
+            .wait_semaphores(&waits)
+            .swapchains(&swapchains)
+            .image_indices(&indices);
+        match unsafe {
+            self.swapchain_fn
+                .as_ref()
+                .unwrap()
+                .queue_present(self.queue, &info)
+        } {
+            Ok(false) => {}
+            Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => sc.stale = true,
+            Err(e) => {
+                eprintln!("kirikae: nvn present failed ({e:?}); the swapchain is made again");
+                sc.stale = true;
+            }
+        }
+        self.stats.presents += 1;
+        Presented::Shown
+    }
+}
+
+/// The part of a window texture a present shows. A crop that does not fit is cut at the texture edge; one that names
+/// nothing usable is the whole texture, so a present is never dropped for a bad rect.
+fn crop_source(crop: Option<Rect>, width: u32, height: u32) -> Rect {
+    let full = Rect {
+        x: 0,
+        y: 0,
+        width,
+        height,
+    };
+    let Some(crop) = crop else { return full };
+    if crop.width == 0 || crop.height == 0 || crop.x >= width || crop.y >= height {
+        return full;
+    }
+    Rect {
+        x: crop.x,
+        y: crop.y,
+        width: crop.width.min(width - crop.x),
+        height: crop.height.min(height - crop.y),
+    }
+}
+
+/// Where a source rect lands on the swapchain: the largest centred rect with the source's aspect, so a 16:9 frame on
+/// a wider window keeps its shape and gets bars.
+fn present_rect(source: Rect, extent: vk::Extent2D) -> Rect {
+    let sw = source.width.max(1) as f64;
+    let sh = source.height.max(1) as f64;
+    let dw = extent.width.max(1) as f64;
+    let dh = extent.height.max(1) as f64;
+    let scale = (dw / sw).min(dh / sh);
+    let width = ((sw * scale).round() as u32).clamp(1, extent.width.max(1));
+    let height = ((sh * scale).round() as u32).clamp(1, extent.height.max(1));
+    Rect {
+        x: (extent.width.saturating_sub(width)) / 2,
+        y: (extent.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    }
 }
 
 fn nvn_cbufs(state: &State, stage: usize) -> [Option<(u64, u32)>; CB_SLOTS] {
@@ -1289,6 +1577,92 @@ mod tests {
         let word = 8 + 2 * 3;
         assert_eq!(state.textures[1][word / 2 - 4], 0x0020_2007);
         assert_eq!(state.textures[0][0], 0);
+    }
+
+    #[test]
+    fn a_window_target_blit_crops_and_letterboxes() {
+        // A handheld frame: 1280x720 inside the 1920x1080 window texture, shown on a 1920x1080 swapchain.
+        let crop = Rect {
+            x: 320,
+            y: 180,
+            width: 1280,
+            height: 720,
+        };
+        let source = crop_source(Some(crop), 1920, 1080);
+        assert_eq!(source, crop);
+        assert_eq!(
+            present_rect(
+                source,
+                vk::Extent2D {
+                    width: 1920,
+                    height: 1080
+                }
+            ),
+            Rect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080
+            }
+        );
+        // The same 16:9 frame on a 21:9 surface gets bars at the sides, not a stretch.
+        let wide = present_rect(
+            source,
+            vk::Extent2D {
+                width: 2560,
+                height: 1080,
+            },
+        );
+        assert_eq!(wide.height, 1080);
+        assert_eq!(wide.width, 1920);
+        assert_eq!(wide.x, (2560 - 1920) / 2);
+        assert_eq!(wide.y, 0);
+        // A crop past the edge is cut at the texture edge before it is scaled.
+        let cut = crop_source(
+            Some(Rect {
+                x: 1800,
+                y: 1000,
+                width: 400,
+                height: 400,
+            }),
+            1920,
+            1080,
+        );
+        assert_eq!(
+            cut,
+            Rect {
+                x: 1800,
+                y: 1000,
+                width: 120,
+                height: 80
+            }
+        );
+        // No crop, an empty crop and one outside the texture all present the whole frame.
+        for crop in [
+            None,
+            Some(Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            }),
+            Some(Rect {
+                x: 2000,
+                y: 0,
+                width: 100,
+                height: 100,
+            }),
+        ] {
+            assert_eq!(
+                crop_source(crop, 1920, 1080),
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080
+                }
+            );
+        }
     }
 
     #[test]

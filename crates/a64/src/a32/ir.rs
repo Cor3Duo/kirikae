@@ -12,6 +12,8 @@
 
 use std::fmt;
 
+use super::opcode::Opcode;
+
 /// One of the sixteen A32 registers.
 ///
 /// Reading `PC` inside an instruction yields `address + 8`, as on the architecture; the
@@ -338,7 +340,10 @@ pub struct Target {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MemSize {
     Byte,
+    Halfword,
     Word,
+    /// A register pair: eight bytes, low word first. Only `ldrd`/`strd` use it.
+    Double,
 }
 
 /// Offset of a single-register load or store.
@@ -458,6 +463,12 @@ pub enum Operand {
         reg: Reg,
         shift: Shift,
     },
+    /// Two consecutive registers of a pair instruction. `lo` comes first in the
+    /// encoding (`Rt`, `RdLo`); `hi` is its pair (`Rt + 1`, `RdHi`).
+    Regs {
+        lo: Reg,
+        hi: Reg,
+    },
     Mem(Mem),
     Block(Block),
     Target(Target),
@@ -476,206 +487,10 @@ impl fmt::Display for Operand {
                     write!(f, ", {shift}")
                 }
             }
+            Operand::Regs { lo, hi } => write!(f, "{lo}, {hi}"),
             Operand::Mem(mem) => write!(f, "{mem}"),
             Operand::Block(block) => write!(f, "{block}"),
             Operand::Target(target) => write!(f, "#{:#x}", target.addr),
-        }
-    }
-}
-
-/// Decoded instruction mnemonic, without the condition suffix.
-///
-/// | mnemonic | operands |
-/// |---|---|
-/// | `and` … `bic`, except `mov`, `mvn` | `[Rd, Rn, op2]` |
-/// | `mov`, `mvn` | `[Rd, op2]` |
-/// | `tst`, `teq`, `cmp`, `cmn` | `[Rn, op2]` |
-/// | `movw`, `movt` | `[Rd, Imm(imm16)]` |
-/// | `b`, `bl` | `[Target]` |
-/// | `bx` | `[Reg]` |
-/// | `blx` | `[Reg]` (register form) or `[Target]` (immediate form, always Thumb) |
-/// | `ldr`, `str` | `[Reg(rt), Mem]` |
-/// | `ldm`, `stm` | `[Block]` |
-/// | `mul` | `[Rd, Rm, Rs]` |
-/// | `mla` | `[Rd, Rm, Rs, Ra]`, computing `Rd = Rm * Rs + Ra` (the assembler syntax
-///   used by gas and LLVM, with the accumulator encoded in bits 15:12) |
-/// | `svc` | `[Imm(imm24)]` |
-/// | `bkpt` | `[Imm(imm16)]` |
-///
-/// `op2` is either `Operand::Imm` (already rotated) or `Operand::Shifted`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Opcode {
-    And,
-    Eor,
-    Sub,
-    Rsb,
-    Add,
-    Adc,
-    Sbc,
-    Rsc,
-    Tst,
-    Teq,
-    Cmp,
-    Cmn,
-    Orr,
-    Mov,
-    Bic,
-    Mvn,
-    Movw,
-    Movt,
-    B,
-    Bl,
-    Bx,
-    Blx,
-    Ldr,
-    Str,
-    Ldm,
-    Stm,
-    Mul,
-    Mla,
-    Svc,
-    Bkpt,
-}
-
-impl Opcode {
-    pub const ALL: &'static [Opcode] = &[
-        Opcode::And,
-        Opcode::Eor,
-        Opcode::Sub,
-        Opcode::Rsb,
-        Opcode::Add,
-        Opcode::Adc,
-        Opcode::Sbc,
-        Opcode::Rsc,
-        Opcode::Tst,
-        Opcode::Teq,
-        Opcode::Cmp,
-        Opcode::Cmn,
-        Opcode::Orr,
-        Opcode::Mov,
-        Opcode::Bic,
-        Opcode::Mvn,
-        Opcode::Movw,
-        Opcode::Movt,
-        Opcode::B,
-        Opcode::Bl,
-        Opcode::Bx,
-        Opcode::Blx,
-        Opcode::Ldr,
-        Opcode::Str,
-        Opcode::Ldm,
-        Opcode::Stm,
-        Opcode::Mul,
-        Opcode::Mla,
-        Opcode::Svc,
-        Opcode::Bkpt,
-    ];
-
-    pub const fn name(self) -> &'static str {
-        match self {
-            Opcode::And => "and",
-            Opcode::Eor => "eor",
-            Opcode::Sub => "sub",
-            Opcode::Rsb => "rsb",
-            Opcode::Add => "add",
-            Opcode::Adc => "adc",
-            Opcode::Sbc => "sbc",
-            Opcode::Rsc => "rsc",
-            Opcode::Tst => "tst",
-            Opcode::Teq => "teq",
-            Opcode::Cmp => "cmp",
-            Opcode::Cmn => "cmn",
-            Opcode::Orr => "orr",
-            Opcode::Mov => "mov",
-            Opcode::Bic => "bic",
-            Opcode::Mvn => "mvn",
-            Opcode::Movw => "movw",
-            Opcode::Movt => "movt",
-            Opcode::B => "b",
-            Opcode::Bl => "bl",
-            Opcode::Bx => "bx",
-            Opcode::Blx => "blx",
-            Opcode::Ldr => "ldr",
-            Opcode::Str => "str",
-            Opcode::Ldm => "ldm",
-            Opcode::Stm => "stm",
-            Opcode::Mul => "mul",
-            Opcode::Mla => "mla",
-            Opcode::Svc => "svc",
-            Opcode::Bkpt => "bkpt",
-        }
-    }
-
-    /// Data-processing instructions whose only result is NZCV.
-    pub const fn is_flag_test(self) -> bool {
-        matches!(self, Opcode::Tst | Opcode::Teq | Opcode::Cmp | Opcode::Cmn)
-    }
-
-    /// Data-processing instructions (`and` … `mvn`), including `movw`/`movt`.
-    pub const fn is_data_processing(self) -> bool {
-        matches!(
-            self,
-            Opcode::And
-                | Opcode::Eor
-                | Opcode::Sub
-                | Opcode::Rsb
-                | Opcode::Add
-                | Opcode::Adc
-                | Opcode::Sbc
-                | Opcode::Rsc
-                | Opcode::Tst
-                | Opcode::Teq
-                | Opcode::Cmp
-                | Opcode::Cmn
-                | Opcode::Orr
-                | Opcode::Mov
-                | Opcode::Bic
-                | Opcode::Mvn
-                | Opcode::Movw
-                | Opcode::Movt
-        )
-    }
-
-    /// Whether the mnemonic takes the `S` suffix (`adds`, `movs`, `muls`).
-    pub const fn takes_s_suffix(self) -> bool {
-        matches!(
-            self,
-            Opcode::And
-                | Opcode::Eor
-                | Opcode::Sub
-                | Opcode::Rsb
-                | Opcode::Add
-                | Opcode::Adc
-                | Opcode::Sbc
-                | Opcode::Rsc
-                | Opcode::Orr
-                | Opcode::Mov
-                | Opcode::Bic
-                | Opcode::Mvn
-                | Opcode::Mul
-                | Opcode::Mla
-        )
-    }
-
-    /// Maps the four-bit data-processing opcode, bits 24:21.
-    pub const fn from_data_processing(field: u32) -> Opcode {
-        match field & 0xf {
-            0 => Opcode::And,
-            1 => Opcode::Eor,
-            2 => Opcode::Sub,
-            3 => Opcode::Rsb,
-            4 => Opcode::Add,
-            5 => Opcode::Adc,
-            6 => Opcode::Sbc,
-            7 => Opcode::Rsc,
-            8 => Opcode::Tst,
-            9 => Opcode::Teq,
-            10 => Opcode::Cmp,
-            11 => Opcode::Cmn,
-            12 => Opcode::Orr,
-            13 => Opcode::Mov,
-            14 => Opcode::Bic,
-            _ => Opcode::Mvn,
         }
     }
 }

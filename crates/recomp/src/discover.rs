@@ -1,11 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use kirikae_a64::{Control, Expr, Insn, Stmt, lift};
+use kirikae_a64::{Control, Insn, lift};
 use kirikae_loader::Image;
 
-const MAX_RUN: u64 = 24;
-const MAX_CASES: u64 = 4096;
-const MAX_SPAN: u64 = 1 << 20;
+use crate::jump::{Table, jump_table};
 
 #[derive(Debug)]
 pub struct Block {
@@ -67,6 +65,12 @@ pub struct DiscoveryStats {
     /// Reachable `br`, and how many of them had a recognised jump table.
     pub indirect_jumps: u64,
     pub tables: u64,
+    /// Of [`tables`](Self::tables), how many had no bound check: the entry count came from the
+    /// entries themselves.
+    pub unbounded_tables: u64,
+    /// Reachable `br` with no recognised table. Its targets fall to the interpreter and are
+    /// recovered by the profile loop.
+    pub unresolved_jumps: u64,
     /// Fixed-point rounds promotion took.
     pub rounds: u32,
 }
@@ -136,127 +140,21 @@ impl<'a> CodeSpace<'a> {
             .sum()
     }
 
-    fn read_ro(&self, addr: u64, size: u8) -> Option<u64> {
-        let m = self
-            .images
-            .iter()
-            .find(|m| m.ro.contains(&addr) && m.ro.contains(&(addr + size as u64 - 1)))?;
+    /// A little-endian word from constant data: `.rodata` or `.data`.
+    ///
+    /// `.data` is read as it sits in the image. Absolute pointers there are the loader's
+    /// business (see `loader::dynamic`), so a relocated slot may read as zero; a relative offset
+    /// table reads correctly and is what most titles use.
+    pub(crate) fn read_const(&self, addr: u64, size: u8) -> Option<u64> {
+        let last = addr.checked_add(size as u64 - 1)?;
+        let m = self.images.iter().find(|m| {
+            (m.ro.contains(&addr) && m.ro.contains(&last))
+                || (m.data.contains(&addr) && m.data.contains(&last))
+        })?;
         let at = (addr - m.base) as usize;
         let bytes = m.memory.get(at..at + size as usize)?;
         Some(bytes.iter().rev().fold(0, |v, &b| v << 8 | b as u64))
     }
-}
-
-fn guard(space: &CodeSpace, branch: u64) -> Option<(u8, u64)> {
-    let b = space.word(branch)?;
-    let cmp = space.word(branch.checked_sub(4)?)?;
-    if b & 0xff00_0010 != 0x5400_0000 || cmp & 0x7fc0_001f != 0x7100_001f {
-        return None;
-    }
-    let (index, imm) = (((cmp >> 5) & 31) as u8, ((cmp >> 10) & 0xfff) as u64);
-    let count = match b & 0xf {
-        8 => imm + 1,
-        2 => imm,
-        _ => return None,
-    };
-    (index < 31 && count > 0 && count <= MAX_CASES).then_some((index, count))
-}
-
-fn subst(e: &Expr, regs: &[Expr], tmp: &[Option<Expr>]) -> Option<Expr> {
-    Some(match e {
-        Expr::Reg(n) => regs[*n as usize].clone(),
-        Expr::Tmp(n) => tmp.get(*n as usize)?.clone()?,
-        Expr::Op(op, args) => Expr::Op(
-            *op,
-            args.iter()
-                .map(|a| subst(a, regs, tmp))
-                .collect::<Option<_>>()?,
-        ),
-        Expr::Load { size, addr } => Expr::Load {
-            size: *size,
-            addr: Box::new(subst(addr, regs, tmp)?),
-        },
-        other => other.clone(),
-    })
-}
-
-fn eval(space: &CodeSpace, e: &Expr, index: u8, value: u64) -> Option<u64> {
-    match e {
-        Expr::Const(v) => Some(*v),
-        Expr::Reg(n) if *n == index => Some(value),
-        Expr::Op(op, args) => {
-            let vals: Vec<u64> = args
-                .iter()
-                .map(|a| eval(space, a, index, value))
-                .collect::<Option<_>>()?;
-            Some(op.eval(&vals))
-        }
-        Expr::Load { size, addr } => space.read_ro(eval(space, addr, index, value)?, *size),
-        _ => None,
-    }
-}
-
-fn constants(e: &Expr, out: &mut Vec<u64>) -> bool {
-    match e {
-        Expr::Const(v) => out.push(*v),
-        Expr::Op(_, args) => return args.iter().fold(false, |load, a| constants(a, out) | load),
-        Expr::Load { addr, .. } => {
-            constants(addr, out);
-            return true;
-        }
-        _ => {}
-    }
-    false
-}
-
-fn jump_table(space: &CodeSpace, br: u64) -> Option<(Vec<u64>, Vec<u64>)> {
-    let mut start = br;
-    let (index, count) = loop {
-        let prev = start.checked_sub(4)?;
-        if br - prev > 4 * MAX_RUN {
-            return None;
-        }
-        match space.lift(prev)?.control() {
-            Control::Fallthrough => start = prev,
-            Control::JumpIf(_) => break guard(space, prev)?,
-            _ => return None,
-        }
-    };
-    let mut regs: Vec<Expr> = (0..31).map(Expr::Reg).collect();
-    let mut target = None;
-    for addr in (start..=br).step_by(4) {
-        let insn = space.lift(addr)?;
-        let mut tmp: Vec<Option<Expr>> = vec![None; 8];
-        for s in &insn.stmts {
-            match s {
-                Stmt::Let(n, e) => *tmp.get_mut(*n as usize)? = Some(subst(e, &regs, &tmp)?),
-                Stmt::SetReg(n, e) => regs[*n as usize] = subst(e, &regs, &tmp)?,
-                Stmt::JumpIndirect(e) if addr == br => target = Some(subst(e, &regs, &tmp)?),
-                Stmt::SetSp(_)
-                | Stmt::SetNzcv(_)
-                | Stmt::SetV { .. }
-                | Stmt::Store { .. }
-                | Stmt::Simd(_)
-                | Stmt::Fence => {}
-                _ => return None,
-            }
-        }
-    }
-    let target = target?;
-    let mut anchors = Vec::new();
-    if !constants(&target, &mut anchors) || eval(space, &target, index, 0).is_none() {
-        return None;
-    }
-    let mut targets: Vec<u64> = (0..count)
-        .map(|i| {
-            eval(space, &target, index, i)
-                .filter(|t| space.is_code(*t) && t.abs_diff(br) <= MAX_SPAN)
-        })
-        .collect::<Option<_>>()?;
-    targets.sort_unstable();
-    targets.dedup();
-    anchors.retain(|a| space.is_code(*a));
-    Some((targets, anchors))
 }
 
 fn adr_target(insn: &Insn) -> Option<u64> {
@@ -408,7 +306,13 @@ pub fn find_entries_measured(
     // Addresses another entry's body would reach by falling through, which is exactly the
     // overlap the per-segment ownership removes.
     let mut fall = Seen::new(space);
-    let (mut indirect_calls, mut indirect_jumps, mut tables) = (0u64, 0u64, 0u64);
+    let (
+        mut indirect_calls,
+        mut indirect_jumps,
+        mut tables,
+        mut unbounded_tables,
+        mut unresolved_jumps,
+    ) = (0u64, 0u64, 0u64, 0u64, 0u64);
     let mut work: Vec<u64> = entries.iter().copied().collect();
     while let Some(addr) = work.pop() {
         if !seen.insert(space, addr) {
@@ -461,11 +365,19 @@ pub fn find_entries_measured(
             }
             Control::JumpIndirect => {
                 indirect_jumps += 1;
-                if let Some((targets, anchors)) = jump_table(space, addr) {
+                if let Some(Table {
+                    targets,
+                    anchors,
+                    bounded,
+                }) = jump_table(space, addr)
+                {
                     tables += 1;
+                    unbounded_tables += u64::from(!bounded);
                     cases.extend(anchors.iter().chain(&targets));
                     targets.iter().for_each(|&t| edge(&mut reach, t, true));
                     work.extend(targets);
+                } else {
+                    unresolved_jumps += 1;
                 }
             }
             Control::Return | Control::Undefined => {}
@@ -495,6 +407,8 @@ pub fn find_entries_measured(
         indirect_calls,
         indirect_jumps,
         tables,
+        unbounded_tables,
+        unresolved_jumps,
         rounds,
     };
     (entries, reachable, stats)
@@ -564,7 +478,7 @@ pub fn build_function(space: &CodeSpace, entry: u64, entries: &BTreeSet<u64>) ->
                 }
             }
             Control::JumpIndirect => {
-                for t in jump_table(space, addr).map_or_else(Vec::new, |(targets, _)| targets) {
+                for t in jump_table(space, addr).map_or_else(Vec::new, |table| table.targets) {
                     if internal(t) {
                         leaders.insert(t);
                         work.push(t);
@@ -714,7 +628,7 @@ mod tests {
             .unwrap()
             .last()
             .addr;
-        let case = jump_table(&space, br).unwrap().0[0];
+        let case = jump_table(&space, br).unwrap().targets[0];
 
         let (entries, _) = find_entries(&space, &[image.entry]);
         assert!(!entries.contains(&case), "{entries:x?}");

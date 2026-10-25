@@ -7,7 +7,7 @@
 //!
 //! Recording only runs with `KIRIKAE_NVN=record` (see `record.rs`); everything else here is milestone 4.1/4.2.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::Ordering;
 use std::sync::{Mutex, OnceLock};
 
@@ -21,6 +21,7 @@ use super::samplers::{self, Sampler};
 use super::state;
 use super::textures::{Texture, TextureBuilder, TextureView};
 use super::va::{Allocator, Ranges};
+use super::window::{self, Window};
 use crate::cpu::Cpu;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +49,7 @@ pub enum Proc {
     Handle(HandleProc),
     State(state::Setter),
     Command(CommandProc),
+    Window(WindowProc),
 }
 
 /// Program objects: the stage list a `BindProgram` names (`nvn_program.cpp`).
@@ -104,6 +106,7 @@ pub enum CommandProc {
     BindVertexStreamState,
     BindTexture,
     BindUniformBuffer,
+    BindStorageBuffer,
     SetSamplerPool,
     SetTexturePool,
     BindVertexBuffer,
@@ -124,6 +127,27 @@ pub enum CommandProc {
     GetCommandMemorySize,
     GetCommandMemoryUsed,
     GetCommandMemoryFree,
+}
+
+/// A window proc: the swapchain a title presents from (`docs/nvn/CONTRACT.md` §8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowProc {
+    BuilderDefaults,
+    /// `(builder, count, const NVNtexture* const*)`: the addresses are read at the call.
+    BuilderTextures,
+    BuilderActiveTextures,
+    BuilderPresentInterval,
+    Initialize,
+    Finalize,
+    /// `(window, int x, int y, int w, int h)`.
+    SetCrop,
+    SetPresentInterval,
+    SetNumActiveTextures,
+    /// `nvnQueuePresentTexture(queue, window, index)`: the driver still presents; the host resolves the replayed
+    /// image after it, so a target it cannot resolve stays with the driver.
+    QueuePresent,
+    /// `nvnWindowPresentTexture(window, index)`, the queue-less form some SDKs expose.
+    PresentTexture,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -233,6 +257,7 @@ pub fn proc(name: &str) -> Option<Proc> {
         "CommandBufferBindVertexStreamState" => Command(CommandProc::BindVertexStreamState),
         "CommandBufferBindTexture" => Command(CommandProc::BindTexture),
         "CommandBufferBindUniformBuffer" => Command(CommandProc::BindUniformBuffer),
+        "CommandBufferBindStorageBuffer" => Command(CommandProc::BindStorageBuffer),
         "CommandBufferSetSamplerPool" => Command(CommandProc::SetSamplerPool),
         "CommandBufferSetTexturePool" => Command(CommandProc::SetTexturePool),
         "CommandBufferBindVertexBuffer" => Command(CommandProc::BindVertexBuffer),
@@ -247,6 +272,17 @@ pub fn proc(name: &str) -> Option<Proc> {
         "CommandBufferCallCommands" => Command(CommandProc::CallCommands),
         "CommandBufferCopyCommands" => Command(CommandProc::CopyCommands),
         "QueueSubmitCommands" => Command(CommandProc::SubmitCommands),
+        "WindowBuilderSetDefaults" => Window(WindowProc::BuilderDefaults),
+        "WindowBuilderSetTextures" => Window(WindowProc::BuilderTextures),
+        "WindowBuilderSetNumActiveTextures" => Window(WindowProc::BuilderActiveTextures),
+        "WindowBuilderSetPresentInterval" => Window(WindowProc::BuilderPresentInterval),
+        "WindowInitialize" => Window(WindowProc::Initialize),
+        "WindowFinalize" => Window(WindowProc::Finalize),
+        "WindowSetCrop" => Window(WindowProc::SetCrop),
+        "WindowSetPresentInterval" => Window(WindowProc::SetPresentInterval),
+        "WindowSetNumActiveTextures" => Window(WindowProc::SetNumActiveTextures),
+        "QueuePresentTexture" => Window(WindowProc::QueuePresent),
+        "WindowPresentTexture" => Window(WindowProc::PresentTexture),
         "CommandBufferGetCommandMemorySize" => Command(CommandProc::GetCommandMemorySize),
         "CommandBufferGetCommandMemoryUsed" => Command(CommandProc::GetCommandMemoryUsed),
         "CommandBufferGetCommandMemoryFree" => Command(CommandProc::GetCommandMemoryFree),
@@ -285,6 +321,7 @@ struct Snapshot {
     decoded: u64,
     copied: u64,
     unresolved: u64,
+    presents: window::Counters,
 }
 
 #[derive(Default)]
@@ -306,6 +343,14 @@ struct Host {
     process: Option<&'static crate::process::Process>,
     /// The setters' decoded values, so a bind can copy state by value at record time.
     state: state::Objects,
+    /// Window builders by guest address, and the windows they initialize.
+    window_builders: HashMap<u64, window::Builder>,
+    windows: HashMap<u64, Window>,
+    /// The submit each window last presented, so a present never re-shows a frame from before the one it follows.
+    presented: HashMap<u64, u64>,
+    /// Serial of the last `nvnQueueSubmitCommands` the host replayed.
+    last_submit: u64,
+    presents: window::Counters,
     record: record::Recorder,
     /// Command memory the game handed each command buffer, resolved through its pool at `BeginRecording`.
     command_memory: HashMap<u64, Vec<CommandMemory>>,
@@ -314,9 +359,12 @@ struct Host {
     /// Command buffers whose implicit list broke while recording: their commands stay on the driver path until the
     /// next `EndRecording`, so a partial arena list is never submitted as if it were whole.
     implicit_dead: std::collections::HashSet<u64>,
-    /// Per command buffer, the arena list that just closed under the driver's internal pointer, waiting for the GPU
-    /// handle the same list is reported under next.
-    pending: HashMap<u64, u64>,
+    /// Per command buffer, the arena chunks that just closed under the driver's internal pointer, in recording
+    /// order, with the recorder generation they were opened at. The next list the buffer closes under a game handle
+    /// continues them, so they are replayed before it (`record.rs`, "Implicit lists").
+    pending: HashMap<u64, Vec<(u64, u64)>>,
+    /// Arena lists each queued submit captured, by serial, retired once that submit has been replayed.
+    retiring: VecDeque<(u64, Vec<u64>)>,
     /// Diagnostics: submits the host left on the driver path because a handle it named was not recorded.
     submits_driver: u64,
     record_diagnosed: bool,
@@ -429,6 +477,12 @@ pub fn apply(proc: Proc, c: &mut Cpu, real: u64) -> bool {
                     }
                 }
             }
+            Proc::Window(WindowProc::QueuePresent) => {
+                return present(c, real, 1, 2);
+            }
+            Proc::Window(WindowProc::PresentTexture) => {
+                return present(c, real, 0, 1);
+            }
             _ => {}
         }
     }
@@ -437,7 +491,11 @@ pub fn apply(proc: Proc, c: &mut Cpu, real: u64) -> bool {
     if !record::ON.load(Ordering::Relaxed)
         && matches!(
             proc,
-            Proc::Program(_) | Proc::TexturePool | Proc::SamplerPool | Proc::Handle(_)
+            Proc::Program(_)
+                | Proc::TexturePool
+                | Proc::SamplerPool
+                | Proc::Handle(_)
+                | Proc::Window(_)
         )
     {
         return false;
@@ -503,6 +561,7 @@ pub fn apply(proc: Proc, c: &mut Cpu, real: u64) -> bool {
             return true;
         }
         Proc::State(setter) => host.state.set(setter, &c.x),
+        Proc::Window(which) => host.window(which, c),
         Proc::Command(command) => {
             let outcome = host.command(command, c);
             if let Outcome::Host(value) = outcome {
@@ -512,6 +571,62 @@ pub fn apply(proc: Proc, c: &mut Cpu, real: u64) -> bool {
         }
     }
     false
+}
+
+/// `nvnQueuePresentTexture`/`nvnWindowPresentTexture`: run the driver's present, then put the replayed image on the
+/// swapchain when the window names a texture the host recorded.
+///
+/// The driver call is never skipped. Its fences, its vsync clock and its native-window queue belong to it, and a
+/// target the host cannot resolve has to stay there or the frame would be lost (`docs/nvn/CONTRACT.md` §8). After it
+/// returns, the replay's submit for this frame has been queued, so waiting for its serial makes the swapchain order
+/// equal the submit order. The frame counter is the same one `trace` uses: when the driver's own present did not
+/// advance it, the host credits this present so `KIRIKAE_STATS` shows the frame in record mode too.
+fn present(c: &mut Cpu, real: u64, window_arg: usize, index_arg: usize) -> bool {
+    let args = c.x;
+    let window = args[window_arg];
+    let index = args[index_arg];
+    let before = crate::display::FRAMES.load(Ordering::Relaxed);
+    if real != 0 {
+        crate::hle::call_guest(c, real, false);
+    }
+    let p = c.process();
+    let target = { lock().present_target(window, index) };
+    let mut credit = false;
+    match target {
+        Ok(target) => {
+            replay::wait(target.serial);
+            // The submit's snapshot owns the records it replayed, so the arena lists it captured go now instead of
+            // waiting for the slot rotation.
+            lock().retire_replayed(target.serial);
+            let shown = p
+                .gpu
+                .with_renderer(|renderer| {
+                    renderer.nvn_present(target.cpu, target.width, target.height, Some(target.crop))
+                })
+                .unwrap_or(crate::gpu::vulkan::Presented::NoSwapchain);
+            lock().note_present(window, target.serial, shown);
+            credit = shown != crate::gpu::vulkan::Presented::NoImage;
+        }
+        Err(fallback) => {
+            // A present this host cannot resolve still leaves nothing queued for long: the arena lists of the
+            // submits it names are retired once their replay is done, as on the replayed path.
+            let serial = { lock().last_submit };
+            if serial != 0 {
+                replay::wait(serial);
+                lock().retire_replayed(serial);
+            }
+            lock().note_fallback(fallback);
+        }
+    }
+    if credit {
+        let after = crate::display::FRAMES.load(Ordering::Relaxed);
+        if window::credit_frame(before, after) {
+            crate::display::presented(p, None);
+            lock().presents.frames += 1;
+        }
+    }
+    c.pc = c.x[30];
+    true
 }
 
 /// What `cmdbuf` is recording when `EndRecording` arrives.
@@ -550,6 +665,7 @@ pub fn report() {
         decoded: host.decoded,
         copied: host.copied,
         unresolved: host.unresolved,
+        presents: host.presents,
     };
     if snapshot == host.last {
         return;
@@ -573,13 +689,15 @@ pub fn report() {
         || snapshot.decoded + snapshot.copied > 0
     {
         eprintln!(
-            "kirikae:         nvn record: {} lists live, {} recorded ({} implicit, in the host arena), {} records, {} bytes ({} blob bytes); {} submits ({} stayed with the driver), {} rejected; {} draws and {} clears recorded; {} binds decoded, {} structs copied, {} unresolved",
+            "kirikae:         nvn record: {} lists live, {} recorded ({} implicit, in the host arena), {} records, {} bytes ({} blob bytes); {} chained links live, {} retired after replay; {} submits ({} stayed with the driver), {} rejected; {} draws and {} clears recorded; {} binds decoded, {} structs copied, {} unresolved",
             record.live,
             record.lists,
             record.implicit,
             record.records,
             record.bytes + record.blob_bytes,
             record.blob_bytes,
+            record.chained,
+            record.retired,
             record.submits,
             host.submits_driver,
             record.rejected,
@@ -590,10 +708,169 @@ pub fn report() {
             snapshot.unresolved
         );
     }
+    let presents = snapshot.presents;
+    if presents.replayed + presents.fallback + presents.no_swapchain > 0 {
+        eprintln!(
+            "kirikae:         nvn present: {} windows, {} presents ({} from the replay, {} stayed with the driver, {} without a swapchain); {} frames counted here",
+            host.windows.len(),
+            presents.replayed + presents.fallback + presents.no_swapchain,
+            presents.replayed,
+            presents.fallback,
+            presents.no_swapchain,
+            presents.frames
+        );
+    }
     host.last = snapshot;
 }
 
 impl Host {
+    /// A window builder, window or their per-frame tuning. All of it is read by value at the call; the driver still
+    /// runs every one of these procs, because the window struct it allocated is its own.
+    fn window(&mut self, which: WindowProc, c: &Cpu) {
+        use WindowProc::*;
+        let address = c.x[0];
+        match which {
+            BuilderDefaults => {
+                self.window_builders
+                    .insert(address, window::Builder::default());
+            }
+            BuilderTextures => {
+                let count = c.x[1].min(window::MAX_TEXTURES as u64);
+                let textures = read_words(&c.process().memory, c.x[2], count);
+                if textures.len() != count as usize {
+                    self.fail(format!(
+                        "nvnWindowBuilderSetTextures: {count} texture pointers at {:#x} are unreadable",
+                        c.x[2]
+                    ));
+                    return;
+                }
+                self.window_builders
+                    .entry(address)
+                    .or_default()
+                    .set_textures(&textures);
+            }
+            BuilderActiveTextures => {
+                self.window_builders.entry(address).or_default().active = c.x[1] as u32;
+            }
+            BuilderPresentInterval => {
+                self.window_builders
+                    .entry(address)
+                    .or_default()
+                    .present_interval = c.x[1] as u32;
+            }
+            Initialize => {
+                // `(window, builder)`: the textures live on the builder, not the window address.
+                let builder = self
+                    .window_builders
+                    .get(&c.x[1])
+                    .copied()
+                    .unwrap_or_default();
+                self.windows.insert(address, Window::from_builder(&builder));
+            }
+            Finalize => {
+                self.windows.remove(&address);
+                self.presented.remove(&address);
+            }
+            SetCrop => {
+                if let Some(window) = self.windows.get_mut(&address) {
+                    window.crop = Some(window::Crop {
+                        x: c.x[1] as u32 as i32,
+                        y: c.x[2] as u32 as i32,
+                        width: c.x[3] as u32,
+                        height: c.x[4] as u32,
+                    });
+                }
+            }
+            SetPresentInterval => {
+                if let Some(window) = self.windows.get_mut(&address) {
+                    window.present_interval = c.x[1] as u32;
+                }
+            }
+            SetNumActiveTextures => {
+                if let Some(window) = self.windows.get_mut(&address) {
+                    window.active = c.x[1] as u32;
+                }
+            }
+            QueuePresent | PresentTexture => {}
+        }
+    }
+
+    /// The window texture a present names, as the renderer needs it. This only reads the host tables; the caller
+    /// waits for the replay and takes the renderer lock after dropping it.
+    fn present_target(&self, address: u64, index: u64) -> Result<window::Target, window::Fallback> {
+        let Some(window) = self.windows.get(&address) else {
+            return Err(window::Fallback::UnknownWindow);
+        };
+        let Some(texture) = window.texture(index) else {
+            return Err(window::Fallback::IndexOutsideWindow);
+        };
+        let Some(texture) = self.objects.get(texture).and_then(|object| match object {
+            Object::Texture(texture) => Some(texture),
+            _ => None,
+        }) else {
+            return Err(window::Fallback::UnknownTexture);
+        };
+        if texture.host == 0 {
+            return Err(window::Fallback::NoHostAddress);
+        }
+        if self.last_submit == 0
+            || self
+                .presented
+                .get(&address)
+                .is_some_and(|&serial| serial >= self.last_submit)
+        {
+            return Err(window::Fallback::NoReplayedSubmit);
+        }
+        Ok(window::Target {
+            cpu: texture.host,
+            format: texture.format,
+            width: texture.width,
+            height: texture.height,
+            crop: window.crop_rect(texture.width, texture.height),
+            serial: self.last_submit,
+        })
+    }
+
+    fn note_present(&mut self, window: u64, serial: u64, shown: crate::gpu::vulkan::Presented) {
+        use crate::gpu::vulkan::Presented;
+        match shown {
+            Presented::Shown => {
+                self.presents.replayed += 1;
+                self.presented.insert(window, serial);
+            }
+            Presented::NoSwapchain => {
+                self.presents.no_swapchain += 1;
+                self.presented.insert(window, serial);
+            }
+            Presented::NoImage => {
+                self.presents.fallback += 1;
+                self.fail_keyed(
+                    "present-no-image",
+                    "nvn present: the replay has no image for the window texture; the driver keeps this frame"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    fn note_fallback(&mut self, fallback: window::Fallback) {
+        self.presents.fallback += 1;
+        let key = match fallback {
+            window::Fallback::UnknownWindow => "present-window",
+            window::Fallback::IndexOutsideWindow => "present-index",
+            window::Fallback::UnknownTexture => "present-texture",
+            window::Fallback::NoHostAddress => "present-address",
+            window::Fallback::NoReplayedSubmit => "present-submit",
+        };
+        self.fail_keyed(
+            key,
+            format!(
+                "nvn present: {}; the driver keeps this frame",
+                fallback.reason()
+            ),
+        );
+    }
+
     fn fail(&mut self, what: String) {
         self.fail_keyed(&what.clone(), what);
     }
@@ -973,7 +1250,7 @@ impl Host {
         mem: &dyn record::Memory,
         handles: &[u64],
         p: &'static crate::process::Process,
-    ) {
+    ) -> u64 {
         let mut submit = replay::Submit {
             mark: self.record.mark(),
             ..replay::Submit::default()
@@ -998,6 +1275,7 @@ impl Host {
         let mut sampler_pool = 0;
         let mut seen = std::collections::HashSet::new();
         let mut want = roots.clone();
+        let mut arena = Vec::new();
         let mut snapshots: std::collections::HashMap<u64, std::sync::Arc<replay::ListSnapshot>> =
             std::collections::HashMap::new();
         while let Some(handle) = want.pop() {
@@ -1007,8 +1285,11 @@ impl Host {
             let Some(list) = self.record.list(handle).cloned() else {
                 continue;
             };
+            if list.arena {
+                arena.push(handle);
+            }
             let Some(snapshot) =
-                replay::ListSnapshot::capture(mem, &self.record, handle, list.bytes)
+                replay::ListSnapshot::capture(mem, &self.record, handle, list.bytes, list.cmdbuf)
             else {
                 self.fail_keyed(
                     "submit-list-unmapped",
@@ -1016,6 +1297,9 @@ impl Host {
                 );
                 continue;
             };
+            // A list that continues a chunk the driver ended under its internal pointer needs that chunk in the
+            // snapshot too: the walker replays it before this list's records (`record::List::chained`).
+            want.extend(list.chained.iter().copied());
             let bytes = snapshot.bytes.clone();
             let mut callers = Vec::new();
             for chunk in bytes.as_chunks::<{ record::RECORD_SIZE as usize }>().0 {
@@ -1118,7 +1402,11 @@ impl Host {
             .get(&sampler_pool)
             .and_then(|pool| self.descriptor_table(pool))
             .unwrap_or(0);
-        replay::submit(p, submit);
+        let serial = replay::submit(p, submit);
+        if serial != 0 && !arena.is_empty() {
+            self.retiring.push_back((serial, arena));
+        }
+        serial
     }
 
     /// Guest address of a descriptor pool's table. The driver writes TIC/TSC entries into the memory pool the game
@@ -1191,6 +1479,15 @@ impl Host {
                 self.command_memory.remove(&cmdbuf);
                 self.write_field.remove(&cmdbuf);
                 self.implicit_dead.remove(&cmdbuf);
+                replay::reset_state(cmdbuf);
+                // Chunks waiting for a handle stay in `pending` (the driver may still report one on this buffer),
+                // but they release their arena slot: a buffer that is set up again or torn down must not pin chunks
+                // forever. A recycled slot is caught by the generation check when the handle finally arrives.
+                if let Some(pending) = self.pending.get(&cmdbuf).cloned() {
+                    for (key, _) in pending {
+                        self.record.unpin(key);
+                    }
+                }
 
                 // The driver owns the header and its timestamp/callback state; we only place records through it.
                 return Ok(Outcome::Driver);
@@ -1222,7 +1519,7 @@ impl Host {
                     return Ok(Outcome::Driver);
                 }
                 if let Some(p) = self.process {
-                    self.submit_lists(mem, &handles, p);
+                    self.last_submit = self.submit_lists(mem, &handles, p);
                 }
                 return Ok(Outcome::Host(0));
             }
@@ -1346,6 +1643,16 @@ impl Host {
             }
             BindUniformBuffer => {
                 let mut record = record::Record::new(record::Op::BindUniformBuffer);
+                record.set_word(0, a[3]);
+                record.set_word(1, a[4]);
+                record.set_int(0, a[1] as u32 as i32);
+                record.set_int(1, a[2] as u32 as i32);
+                self.record.emit(mem, cmdbuf, record)?;
+                0
+            }
+            BindStorageBuffer => {
+                // `nvnCommandBufferBindStorageBuffer(cmd, stage, index, GPU address, size)`.
+                let mut record = record::Record::new(record::Op::BindStorageBuffer);
                 record.set_word(0, a[3]);
                 record.set_word(1, a[4]);
                 record.set_int(0, a[1] as u32 as i32);
@@ -1509,8 +1816,11 @@ impl Host {
     ///
     /// Some `EndRecording` calls return the driver's internal pointer, tagged above the 40-bit GPU space; no game
     /// call can name that value, so its records are kept until a later `EndRecording` on the same buffer reports a
-    /// GPU handle and are dropped then (`record::is_handle`). A buffer whose list had no recorded command gets an
-    /// empty list, so a submit that names its handle still resolves instead of falling back to the driver.
+    /// GPU handle, and that list then continues them (`record::Recorder::chain`). Keeping the chunks is what makes
+    /// the window pass work: the driver ends its render-target and bind chunk under the internal pointer and records
+    /// the draw that follows into the next one, and the draw is only correct with the state that precedes it. A
+    /// buffer whose list had no recorded command gets an empty list, so a submit that names its handle still
+    /// resolves instead of falling back to the driver.
     fn finish_implicit(
         &mut self,
         memory: &dyn record::Memory,
@@ -1534,24 +1844,54 @@ impl Host {
             None
         };
         if !record::is_handle(handle) {
-            // Not a handle any game call can name: keep the records for the handle that follows.
+            // Not a handle any game call can name: keep the chunk, in recording order, for the list that follows.
             if let Some(key) = closed
-                && let Some(old) = self.pending.insert(cmdbuf, key)
+                && let Some(generation) = self.record.generation(key)
             {
-                self.record.drop_list(old);
+                self.record.pin(key);
+                self.pending
+                    .entry(cmdbuf)
+                    .or_default()
+                    .push((key, generation));
             }
             return;
         }
-        let key = match (closed, self.pending.remove(&cmdbuf)) {
-            (Some(key), Some(old)) => {
-                // A list closed under the internal pointer and the game's handle arrived right after: the records
-                // belong to that handle, and the empty list we would have made here is not needed.
-                self.record.drop_list(old);
+        let waiting = self.pending.remove(&cmdbuf).unwrap_or_default();
+        for (key, _) in &waiting {
+            self.record.unpin(*key);
+        }
+        // A slot the arena handed out again is not the chunk the host kept: it is dropped, not chained.
+        let pending: Vec<u64> = waiting
+            .iter()
+            .filter_map(|(key, generation)| {
+                (self.record.generation(*key) == Some(*generation)).then_some(*key)
+            })
+            .collect();
+        if pending.len() != waiting.len() {
+            self.fail_keyed(
+                "implicit-recycled",
+                format!(
+                    "nvn record: implicit list at {handle:#x}: {} of {} waiting chunk(s) took their arena slot back",
+                    waiting.len() - pending.len(),
+                    waiting.len()
+                ),
+            );
+        }
+        let key = match (closed, pending.is_empty()) {
+            (Some(key), true) => key,
+            (Some(key), false) => {
+                self.chain_chunks(key, &pending, handle);
                 key
             }
-            (Some(key), None) => key,
-            (None, Some(old)) => old,
-            (None, None) => match self
+            (None, false) => {
+                // The handle names the last chunk re-reported by the driver; the ones before it are its prefix.
+                let (successor, prefix) = pending.split_last().expect("pending is not empty");
+                if !prefix.is_empty() {
+                    self.chain_chunks(*successor, prefix, handle);
+                }
+                *successor
+            }
+            (None, true) => match self
                 .record
                 .begin_arena(memory, cmdbuf)
                 .and_then(|_| self.record.end_arena(memory, cmdbuf))
@@ -1571,6 +1911,45 @@ impl Host {
                 "implicit-refile",
                 format!("nvn record: implicit list at {handle:#x} could not be filed"),
             );
+        }
+    }
+
+    /// Makes `pending` the prefix of `key`, in recording order. A chain that cannot be formed (a chunk already
+    /// retired, or the replay's nesting limit) is reported and the chunks are dropped: the list is still filed, so
+    /// the submit resolves instead of becoming a driver submit, which is the fallback this path had before.
+    fn chain_chunks(&mut self, key: u64, pending: &[u64], handle: u64) -> bool {
+        match self.record.chain(key, pending) {
+            Ok(()) => true,
+            Err(error) => {
+                for old in pending {
+                    self.record.drop_list(*old);
+                }
+                self.fail_keyed(
+                    "implicit-chain",
+                    format!(
+                        "nvn record: implicit list at {handle:#x}: {error:?}; its {} chunk(s) are dropped",
+                        pending.len()
+                    ),
+                );
+                false
+            }
+        }
+    }
+
+    /// Retires the arena lists a submit captured, once its replay is done. The queued snapshot owns their records
+    /// while it runs (`CONTRACT.md` §7), and the arena space goes back to the slot rotation instead of growing with
+    /// the frame count. One submit of slack: this title's frame N+1 records `CallCommands` that name frame N's lists,
+    /// and those calls resolve when N+1 is submitted, a little after N's replay. A later submit that still names one
+    /// of them is a handle the host no longer records, which stays with the driver.
+    fn retire_replayed(&mut self, serial: u64) {
+        const GRACE: u64 = 1;
+        while let Some((queued, keys)) = self.retiring.front() {
+            if queued.saturating_add(GRACE) > serial {
+                return;
+            }
+            let keys = keys.clone();
+            self.retiring.pop_front();
+            self.record.retire_replayed(&keys);
         }
     }
 
@@ -1961,6 +2340,17 @@ mod tests {
             "nvnSamplerBuilderSetBorderColour",
             "nvnSamplerInitialize",
             "nvnSamplerFinalize",
+            "nvnWindowBuilderSetDefaults",
+            "nvnWindowBuilderSetTextures",
+            "nvnWindowBuilderSetNumActiveTextures",
+            "nvnWindowBuilderSetPresentInterval",
+            "nvnWindowInitialize",
+            "nvnWindowFinalize",
+            "nvnWindowSetCrop",
+            "nvnWindowSetPresentInterval",
+            "nvnWindowSetNumActiveTextures",
+            "nvnQueuePresentTexture",
+            "nvnWindowPresentTexture",
         ] {
             assert!(proc(name).is_some(), "{name} is not hosted");
         }
@@ -1991,6 +2381,7 @@ mod tests {
             "nvnCommandBufferBindVertexStreamState",
             "nvnCommandBufferBindTexture",
             "nvnCommandBufferBindUniformBuffer",
+            "nvnCommandBufferBindStorageBuffer",
             "nvnCommandBufferSetSamplerPool",
             "nvnCommandBufferDrawArrays",
             "nvnCommandBufferDrawArraysInstanced",
@@ -2715,5 +3106,248 @@ mod tests {
         assert!(host.record.list(storage).is_none(), "filed, not duplicated");
         assert_eq!(host.record.usage().implicit, 1);
         assert!(!host.record.is_recording(CMD));
+    }
+
+    /// Adds command memory to a fresh host and returns its fake memory, the setup every implicit-list test needs.
+    fn implicit_setup() -> (super::record::FakeMemory, Host) {
+        use super::record::FakeMemory;
+
+        const GUEST: u64 = 0x1_0000_0000;
+        const GPU: u64 = 0x2_0000_0000;
+        const CMD: u64 = GUEST + 0x100;
+        const POOL: u64 = 0x1000;
+        const SIZE: u64 = 0x8000;
+
+        let mem = FakeMemory::new(GUEST, SIZE);
+        let mut host = Host::default();
+        host.objects.make(
+            POOL,
+            Object::Pool(Pool {
+                storage: GUEST,
+                size: SIZE,
+                gpu: GPU,
+                ..Pool::default()
+            }),
+        );
+        host.ranges.register(GPU, SIZE, POOL).expect("GPU range");
+        let v = [[0u64; 2]; 32];
+        let mut a = [0u64; 31];
+        (a[0], a[1], a[2], a[3]) = (CMD, POOL, 0x1000, 0x6000);
+        assert_eq!(
+            host.recording(CommandProc::AddCommandMemory, &mem, &a, &v),
+            Ok(Outcome::Driver)
+        );
+        (mem, host)
+    }
+
+    #[test]
+    fn a_chunk_closed_under_the_internal_pointer_is_chained_into_the_next_handle() {
+        const CMD: u64 = 0x1_0000_0100;
+        let (mem, mut host) = implicit_setup();
+        let v = [[0u64; 2]; 32];
+
+        // The driver ends the window pass's bind chunk under its internal pointer: no game call can name it.
+        let mut program = [0u64; 31];
+        (program[0], program[1]) = (CMD, 0x7100);
+        assert_eq!(
+            host.recording(CommandProc::BindProgram, &mem, &program, &v),
+            Ok(Outcome::Driver)
+        );
+        host.finish_implicit(&mem, CMD, 1 << 40, true);
+        let pending = host.pending.get(&CMD).cloned().expect("chunk kept");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            host.record.generation(pending[0].0),
+            Some(pending[0].1),
+            "the host remembers the generation of the chunk it keeps"
+        );
+        assert!(host.record.list(pending[0].0).is_some());
+
+        // The draw that follows is recorded into the next chunk, which ends under a handle the game submits.
+        let mut draw = [0u64; 31];
+        (draw[0], draw[1], draw[2], draw[3]) = (CMD, 4, 0x1_0000_1000, 3);
+        assert_eq!(
+            host.recording(CommandProc::DrawArrays, &mem, &draw, &v),
+            Ok(Outcome::Driver)
+        );
+        host.finish_implicit(&mem, CMD, 0x20_0000_0000, true);
+
+        let list = host
+            .record
+            .list(0x20_0000_0000)
+            .expect("the handle resolves");
+        assert_eq!(
+            list.chained,
+            [pending[0].0],
+            "the bind chunk precedes the draw"
+        );
+        assert_eq!(list.draws, 1);
+        let chunk = host.record.list(pending[0].0).expect("the chunk is kept");
+        assert_eq!((chunk.records, chunk.arena), (3, true));
+        assert!(!host.pending.contains_key(&CMD), "the chunk was consumed");
+        assert_eq!(host.failures, 0);
+    }
+
+    #[test]
+    fn a_chunk_that_cannot_be_chained_is_reported_and_the_list_still_files() {
+        const CMD: u64 = 0x1_0000_0100;
+        let (mem, mut host) = implicit_setup();
+        let v = [[0u64; 2]; 32];
+
+        let mut program = [0u64; 31];
+        (program[0], program[1]) = (CMD, 0x7100);
+        host.recording(CommandProc::BindProgram, &mem, &program, &v)
+            .expect("bind");
+        host.finish_implicit(&mem, CMD, 1 << 40, true);
+        let pending = host.pending.remove(&CMD).expect("chunk kept");
+        // The chunk was retired before the handle arrived (a slot rotation, or a buffer being finalized).
+        for (key, _) in &pending {
+            host.record.drop_list(*key);
+        }
+        host.pending.insert(CMD, pending);
+
+        let mut draw = [0u64; 31];
+        (draw[0], draw[1], draw[2], draw[3]) = (CMD, 4, 0x1_0000_1000, 3);
+        host.recording(CommandProc::DrawArrays, &mem, &draw, &v)
+            .expect("draw");
+        host.finish_implicit(&mem, CMD, 0x20_0000_0000, true);
+
+        let list = host
+            .record
+            .list(0x20_0000_0000)
+            .expect("the fallback still files the list");
+        assert!(list.chained.is_empty());
+        assert_eq!(list.draws, 1);
+        assert_eq!(host.failures, 1);
+        assert!(
+            host.seen_failures.contains("implicit-recycled"),
+            "the chunk that cannot be chained is reported: {:?}",
+            host.seen_failures
+        );
+        assert_eq!(host.record.usage().implicit, 2);
+    }
+
+    fn window_texture(host: u64, format: u32, width: u32, height: u32) -> Texture {
+        Texture {
+            host,
+            gpu: 0x2_0000_0000,
+            pool: 0x1000,
+            offset: 0,
+            flags: 0,
+            target: 1,
+            format,
+            width,
+            height,
+            depth: 1,
+            layers: 1,
+            levels: 1,
+            samples: 1,
+            stride: 0,
+            packaged: 0,
+            swizzle: super::super::textures::DEFAULT_SWIZZLE,
+            storage_size: u64::from(width) * u64::from(height) * 4,
+            alignment: 0x100,
+            block_height_log2: 4,
+        }
+    }
+
+    /// A window at `address` whose textures are `textures`, the way `WindowBuilderSetTextures` plus `WindowInitialize`
+    /// leaves it.
+    fn add_window(host: &mut Host, address: u64, textures: &[u64]) {
+        let mut builder = window::Builder::default();
+        builder.set_textures(textures);
+        host.windows.insert(address, Window::from_builder(&builder));
+    }
+
+    #[test]
+    fn a_present_resolves_the_window_texture_and_its_crop() {
+        use super::super::window::Crop;
+        let mut host = Host::default();
+        add_window(&mut host, 0x1000, &[0x2000]);
+        host.objects.make(
+            0x2000,
+            Object::Texture(window_texture(0x1_0000, 0x1d, 1920, 1080)),
+        );
+        host.windows.get_mut(&0x1000).unwrap().crop = Some(Crop {
+            x: 320,
+            y: 180,
+            width: 1280,
+            height: 720,
+        });
+        host.last_submit = 7;
+        let target = host.present_target(0x1000, 0).expect("the target resolves");
+        assert_eq!(target.cpu, 0x1_0000);
+        assert_eq!(target.format, 0x1d);
+        assert_eq!((target.width, target.height), (1920, 1080));
+        assert_eq!(
+            target.crop,
+            window::Rect {
+                x: 320,
+                y: 180,
+                width: 1280,
+                height: 720
+            }
+        );
+        assert_eq!(target.serial, 7);
+    }
+
+    #[test]
+    fn a_present_of_something_unrecorded_stays_with_the_driver() {
+        use super::super::window::Fallback;
+        let mut host = Host::default();
+        assert_eq!(host.present_target(0x9999, 0), Err(Fallback::UnknownWindow));
+        add_window(&mut host, 0x1000, &[0x2000]);
+        host.last_submit = 7;
+        // The window names 0x2000, but no such texture reached the host table.
+        assert_eq!(
+            host.present_target(0x1000, 0),
+            Err(Fallback::UnknownTexture)
+        );
+        assert_eq!(
+            host.present_target(0x1000, 1),
+            Err(Fallback::IndexOutsideWindow)
+        );
+        // Each fallback is reported once per cause, and the present is counted as the driver's.
+        host.note_fallback(Fallback::UnknownTexture);
+        host.note_fallback(Fallback::UnknownTexture);
+        assert_eq!(host.presents.fallback, 2);
+        assert_eq!(host.failures, 1);
+    }
+
+    #[test]
+    fn a_present_waits_for_a_replayed_submit_and_is_not_shown_twice() {
+        use super::super::window::Fallback;
+        use crate::gpu::vulkan::Presented;
+        let mut host = Host::default();
+        add_window(&mut host, 0x1000, &[0x2000]);
+        host.objects.make(
+            0x2000,
+            Object::Texture(window_texture(0x1_0000, 0x1d, 1280, 720)),
+        );
+        // Nothing has been replayed yet: the driver's frame is the only one.
+        assert_eq!(
+            host.present_target(0x1000, 0),
+            Err(Fallback::NoReplayedSubmit)
+        );
+        host.last_submit = 1;
+        assert!(host.present_target(0x1000, 0).is_ok());
+        host.note_present(0x1000, 1, Presented::Shown);
+        assert_eq!(host.presents.replayed, 1);
+        assert_eq!(host.presents.fallback, 0);
+        // A second present of the same submit has no frame of its own; the driver keeps it.
+        assert_eq!(
+            host.present_target(0x1000, 0),
+            Err(Fallback::NoReplayedSubmit)
+        );
+        // A replayed present without a swapchain is still a frame, credited through the same counter.
+        host.last_submit = 2;
+        host.note_present(0x1000, 2, Presented::NoSwapchain);
+        assert_eq!(host.presents.no_swapchain, 1);
+        assert_eq!(host.presented.get(&0x1000), Some(&2));
+        // No image for the texture: the driver keeps the frame.
+        host.last_submit = 3;
+        host.note_present(0x1000, 3, Presented::NoImage);
+        assert_eq!(host.presents.fallback, 1);
+        assert_eq!(host.presented.get(&0x1000), Some(&2));
     }
 }

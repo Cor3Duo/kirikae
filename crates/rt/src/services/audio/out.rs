@@ -70,11 +70,73 @@ struct State {
     volume: f32,
 }
 
+impl State {
+    /// `AudioOutState_Started` is 0 and `AudioOutState_Stopped` is 1 on Horizon.
+    fn state(&self) -> u32 {
+        if self.started { STARTED } else { STOPPED }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Buffer {
     tag: u64,
     samples: u64,
     size: u64,
+}
+
+impl Buffer {
+    /// `AudioOutBuffer` is the 0x28-byte block `AppendAudioOutBuffer` sends: the
+    /// PCM pointer at +0x08, its capacity at +0x10, the data size at +0x18 and
+    /// the offset inside the buffer at +0x20.
+    fn parse(tag: u64, info: &[u8]) -> Buffer {
+        let word = |i: usize| {
+            info.get(i * 8..i * 8 + 8)
+                .map_or(0, |b| u64::from_le_bytes(b.try_into().unwrap()))
+        };
+        Buffer {
+            tag,
+            samples: word(1) + word(4),
+            size: word(3),
+        }
+    }
+}
+
+/// The tag the client gets back is the address of the `AudioOutBuffer` struct it
+/// appended, because `GetAudioOutBufferDataPointer` dereferences it (+0x08 holds
+/// the PCM pointer). The input buffer is that struct, so its address is the
+/// contract; the raw parameter some clients also send is only redundant.
+fn append_tag(req: &Request) -> u64 {
+    req.in_buf(0).map_or(0, |b| b.addr)
+}
+
+/// Build the `GetReleasedAudioOutBuffers` reply: the count goes in the reply
+/// body and the out buffer receives the 8-byte tags. Every entry of the out
+/// buffer is written, zero-filled when fewer buffers were released, because the
+/// SDK returns its first entry unconditionally and the guest would dereference
+/// whatever stale stack value it found there.
+///
+/// A tag whose struct is no longer readable is dropped instead of handed to the
+/// guest: the service only reports buffers it can still see in guest memory.
+fn released_buffers(
+    released: &mut VecDeque<u64>,
+    out_size: u64,
+    readable: impl Fn(u64) -> bool,
+) -> (u32, Vec<u8>) {
+    let capacity = (out_size / 8) as usize;
+    let mut tags = Vec::with_capacity(out_size as usize);
+    let mut count = 0;
+    while count < capacity {
+        let Some(tag) = released.pop_front() else {
+            break;
+        };
+        if !readable(tag) {
+            continue;
+        }
+        tags.extend_from_slice(&tag.to_le_bytes());
+        count += 1;
+    }
+    tags.resize(out_size as usize, 0);
+    (count as u32, tags)
 }
 
 struct AudioOut {
@@ -92,7 +154,7 @@ impl Service for AudioOut {
         let p = c.process();
         let mut s = self.state.lock().unwrap();
         match req.cmd {
-            0 => Reply::ok().u32(if s.started { STARTED } else { STOPPED }),
+            0 => Reply::ok().u32(s.state()),
             1 => {
                 s.started = true;
                 Reply::ok()
@@ -102,21 +164,17 @@ impl Service for AudioOut {
                 Reply::ok()
             }
             3 | 7 => {
+                let tag = append_tag(req);
                 let Some(info) = req
                     .in_buf(0)
                     .and_then(|b| p.memory.read(b.addr, b.size.min(BUFFER_INFO)))
                 else {
                     return Reply::ok();
                 };
-                let word = |i: usize| {
-                    info.get(i * 8..i * 8 + 8)
-                        .map_or(0, |b| u64::from_le_bytes(b.try_into().unwrap()))
-                };
-                s.queued.push_back(Buffer {
-                    tag: req.u64(0),
-                    samples: word(1) + word(4),
-                    size: word(3),
-                });
+                if tag == 0 {
+                    return Reply::ok();
+                }
+                s.queued.push_back(Buffer::parse(tag, &info));
                 Reply::ok()
             }
             4 => Reply::ok().copy_handle(self.event),
@@ -124,15 +182,11 @@ impl Service for AudioOut {
                 let Some(out) = req.out_buf(0) else {
                     return Reply::ok().u32(0);
                 };
-                let n = ((out.size / 8) as usize).min(s.released.len());
-                let mut tags: Vec<u8> = s
-                    .released
-                    .drain(..n)
-                    .flat_map(|t| t.to_le_bytes())
-                    .collect();
-                tags.resize(out.size as usize, 0);
+                let (count, tags) = released_buffers(&mut s.released, out.size, |tag| {
+                    p.memory.read(tag, BUFFER_INFO).is_some()
+                });
                 p.memory.write(out.addr, &tags);
-                Reply::ok().u32(n as u32)
+                Reply::ok().u32(count)
             }
             6 => {
                 let tag = req.u64(0);
@@ -230,4 +284,159 @@ fn start_playback(p: &'static Process, out: Arc<AudioOut>) {
                 p.set_event(out.event, true);
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::Buf;
+
+    const BUFFER_SIZE: usize = 0x28;
+
+    /// Flat guest memory for the contract tests: the same read/write shape the
+    /// runtime gives the service, without a whole process.
+    struct Ram(Mutex<Vec<u8>>);
+
+    impl Ram {
+        fn new(size: usize) -> Ram {
+            Ram(Mutex::new(vec![0u8; size]))
+        }
+
+        fn read(&self, addr: u64, len: u64) -> Option<Vec<u8>> {
+            let memory = self.0.lock().unwrap();
+            let at = usize::try_from(addr).ok()?;
+            memory.get(at..at + len as usize).map(<[u8]>::to_vec)
+        }
+
+        fn write(&self, addr: u64, bytes: &[u8]) -> bool {
+            let mut memory = self.0.lock().unwrap();
+            let Some(at) = usize::try_from(addr).ok() else {
+                return false;
+            };
+            let Some(dst) = memory.get_mut(at..at + bytes.len()) else {
+                return false;
+            };
+            dst.copy_from_slice(bytes);
+            true
+        }
+
+        fn u64(&self, addr: u64) -> u64 {
+            u64::from_le_bytes(self.read(addr, 8).unwrap().try_into().unwrap())
+        }
+    }
+
+    fn audio_out_buffer(
+        data: u64,
+        buffer_size: u64,
+        data_size: u64,
+        data_offset: u64,
+    ) -> [u8; BUFFER_SIZE] {
+        let mut bytes = [0u8; BUFFER_SIZE];
+        bytes[0x08..0x10].copy_from_slice(&data.to_le_bytes());
+        bytes[0x10..0x18].copy_from_slice(&buffer_size.to_le_bytes());
+        bytes[0x18..0x20].copy_from_slice(&data_size.to_le_bytes());
+        bytes[0x20..0x28].copy_from_slice(&data_offset.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn append_uses_the_buffer_struct_address_as_the_tag() {
+        let req = Request {
+            cmd: 7,
+            x: vec![Buf {
+                addr: 0x0010_4078_5480,
+                size: BUFFER_INFO,
+            }],
+            ..Request::default()
+        };
+        assert_eq!(append_tag(&req), 0x0010_4078_5480);
+        assert_eq!(append_tag(&Request::default()), 0);
+    }
+
+    #[test]
+    fn the_audio_out_state_word_matches_horizon() {
+        assert_eq!((STARTED, STOPPED), (0, 1));
+        assert_eq!(State::default().state(), STOPPED);
+        let mut state = State {
+            started: true,
+            ..State::default()
+        };
+        assert_eq!(state.state(), STARTED);
+        state.started = false;
+        assert_eq!(state.state(), STOPPED);
+    }
+
+    #[test]
+    fn an_empty_release_writes_zeroes_to_every_entry() {
+        // The SDK returns entry 0 of the array without looking at the count, so
+        // leaving the entry untouched hands the guest a stale stack value.
+        let mut released = VecDeque::new();
+        let (count, bytes) = released_buffers(&mut released, 0x40, |_| true);
+        assert_eq!(count, 0);
+        assert_eq!(bytes, vec![0u8; 0x40]);
+    }
+
+    #[test]
+    fn a_released_buffer_comes_back_as_its_struct_pointer() {
+        let mut released = VecDeque::from([0x0010_4078_5480u64]);
+        let (count, bytes) = released_buffers(&mut released, 0x40, |_| true);
+        assert_eq!(count, 1);
+        assert_eq!(&bytes[..8], &0x0010_4078_5480u64.to_le_bytes());
+        assert!(
+            bytes[8..].iter().all(|&b| b == 0),
+            "unused entries are zero, not stale stack"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_struct_is_not_handed_back() {
+        let mut released = VecDeque::from([0x1000u64, 0x2000u64]);
+        let (count, bytes) = released_buffers(&mut released, 0x10, |tag| tag == 0x2000);
+        assert_eq!(count, 1);
+        assert_eq!(&bytes[..8], &0x2000u64.to_le_bytes());
+        assert_eq!(&bytes[8..], &[0u8; 8]);
+    }
+
+    #[test]
+    fn the_reply_stops_at_the_out_buffer_capacity() {
+        let mut released = VecDeque::from([1u64, 2, 3]);
+        let (count, bytes) = released_buffers(&mut released, 0x10, |_| true);
+        assert_eq!(count, 2);
+        assert_eq!(released, VecDeque::from([3u64]));
+        assert_eq!(bytes.len(), 0x10);
+    }
+
+    #[test]
+    fn a_synthetic_guest_reads_the_data_pointer_through_the_released_pointer() {
+        let guest = Ram::new(0x1_0000);
+        let (object, pcm) = (0x1000u64, 0x8000u64);
+        assert!(guest.write(object, &audio_out_buffer(pcm, 0x1000, 0x800, 0x10)));
+        let info = guest.read(object, BUFFER_INFO).unwrap();
+
+        let mut state = State {
+            started: true,
+            ..State::default()
+        };
+        state.queued.push_back(Buffer::parse(object, &info));
+        let queued = state.queued.pop_front().unwrap();
+        assert_eq!(
+            (queued.samples, queued.size),
+            (pcm + 0x10, 0x800),
+            "the played range starts at buffer + data_offset and spans data_size"
+        );
+        state.released.push_back(queued.tag);
+
+        let (count, reply) = released_buffers(&mut state.released, 0x40, |tag| {
+            guest.read(tag, BUFFER_INFO).is_some()
+        });
+        assert_eq!(count, 1);
+        let out = 0x2000;
+        assert!(guest.write(out, &reply));
+
+        // nn::audio::GetReleasedAudioOutBuffer returns entry 0 as an
+        // AudioOutBuffer*, then GetAudioOutBufferDataPointer reads +0x08.
+        let returned = guest.u64(out);
+        assert_eq!(returned, object);
+        assert_eq!(guest.u64(returned + 8), pcm);
+    }
 }

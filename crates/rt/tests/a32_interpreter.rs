@@ -176,6 +176,204 @@ fn cond_branch(cond: u32, offset: u32) -> u32 {
     (cond << 28) | 0x0A00_0000 | (offset & 0x00FF_FFFF)
 }
 
+// --- Encodings of the media, extra load/store, multiply and system classes ---------
+// The words below are assembled from the ARM ARM encodings, like the ones above.
+
+/// `uxtb`/`sxth`/`uxtb16`/... with an optional `ror #rotate` (0, 8, 16 or 24).
+fn extend(group: u32, rd: u32, rn: u32, rm: u32, rotate: u32) -> u32 {
+    0xE600_0000
+        | (group << 20)
+        | (rn << 16)
+        | (rd << 12)
+        | ((rotate / 8) << 10)
+        | (0b0111 << 4)
+        | rm
+}
+
+fn rev(rd: u32, rm: u32) -> u32 {
+    0xE6BF_0F30 | (rd << 12) | rm
+}
+
+fn rev16(rd: u32, rm: u32) -> u32 {
+    0xE6BF_0FB0 | (rd << 12) | rm
+}
+
+fn revsh(rd: u32, rm: u32) -> u32 {
+    0xE6FF_0FB0 | (rd << 12) | rm
+}
+
+fn rbit(rd: u32, rm: u32) -> u32 {
+    0xE6FF_0F30 | (rd << 12) | rm
+}
+
+fn clz(rd: u32, rm: u32) -> u32 {
+    0xE16F_0F10 | (rd << 12) | rm
+}
+
+fn pkhbt(rd: u32, rn: u32, rm: u32, imm5: u32) -> u32 {
+    0xE680_0000 | (rn << 16) | (rd << 12) | (imm5 << 7) | 0x10 | rm
+}
+
+fn pkhtb(rd: u32, rn: u32, rm: u32, imm5: u32) -> u32 {
+    0xE680_0000 | (rn << 16) | (rd << 12) | (imm5 << 7) | 0x50 | rm
+}
+
+fn sel(rd: u32, rn: u32, rm: u32) -> u32 {
+    0xE680_0000 | (rn << 16) | (rd << 12) | (0xF << 8) | 0xB0 | rm
+}
+
+/// One of the six parallel groups with one of the six selectors.
+fn parallel(group: u32, selector: u32, rd: u32, rn: u32, rm: u32) -> u32 {
+    0xE600_0000 | (group << 20) | (rn << 16) | (rd << 12) | (0xF << 8) | (selector << 4) | rm
+}
+
+fn qadd(kind: u32, rd: u32, rm: u32, rn: u32) -> u32 {
+    // 0 = qadd, 1 = qsub, 2 = qdadd, 3 = qdsub.
+    let double = kind >> 1;
+    let subtract = kind & 1;
+    (0xE100_0000 | (double << 22) | (subtract << 21) | (rn << 16) | (rd << 12) | 0x50) | rm
+}
+
+fn ssat(rd: u32, width: u32, rm: u32, imm5: u32, asr: bool) -> u32 {
+    let sat = width - 1;
+    0xE600_0000
+        | ((0b01010 | (sat >> 4)) << 20)
+        | ((sat & 0xF) << 16)
+        | (rd << 12)
+        | (imm5 << 7)
+        | (u32::from(asr) << 6)
+        | 0x10
+        | rm
+}
+
+fn usat(rd: u32, width: u32, rm: u32) -> u32 {
+    0xE600_0000 | ((0b01110 | (width >> 4)) << 20) | ((width & 0xF) << 16) | (rd << 12) | 0x10 | rm
+}
+
+fn ssat16(rd: u32, width: u32, rm: u32) -> u32 {
+    let sat = width - 1;
+    0xE600_0000
+        | ((0b01010 | (sat >> 4)) << 20)
+        | ((sat & 0xF) << 16)
+        | (rd << 12)
+        | (0xF << 8)
+        | 0x30
+        | rm
+}
+
+fn usat16(rd: u32, width: u32, rm: u32) -> u32 {
+    0xE600_0000
+        | ((0b01110 | (width >> 4)) << 20)
+        | ((width & 0xF) << 16)
+        | (rd << 12)
+        | (0xF << 8)
+        | 0x30
+        | rm
+}
+
+fn bfc(rd: u32, lsb: u32, width: u32) -> u32 {
+    0xE7C0_0000 | ((lsb + width - 1) << 16) | (rd << 12) | (lsb << 7) | 0x10 | 0xF
+}
+
+fn bfi(rd: u32, rn: u32, lsb: u32, width: u32) -> u32 {
+    0xE7C0_0000 | ((lsb + width - 1) << 16) | (rd << 12) | (lsb << 7) | 0x10 | rn
+}
+
+fn sbfx(rd: u32, rn: u32, lsb: u32, width: u32) -> u32 {
+    0xE7A0_0000 | ((width - 1) << 16) | (rd << 12) | (lsb << 7) | 0x50 | rn
+}
+
+fn ubfx(rd: u32, rn: u32, lsb: u32, width: u32) -> u32 {
+    0xE7E0_0000 | ((width - 1) << 16) | (rd << 12) | (lsb << 7) | 0x50 | rn
+}
+
+fn ldrh(rt: u32, rn: u32, imm: u32) -> u32 {
+    0xE1D0_00B0 | (rn << 16) | (rt << 12) | ((imm >> 4) << 8) | (imm & 0xF)
+}
+
+fn strh(rt: u32, rn: u32, imm: u32) -> u32 {
+    0xE1C0_00B0 | (rn << 16) | (rt << 12) | ((imm >> 4) << 8) | (imm & 0xF)
+}
+
+fn ldrsb(rt: u32, rn: u32, imm: u32) -> u32 {
+    0xE1D0_00D0 | (rn << 16) | (rt << 12) | ((imm >> 4) << 8) | (imm & 0xF)
+}
+
+fn ldrsh(rt: u32, rn: u32, imm: u32) -> u32 {
+    0xE1D0_00F0 | (rn << 16) | (rt << 12) | ((imm >> 4) << 8) | (imm & 0xF)
+}
+
+fn ldrd(rt: u32, rn: u32, imm: u32) -> u32 {
+    0xE1C0_00D0 | (rn << 16) | (rt << 12) | ((imm >> 4) << 8) | (imm & 0xF)
+}
+
+fn strd(rt: u32, rn: u32, imm: u32) -> u32 {
+    0xE1C0_00F0 | (rn << 16) | (rt << 12) | ((imm >> 4) << 8) | (imm & 0xF)
+}
+
+fn ldrex(rt: u32, rn: u32) -> u32 {
+    0xE190_0F90 | (rn << 16) | (rt << 12) | 0xF
+}
+
+fn strex(rd: u32, rt: u32, rn: u32) -> u32 {
+    0xE180_0F90 | (rn << 16) | (rd << 12) | rt
+}
+
+fn long_multiply(rdlo: u32, rdhi: u32, rm: u32, rs: u32, signed: bool, accumulate: bool) -> u32 {
+    0xE080_0000
+        | (u32::from(signed) << 22)
+        | (u32::from(accumulate) << 21)
+        | (rdhi << 16)
+        | (rdlo << 12)
+        | (rs << 8)
+        | 0x90
+        | rm
+}
+
+fn smulxy(rd: u32, rm: u32, rs: u32, x: bool, y: bool) -> u32 {
+    0xE160_0000 | (rd << 16) | (u32::from(y) << 6) | (u32::from(x) << 5) | (rs << 8) | 0x80 | rm
+}
+
+fn smlaxy(rd: u32, rm: u32, rs: u32, ra: u32, x: bool, y: bool) -> u32 {
+    0xE100_0000
+        | (rd << 16)
+        | (ra << 12)
+        | (rs << 8)
+        | (u32::from(y) << 6)
+        | (u32::from(x) << 5)
+        | 0x80
+        | rm
+}
+
+fn smlalxy(rdlo: u32, rdhi: u32, rm: u32, rs: u32, x: bool, y: bool) -> u32 {
+    0xE140_0000
+        | (rdhi << 16)
+        | (rdlo << 12)
+        | (rs << 8)
+        | (u32::from(y) << 6)
+        | (u32::from(x) << 5)
+        | 0x80
+        | rm
+}
+
+fn smlawb(rd: u32, rm: u32, rs: u32, ra: u32) -> u32 {
+    0xE120_0000 | (rd << 16) | (ra << 12) | (rs << 8) | 0x80 | rm
+}
+
+fn mrs(rd: u32) -> u32 {
+    0xE10F_0000 | (rd << 12)
+}
+
+fn msr(rm: u32) -> u32 {
+    0xE128_F000 | rm
+}
+
+const NOP: u32 = 0xE320_F000;
+const YIELD: u32 = 0xE320_F001;
+const WFE: u32 = 0xE320_F002;
+const WFI: u32 = 0xE320_F003;
+const SEV: u32 = 0xE320_F004;
+
 struct Program {
     code: Vec<u32>,
     labels: HashMap<&'static str, usize>,
@@ -257,6 +455,7 @@ impl Program {
         Executable {
             modules: vec![Module {
                 name: "main".into(),
+                module_id: [0; 32],
                 image: Image {
                     base: BASE,
                     memory,
@@ -412,6 +611,32 @@ fn loads_and_stores_cover_every_addressing_mode() {
 }
 
 #[test]
+fn byte_and_halfword_transfers_touch_only_their_width() {
+    let mut p = Program::new();
+    p.mov_imm(0, DATA as u32);
+    p.mov_imm(1, 0xAABB_CCDD);
+    p.push(str_imm(1, 0, 0));
+    p.mov_imm(2, 0x5A);
+    p.push(strb_imm(2, 0, 1));
+    p.push(ldr_imm(3, 0, 0));
+    p.expect_eq(3, 0xAABB_5ADD, 1);
+    p.push(ldrb_imm(4, 0, 3));
+    p.expect_eq(4, 0xAA, 2);
+
+    p.mov_imm(5, 0x1122_3344);
+    p.push(str_imm(5, 0, 4));
+    p.mov_imm(6, 0x1234);
+    p.push(strh(6, 0, 6));
+    p.push(ldr_imm(7, 0, 4));
+    p.expect_eq(7, 0x1234_3344, 3);
+    p.push(ldrh(8, 0, 4));
+    p.expect_eq(8, 0x3344, 4);
+
+    p.exit_ok();
+    assert_eq!(run(&p.finish(&[])), 0);
+}
+
+#[test]
 fn block_transfers_order_and_write_back() {
     let mut p = Program::new();
     p.mov_imm(0, DATA as u32);
@@ -544,9 +769,9 @@ fn pc_reads_as_the_address_plus_eight() {
 
 #[test]
 fn rejected_instruction_stops_with_a_clean_report() {
-    // `uxtb r1, r1`: allocated, media/parallel class, outside the slice.
+    // `smlad r0, r1, r2, r3`: a media multiply-accumulate form outside the slice.
     let mut p = Program::new();
-    p.push(0xE6EF_1071);
+    p.push(0xE700_0211);
     p.exit_ok();
     assert_eq!(run(&p.finish(&[])), 2, "a fatal interpreter stop exits 2");
 }
@@ -556,6 +781,335 @@ fn thumb_branch_stops_with_a_clean_report() {
     let mut p = Program::new();
     p.push(movs_imm(0, 3)); // bit 0 selects Thumb
     p.push(bx(0));
+    p.exit_ok();
+    assert_eq!(run(&p.finish(&[])), 2);
+}
+
+#[test]
+fn media_extend_reverse_pack_and_select() {
+    let mut p = Program::new();
+    p.mov_imm(0, 0x1234_5678);
+    p.push(extend(0b01110, 1, 0xF, 0, 0)); // uxtb
+    p.push(extend(0b01111, 2, 0xF, 0, 0)); // uxth
+    p.push(extend(0b01010, 3, 0xF, 0, 0)); // sxtb
+    p.push(extend(0b01011, 4, 0xF, 0, 0)); // sxth
+    p.expect_eq(1, 0x78, 1);
+    p.expect_eq(2, 0x5678, 2);
+    p.expect_eq(3, 0x78, 3);
+    p.expect_eq(4, 0x5678, 4);
+
+    // A rotated operand and the signed 16-bit extraction.
+    p.mov_imm(5, 0x0000_8081);
+    p.push(extend(0b01110, 6, 0xF, 5, 8)); // uxtb r6, r5, ror #8 -> 0x80
+    p.push(extend(0b01000, 7, 0xF, 5, 0)); // sxtb16 r7, r5
+    p.push(extend(0b01100, 8, 0xF, 5, 0)); // uxtb16 r8, r5
+    p.expect_eq(6, 0x80, 5);
+    p.expect_eq(7, 0x0000_ff81, 6);
+    p.expect_eq(8, 0x81, 7);
+
+    // The accumulating form adds the extension to the first source.
+    p.mov_imm(0, 0x1122_3344);
+    p.mov_imm(1, 0x80);
+    p.push(extend(0b01010, 2, 0, 1, 0)); // sxtab r2, r0, r1
+    p.expect_eq(2, 0x1122_32c4, 8);
+
+    p.mov_imm(9, 0x1234_5678);
+    p.push(rev(10, 9));
+    p.push(rev16(11, 9));
+    p.expect_eq(10, 0x7856_3412, 9);
+    p.expect_eq(11, 0x3412_7856, 10);
+    p.push(revsh(1, 9));
+    p.push(rbit(2, 9));
+    p.expect_eq(1, 0x0000_7856, 11);
+    p.expect_eq(2, 0x1e6a_2c48, 12);
+    p.mov_imm(3, 1);
+    p.push(clz(4, 3));
+    p.expect_eq(4, 31, 13);
+    p.mov_imm(3, 0x8000_0000);
+    p.push(clz(5, 3));
+    p.expect_eq(5, 0, 14);
+
+    p.mov_imm(6, 0x1234_5678);
+    p.mov_imm(7, 0xaabb_ccdd);
+    p.push(pkhbt(8, 6, 7, 8));
+    p.push(pkhtb(9, 6, 7, 8));
+    p.expect_eq(8, 0xbbcc_5678, 15);
+    p.expect_eq(9, 0x1234_bbcc, 16);
+
+    // `asr #0` in `pkhtb` is a shift by 32.
+    p.push(pkhtb(10, 6, 7, 0));
+    p.expect_eq(10, 0x1234_ffff, 17);
+
+    p.exit_ok();
+    assert_eq!(run(&p.finish(&[])), 0);
+}
+
+#[test]
+fn parallel_arithmetic_and_the_ge_flags() {
+    let mut p = Program::new();
+    p.mov_imm(0, 0x0001_7fff);
+    p.mov_imm(1, 0x0002_0001);
+    // The six signed forms: add16, asx, sax, sub16, add8, sub8.
+    for (index, selector) in [1u32, 3, 5, 7, 9, 0xF].iter().enumerate() {
+        p.push(parallel(0b00001, *selector, 2 + index as u32, 0, 1));
+    }
+    p.expect_eq(2, 0x0003_8000, 1);
+    p.expect_eq(3, 0x0002_7ffd, 2);
+    p.expect_eq(4, 0x0000_8001, 3);
+    p.expect_eq(5, 0xffff_7ffe, 4);
+    p.expect_eq(6, 0x0003_7f00, 5);
+    p.expect_eq(7, 0x00ff_7ffe, 6);
+
+    // Unsigned, saturating and halving 16-bit additions.
+    p.push(parallel(0b00101, 1, 8, 0, 1));
+    p.push(parallel(0b00110, 1, 9, 0, 1));
+    p.push(parallel(0b00111, 1, 10, 0, 1));
+    p.push(parallel(0b00011, 1, 11, 0, 1));
+    p.expect_eq(8, 0x0003_8000, 7);
+    p.expect_eq(9, 0x0003_8000, 8);
+    p.expect_eq(10, 0x0001_4000, 9);
+    p.expect_eq(11, 0x0001_4000, 10);
+
+    // Only the byte-wide forms write GE; `sel` reads it per byte.
+    p.mov_imm(0, 0x0000_00ff);
+    p.mov_imm(1, 0x0000_0001);
+    p.push(parallel(0b00101, 9, 2, 0, 1)); // uadd8: only byte 0 carries out
+    p.expect_eq(2, 0, 11);
+    p.mov_imm(3, 0x1122_3344);
+    p.mov_imm(4, 0xaabb_ccdd);
+    p.push(sel(5, 3, 4));
+    p.expect_eq(5, 0xaabb_cc44, 12);
+
+    // usub8 sets GE[i] when the unsigned difference is not negative.
+    p.mov_imm(6, 0x0001_7fff);
+    p.mov_imm(7, 0x0002_0001);
+    p.push(parallel(0b00101, 0xF, 8, 6, 7));
+    p.expect_eq(8, 0x00ff_7ffe, 13);
+    p.push(sel(9, 3, 4));
+    p.expect_eq(9, 0x11bb_3344, 14);
+
+    p.exit_ok();
+    assert_eq!(run(&p.finish(&[])), 0);
+}
+
+#[test]
+fn saturate_bitfield_and_scalar_saturating_arithmetic() {
+    let mut p = Program::new();
+    p.mov_imm(0, 0x7fff_ffff);
+    p.push(ssat(1, 8, 0, 0, false));
+    p.push(usat(2, 8, 0));
+    p.push(ssat(3, 8, 0, 8, true));
+    p.expect_eq(1, 0x7f, 1);
+    p.expect_eq(2, 0xff, 2);
+    p.expect_eq(3, 0x7f, 3);
+
+    // The Q flag is set by a saturating `ssat`; extract it with `ubfx`.
+    p.push(mrs(4));
+    p.push(ubfx(5, 4, 27, 1));
+    p.expect_eq(5, 1, 4);
+
+    p.mov_imm(6, 0x1234_5678);
+    p.push(ssat16(7, 8, 6));
+    p.push(usat16(8, 8, 6));
+    p.expect_eq(7, 0x007f_007f, 5);
+    p.expect_eq(8, 0x00ff_00ff, 6);
+
+    p.mov_imm(9, 0xffff_ffff);
+    p.push(bfc(9, 4, 8));
+    p.expect_eq(9, 0xffff_f00f, 7);
+    p.push(bfi(9, 6, 4, 8));
+    p.expect_eq(9, 0xffff_f78f, 8);
+    p.push(sbfx(10, 6, 4, 8));
+    p.push(ubfx(11, 6, 8, 4));
+    p.expect_eq(10, 0x67, 9);
+    p.expect_eq(11, 0x6, 10);
+
+    p.mov_imm(0, 0x7fff_ffff);
+    p.mov_imm(1, 1);
+    p.push(qadd(0, 2, 0, 1)); // qadd r2, r0, r1
+    p.push(qadd(1, 3, 0, 1)); // qsub r3, r0, r1
+    p.expect_eq(2, 0x7fff_ffff, 11);
+    p.expect_eq(3, 0x7fff_fffe, 12);
+    p.mov_imm(0, 0x4000_0000);
+    p.push(qadd(2, 4, 0, 1)); // qdadd r4, r0, r1
+    p.push(qadd(3, 5, 0, 1)); // qdsub r5, r0, r1
+    p.expect_eq(4, 0x4000_0002, 13);
+    p.expect_eq(5, 0x3fff_fffe, 14);
+
+    // The parallel saturating forms saturate silently: Q is not affected.
+    p.mov_imm(0, 0);
+    p.push(msr(0));
+    p.mov_imm(6, 0x0000_7fff);
+    p.mov_imm(7, 0x0000_0002);
+    p.push(parallel(0b00010, 1, 8, 6, 7)); // qadd16 r8, r6, r7
+    p.expect_eq(8, 0x0000_7fff, 15);
+    p.push(mrs(9));
+    p.push(ubfx(10, 9, 27, 1));
+    p.expect_eq(10, 0, 16);
+
+    p.exit_ok();
+    assert_eq!(run(&p.finish(&[])), 0);
+}
+
+#[test]
+fn extra_loads_stores_pairs_and_exclusives() {
+    let mut p = Program::new();
+    p.mov_imm(0, DATA as u32);
+    p.mov_imm(1, 0xaabb_ccdd);
+    p.push(str_imm(1, 0, 0));
+    p.push(ldrh(2, 0, 2));
+    p.push(ldrsb(3, 0, 3));
+    p.push(ldrsh(4, 0, 0));
+    p.expect_eq(2, 0xaabb, 1);
+    p.expect_eq(3, 0xffff_ffaa, 2);
+    p.expect_eq(4, 0xffff_ccdd, 3);
+
+    p.mov_imm(5, 0x1234);
+    p.push(strh(5, 0, 4));
+    p.push(ldr_imm(6, 0, 4));
+    p.expect_eq(6, 0x1234, 4);
+
+    p.push(ldrd(7, 0, 0));
+    p.expect_eq(7, 0xaabb_ccdd, 5);
+    p.expect_eq(8, 0x0000_1234, 6);
+
+    p.mov_imm(9, 0x5566_7788);
+    p.mov_imm(10, 0x99aa_bbcc);
+    p.push(strd(9, 0, 8));
+    p.push(ldrd(1, 0, 8));
+    p.expect_eq(1, 0x5566_7788, 7);
+    p.expect_eq(2, 0x99aa_bbcc, 8);
+
+    // The exclusive monitor remembers the loaded value, so the first store succeeds
+    // and the second one, without a new `ldrex`, reports failure.
+    p.push(ldrex(3, 0));
+    p.expect_eq(3, 0xaabb_ccdd, 9);
+    p.mov_imm(4, 0x1122_3344);
+    p.push(strex(5, 4, 0));
+    p.expect_eq(5, 0, 10);
+    p.push(ldr_imm(6, 0, 0));
+    p.expect_eq(6, 0x1122_3344, 11);
+    p.push(strex(7, 4, 0));
+    p.expect_eq(7, 1, 12);
+
+    p.exit_ok();
+    assert_eq!(run(&p.finish(&[])), 0);
+}
+
+#[test]
+fn long_halfword_multiplies_and_system_registers() {
+    let mut p = Program::new();
+    p.mov_imm(0, 0xffff_ffff);
+    p.mov_imm(1, 0xffff_ffff);
+    p.push(long_multiply(2, 3, 0, 1, false, false)); // umull r2, r3
+    p.push(long_multiply(4, 5, 0, 1, true, false)); // smull r4, r5
+    p.expect_eq(2, 1, 1);
+    p.expect_eq(3, 0xffff_fffe, 2);
+    p.expect_eq(4, 1, 3);
+    p.expect_eq(5, 0, 4);
+
+    p.mov_imm(6, 2);
+    p.push(long_multiply(2, 3, 0, 1, false, true)); // umlal r2, r3
+    p.push(long_multiply(4, 5, 0, 1, true, true)); // smlal r4, r5
+    p.expect_eq(2, 2, 5);
+    p.expect_eq(3, 0xffff_fffc, 6);
+    p.expect_eq(4, 2, 7);
+    p.expect_eq(5, 0, 8);
+
+    // Halfword multiplies: Rm = 0x0002ffff, Rs = 0x00030004.
+    p.mov_imm(7, 0x0002_ffff);
+    p.mov_imm(8, 0x0003_0004);
+    p.push(smulxy(9, 7, 8, false, false)); // bottom * bottom: -1 * 4
+    p.push(smulxy(10, 7, 8, false, true)); // bottom * top: -1 * 3
+    p.push(smulxy(11, 7, 8, true, true)); // top * top: 2 * 3
+    p.expect_eq(9, 0xffff_fffc, 9);
+    p.expect_eq(10, 0xffff_fffd, 10);
+    p.expect_eq(11, 6, 11);
+    p.push(smlaxy(9, 7, 8, 6, false, false)); // -4 + 2
+    p.expect_eq(9, 0xffff_fffe, 12);
+
+    // `smlawb` adds the accumulator before the 16-bit shift.
+    p.mov_imm(0, 0xffff_ffff);
+    p.mov_imm(1, 1);
+    p.mov_imm(2, 0);
+    p.push(smlawb(3, 0, 1, 2));
+    p.expect_eq(3, 0xffff_ffff, 13);
+
+    // `smlal<x><y>` accumulates the signed product into the pair.
+    p.mov_imm(0, 0);
+    p.mov_imm(1, 0);
+    p.push(smlalxy(0, 1, 7, 8, false, false));
+    p.expect_eq(0, 0xffff_fffc, 14);
+    p.expect_eq(1, 0xffff_ffff, 15);
+
+    // `smla<x><y>` sets Q when the 32-bit addition overflows.
+    p.mov_imm(0, 0x7fff);
+    p.mov_imm(1, 0x7fff);
+    p.mov_imm(2, 0x7fff_ffff);
+    p.push(smlaxy(3, 0, 1, 2, false, false));
+    p.expect_eq(3, 0xbfff_0000, 22);
+    p.push(mrs(4));
+    p.push(ubfx(5, 4, 27, 1));
+    p.expect_eq(5, 1, 23);
+
+    // `smlaw<y>` shifts a 64-bit sum and sets Q when the shifted value does not fit.
+    p.mov_imm(0, 0x7fff_ffff);
+    p.mov_imm(1, 0x7fff);
+    p.mov_imm(2, 0x7fff_ffff);
+    p.push(smlawb(3, 0, 1, 2));
+    p.expect_eq(3, 0xbfff_7ffe, 24);
+    p.push(mrs(4));
+    p.push(ubfx(5, 4, 27, 1));
+    p.expect_eq(5, 1, 25);
+
+    // `mrs` reports the modelled CPSR: user mode with the T bit clear.
+    p.push(mrs(0));
+    p.push(ubfx(1, 0, 0, 5));
+    p.expect_eq(1, 0x10, 16);
+
+    // `msr` of the flags byte writes NZCVQ ...
+    p.mov_imm(4, 0x8000_0000);
+    p.push(msr(4));
+    p.expect_cond(MI, 17);
+    p.expect_cond(NE, 18);
+    p.push(mrs(5));
+    p.push(ubfx(6, 5, 27, 1));
+    p.expect_eq(6, 0, 19);
+
+    // ... and leaves GE alone, so `sel` still sees the byte comparison.
+    p.mov_imm(0, 0x0000_00ff);
+    p.mov_imm(1, 0x0000_0001);
+    p.push(parallel(0b00101, 9, 2, 0, 1));
+    p.mov_imm(7, 0);
+    p.push(msr(7));
+    p.mov_imm(8, 0x1122_3344);
+    p.mov_imm(9, 0xaabb_ccdd);
+    p.push(sel(10, 8, 9));
+    p.expect_eq(10, 0xaabb_cc44, 20);
+
+    // The hints are no-ops the interpreter steps over.
+    p.push(NOP);
+    p.push(YIELD);
+    p.push(WFE);
+    p.push(WFI);
+    p.push(SEV);
+    p.expect_eq(10, 0xaabb_cc44, 21);
+
+    p.exit_ok();
+    assert_eq!(run(&p.finish(&[])), 0);
+}
+
+#[test]
+fn deprecated_and_privileged_encodings_stop_with_a_clean_report() {
+    // `swp r0, r1, [r2]` is architecturally deprecated and is rejected on purpose.
+    let mut p = Program::new();
+    p.push(0xE102_0092);
+    p.exit_ok();
+    assert_eq!(run(&p.finish(&[])), 2);
+
+    // `msr cpsr_c, r0` writes a control field, which needs the banked modes.
+    let mut p = Program::new();
+    p.push(0xE121_F000);
     p.exit_ok();
     assert_eq!(run(&p.finish(&[])), 2);
 }

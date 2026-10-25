@@ -43,9 +43,27 @@ impl Renderer {
                 self.images[k].gpu_dirty && aspect_of(k.format) == vk::ImageAspectFlags::COLOR
             })
         else {
+            self.note_present_miss(cpu, width, height);
             return Presented::NoImage;
         };
         self.present_image(key, width, height, flip_h, flip_v)
+    }
+
+    /// Explains the first present of an address the GPU never wrote to. Without
+    /// this the window just stays black and nothing in the log says why.
+    fn note_present_miss(&mut self, cpu: u64, width: u32, height: u32) {
+        if !self.present_misses.insert(cpu) {
+            return;
+        }
+        match self.find_image(cpu, width, height, vk::Format::R8G8B8A8_UNORM) {
+            Some(k) => eprintln!(
+                "kirikae: present: the image for {cpu:#x} ({:?} {}x{}) was never drawn to; the frame falls back to guest memory and the window can be black",
+                k.format, k.width, k.height
+            ),
+            None => eprintln!(
+                "kirikae: present: no image for {cpu:#x} {width}x{height}; the frame falls back to guest memory and the window can be black"
+            ),
+        }
     }
 
     pub fn present_pixels(&mut self, width: u32, height: u32, pixels: &[u32]) -> Presented {
@@ -96,9 +114,10 @@ impl Renderer {
         );
         let dump = crate::env_var!("KIRIKAE_PRESENT_DUMP")
             .filter(|_| self.stats.presents.is_multiple_of(60));
-        let readback = match (&dump, &self.swapchain) {
-            (Some(_), Some(sc)) if sc.extent.width > 0 => self
-                .readback_buffer(sc.extent.width as u64 * sc.extent.height as u64 * 4)
+        let capture = crate::gpu::capture::due();
+        let readback = match self.swapchain.as_ref().map(|sc| sc.extent) {
+            Some(extent) if (dump.is_some() || capture.is_some()) && extent.width > 0 => self
+                .readback_buffer(extent.width as u64 * extent.height as u64 * 4)
                 .map(|(b, _)| b),
             _ => None,
         };
@@ -263,7 +282,7 @@ impl Renderer {
         }
         let format = sc.format;
         self.stats.presents += 1;
-        if let (Some(dir), Some(_)) = (dump, readback) {
+        if readback.is_some() {
             self.finish();
             if let Some((_, memory, _, ptr)) = self.readback {
                 if !self.readback_coherent {
@@ -277,11 +296,23 @@ impl Renderer {
                     std::slice::from_raw_parts(ptr, (extent.width * extent.height * 4) as usize)
                 };
                 if let Some(pixels) = decode_pixels(format, bytes) {
-                    let path = std::path::Path::new(&dir)
-                        .join(format!("present{:06}.png", self.stats.presents));
-                    let _ = crate::display::write_png(&path, extent.width, extent.height, &pixels);
+                    if let Some(c) = capture.filter(|c| c.claim()) {
+                        let _ = c.write(c.frame(), extent.width, extent.height, &pixels);
+                    }
+                    if let Some(dir) = dump {
+                        let path = std::path::Path::new(&dir)
+                            .join(format!("present{:06}.png", self.stats.presents));
+                        let _ =
+                            crate::display::write_png(&path, extent.width, extent.height, &pixels);
+                    }
                 }
             }
+        }
+        if let Some(c) = capture.filter(|c| !c.done() && c.claim()) {
+            eprintln!(
+                "kirikae: capture: the swapchain image is not readable; capturing the image that was blitted"
+            );
+            self.capture_key(Some(key), width, height, c);
         }
         Presented::Shown
     }
@@ -427,7 +458,8 @@ impl Renderer {
             .swapchain
             .as_ref()
             .map_or(vk::SwapchainKHR::null(), |sc| sc.handle);
-        let readable = crate::env_var!("KIRIKAE_PRESENT_DUMP").is_some()
+        let readable = (crate::env_var!("KIRIKAE_PRESENT_DUMP").is_some()
+            || crate::env_var!("KIRIKAE_CAPTURE").is_some())
             && caps
                 .supported_usage_flags
                 .contains(vk::ImageUsageFlags::TRANSFER_SRC);

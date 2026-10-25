@@ -6,6 +6,7 @@ use crate::mem::GuestMemory;
 
 pub mod astc;
 pub mod buffer_cache;
+pub mod capture;
 pub mod compute;
 pub mod formats;
 pub mod fxhash;
@@ -439,7 +440,19 @@ impl Gpu {
 
     pub fn read_pixels(&self, cpu: u64, width: u32, height: u32) -> Option<Vec<u32>> {
         let mut guard = self.renderer.lock().unwrap();
-        guard.0.as_mut()?.read_pixels(cpu, width, height)
+        let r = guard.0.as_mut()?;
+        let pixels = r.read_pixels(cpu, width, height);
+        match &pixels {
+            Some(pixels) => {
+                if let Some(c) = capture::due().filter(|c| c.claim()) {
+                    let _ = c.write(c.frame(), width, height, pixels);
+                }
+            }
+            None => {
+                r.capture_presented(cpu, width, height);
+            }
+        }
+        pixels
     }
 
     pub fn present(
@@ -470,11 +483,13 @@ impl Gpu {
     }
 
     pub fn rendered(&self, cpu: u64, width: u32, height: u32) -> bool {
-        let guard = self.renderer.lock().unwrap();
-        guard
-            .0
-            .as_ref()
-            .is_some_and(|r| r.rendered(cpu, width, height))
+        let mut guard = self.renderer.lock().unwrap();
+        let Some(r) = guard.0.as_mut() else {
+            return false;
+        };
+        let rendered = r.rendered(cpu, width, height);
+        r.capture_presented(cpu, width, height);
+        rendered
     }
 
     pub fn dump_images(&self, dir: &std::path::Path, tag: u64) {

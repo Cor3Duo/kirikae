@@ -1,7 +1,7 @@
 #[cfg(feature = "h264")]
 use openh264::OpenH264API;
 #[cfg(feature = "h264")]
-use openh264::decoder::{DecodeOptions, Decoder as OpenH264, DecoderConfig, Flush};
+use openh264::decoder::{Decoder as OpenH264, DecoderConfig, Flush};
 #[cfg(feature = "h264")]
 use openh264::formats::YUVSource;
 
@@ -42,6 +42,9 @@ pub struct PictureInfo {
     pub weighted_bipred_idc: u32,
     pub output_surface: u32,
     pub frame_num: u32,
+    /// Picture order counts the hardware parsed from the slice, one per field.
+    /// For a frame picture the first entry is the display order of the picture.
+    pub field_order_cnt: [i32; 2],
     pub scaling_4x4: [[u8; 16]; 6],
     pub scaling_8x8: [[u8; 64]; 2],
     pub qpprime_y_zero_transform_bypass: bool,
@@ -94,6 +97,7 @@ impl PictureInfo {
             weighted_bipred_idc: field(32, 2),
             output_surface: field(34, 7),
             frame_num: field(46, 16),
+            field_order_cnt: [u32_at(b, 0xb8) as i32, u32_at(b, 0xbc) as i32],
             scaling_4x4,
             scaling_8x8,
             qpprime_y_zero_transform_bypass: u32_at(b, 0x2d0) & 2 != 0,
@@ -275,7 +279,20 @@ pub struct Decoder {
 #[cfg(feature = "h264")]
 impl Decoder {
     pub fn new() -> Result<Decoder, String> {
-        let config = DecoderConfig::new().flush_after_decode(Flush::Flush);
+        // Pictures are *not* flushed after every submission. `FlushFrame` keeps
+        // the flushed picture marked as a DPB reference (OpenH264 never drops it
+        // through the sliding window), so a flush per picture exhausts the
+        // `max_num_ref_frames + 2` picture buffer after a handful of GOPs: the
+        // decoder then reports ERR_INFO_REF_COUNT_OVERFLOW as dsOutOfMemory
+        // (16384) and every later call fails with dsNoParamSets (16).
+        //
+        // Without the flush the decoder emits the picture one submission later
+        // and in display order, and no references leak: 213 submissions of a
+        // 1920x1088 High stream with B-frames decode with no error. `None`
+        // therefore means "no picture this submission", not a lost frame. The
+        // caller matches each picture to the access unit that produced it by
+        // picture order count (`Nvdec` keeps the surface queue).
+        let config = DecoderConfig::new().flush_after_decode(Flush::NoFlush);
         let inner = OpenH264::with_api_config(OpenH264API::from_source(), config)
             .map_err(|e| format!("OpenH264: {e}"))?;
         Ok(Decoder {
@@ -302,8 +319,7 @@ impl Decoder {
             self.headers = headers;
         }
         packet.extend_from_slice(slices);
-        let options = DecodeOptions::new().flush_after_decode(Flush::Flush);
-        let yuv = match self.inner.decode_with_options(&packet, options) {
+        let yuv = match self.inner.decode(&packet) {
             Ok(Some(yuv)) => yuv,
             Ok(None) => return Ok(None),
             Err(e) => return Err(format!("H.264 picture not decoded: {e}")),
@@ -363,64 +379,33 @@ mod no_backend {
 }
 
 #[cfg(all(test, feature = "h264"))]
-mod tests {
+pub(crate) mod support {
     use super::*;
 
-    #[test]
-    fn exp_golomb() {
-        let mut w = BitWriter::default();
-        w.ue(0);
-        w.ue(3);
-        w.se(-2);
-        w.se(1);
-        let mut out = Vec::new();
-        w.nal(0x67, &mut out);
-        assert_eq!(out, [0, 0, 0, 1, 0x67, 0b1001_0000, 0b1010_1010]);
-    }
-
-    #[test]
-    fn emulation_prevention() {
-        let mut w = BitWriter::default();
-        w.u(0, 24);
-        w.u(1, 8);
-        let mut out = Vec::new();
-        w.nal(0x68, &mut out);
-        assert_eq!(out, [0, 0, 0, 1, 0x68, 0, 0, 3, 0, 1, 0x80]);
-    }
-
-    #[test]
-    fn flat_scaling_list() {
-        let mut w = BitWriter::default();
-        scaling_list(&mut w, &[16; 16], &ZIGZAG_4X4);
-        let mut out = Vec::new();
-        w.nal(0x68, &mut out);
-        assert_eq!(&out[5..], [0b0000_1000, 0b0111_1111, 0xff, 0x80]);
-    }
-
-    struct Bits<'a>(&'a [u8], usize);
+    pub(crate) struct Bits<'a>(pub(crate) &'a [u8], pub(crate) usize);
 
     impl Bits<'_> {
-        fn u(&mut self, n: usize) -> u32 {
+        pub(crate) fn u(&mut self, n: usize) -> u32 {
             (0..n).fold(0, |v, _| {
                 let b = (self.0[self.1 / 8] >> (7 - self.1 % 8)) & 1;
                 self.1 += 1;
                 v << 1 | b as u32
             })
         }
-        fn ue(&mut self) -> u32 {
+        pub(crate) fn ue(&mut self) -> u32 {
             let mut zeros = 0;
             while self.u(1) == 0 {
                 zeros += 1;
             }
             (1 << zeros) - 1 + self.u(zeros)
         }
-        fn se(&mut self) -> i32 {
+        pub(crate) fn se(&mut self) -> i32 {
             let v = self.ue() as i32;
             if v & 1 == 1 { (v + 1) / 2 } else { -v / 2 }
         }
     }
 
-    fn rbsp(nal: &[u8]) -> Vec<u8> {
+    pub(crate) fn rbsp(nal: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
         for &b in nal {
             if b == 3 && out.ends_with(&[0, 0]) {
@@ -431,7 +416,8 @@ mod tests {
         out
     }
 
-    fn setup_from(sps: &[u8], pps: &[u8]) -> PictureInfo {
+    /// Builds the picture setup the hardware would report for an SPS/PPS pair.
+    pub(crate) fn setup_from(sps: &[u8], pps: &[u8]) -> PictureInfo {
         let mut p = PictureInfo::parse(&[0; PICTURE_INFO_SIZE]);
         let sps = rbsp(sps);
         let mut r = Bits(&sps, 0);
@@ -475,20 +461,108 @@ mod tests {
         p
     }
 
+    /// Serializes a [`PictureInfo`] back into the NVDEC picture setup layout.
+    pub(crate) fn write_setup(p: &PictureInfo) -> Vec<u8> {
+        fn put(b: &mut [u8], off: usize, v: u32) {
+            b[off..off + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        let mut b = vec![0u8; PICTURE_INFO_SIZE];
+        put(&mut b, 0x48, p.bitstream_size);
+        put(&mut b, 0x4c, p.num_slices);
+        put(&mut b, 0x58, p.log2_max_pic_order_cnt_lsb_minus4);
+        put(&mut b, 0x5c, p.delta_pic_order_always_zero as u32);
+        put(&mut b, 0x60, p.frame_mbs_only as u32);
+        put(&mut b, 0x64, p.width_mbs);
+        put(&mut b, 0x68, p.height_mbs);
+        put(&mut b, 0x70, p.entropy_coding_mode as u32);
+        put(&mut b, 0x74, p.pic_order_present as u32);
+        put(&mut b, 0x78, p.num_ref_idx_l0_active_minus1);
+        put(&mut b, 0x7c, p.num_ref_idx_l1_active_minus1);
+        put(&mut b, 0x80, p.deblocking_filter_control_present as u32);
+        put(&mut b, 0x84, p.redundant_pic_cnt_present as u32);
+        put(&mut b, 0x88, p.transform_8x8_mode as u32);
+        put(&mut b, 0x9c, p.luma_frame_offset);
+        put(&mut b, 0xa8, p.chroma_frame_offset);
+        put(&mut b, 0xb8, p.field_order_cnt[0] as u32);
+        put(&mut b, 0xbc, p.field_order_cnt[1] as u32);
+        let mut flags = p.mb_adaptive_frame_field as u64;
+        flags |= (p.direct_8x8_inference as u64) << 1;
+        flags |= (p.weighted_pred as u64) << 2;
+        flags |= (p.constrained_intra_pred as u64) << 3;
+        flags |= 1 << 4; // IsReference
+        flags |= (p.field_pic as u64) << 5;
+        flags |= ((p.log2_max_frame_num_minus4 as u64) & 0xf) << 8;
+        flags |= ((p.chroma_format_idc as u64) & 3) << 12;
+        flags |= ((p.pic_order_cnt_type as u64) & 3) << 14;
+        flags |= ((p.pic_init_qp_minus26 as u32 as u64) & 0x3f) << 16;
+        flags |= ((p.chroma_qp_index_offset as u32 as u64) & 0x1f) << 22;
+        flags |= ((p.second_chroma_qp_index_offset as u32 as u64) & 0x1f) << 27;
+        flags |= ((p.weighted_bipred_idc as u64) & 3) << 32;
+        flags |= ((p.output_surface as u64) & 0x7f) << 34;
+        flags |= ((p.frame_num as u64) & 0xffff) << 46;
+        put(&mut b, 0xb0, flags as u32);
+        put(&mut b, 0xb4, (flags >> 32) as u32);
+        for (i, list) in p.scaling_4x4.iter().enumerate() {
+            b[0x1c0 + 16 * i..0x1d0 + 16 * i].copy_from_slice(list);
+        }
+        for (i, list) in p.scaling_8x8.iter().enumerate() {
+            b[0x220 + 64 * i..0x260 + 64 * i].copy_from_slice(list);
+        }
+        if p.qpprime_y_zero_transform_bypass {
+            put(&mut b, 0x2d0, 2);
+        }
+        b
+    }
+}
+
+#[cfg(all(test, feature = "h264"))]
+mod tests {
+    use super::support::setup_from;
+    use super::*;
+
     #[test]
-    fn rebuilt_parameter_sets_decode_like_the_originals() {
+    fn exp_golomb() {
+        let mut w = BitWriter::default();
+        w.ue(0);
+        w.ue(3);
+        w.se(-2);
+        w.se(1);
+        let mut out = Vec::new();
+        w.nal(0x67, &mut out);
+        assert_eq!(out, [0, 0, 0, 1, 0x67, 0b1001_0000, 0b1010_1010]);
+    }
+
+    #[test]
+    fn emulation_prevention() {
+        let mut w = BitWriter::default();
+        w.u(0, 24);
+        w.u(1, 8);
+        let mut out = Vec::new();
+        w.nal(0x68, &mut out);
+        assert_eq!(out, [0, 0, 0, 1, 0x68, 0, 0, 3, 0, 1, 0x80]);
+    }
+
+    #[test]
+    fn flat_scaling_list() {
+        let mut w = BitWriter::default();
+        scaling_list(&mut w, &[16; 16], &ZIGZAG_4X4);
+        let mut out = Vec::new();
+        w.nal(0x68, &mut out);
+        assert_eq!(&out[5..], [0b0000_1000, 0b0111_1111, 0xff, 0x80]);
+    }
+
+    fn encode_clip(w: usize, h: usize, count: usize) -> Vec<Vec<u8>> {
         use openh264::encoder::Encoder;
         use openh264::formats::{RgbSliceU8, YUVBuffer};
-        let (w, h) = (96usize, 64usize);
         let mut encoder = Encoder::new().unwrap();
-        let frames: Vec<Vec<u8>> = (0..4)
+        (0..count)
             .map(|t| {
                 let rgb: Vec<u8> = (0..w * h)
                     .flat_map(|i| {
                         [
                             (i % w * 2 + t * 9) as u8,
-                            (i / w * 3) as u8,
-                            (i * 7 % 251) as u8,
+                            (i / w * 3 + t * 5) as u8,
+                            (i * 7 + t * 13 % 251) as u8,
                         ]
                     })
                     .collect();
@@ -497,34 +571,106 @@ mod tests {
                     .unwrap()
                     .to_vec()
             })
-            .collect();
+            .collect()
+    }
+
+    fn slices_of(frame: &[u8]) -> Vec<u8> {
+        let nal_type = |n: &[u8]| n[n.iter().position(|&b| b == 1).unwrap() + 1] & 0x1f;
+        openh264::nal_units(frame)
+            .filter(|n| matches!(nal_type(n), 1 | 5))
+            .flatten()
+            .copied()
+            .collect()
+    }
+
+    fn parameter_setup(frame: &[u8]) -> PictureInfo {
         let nal_type = |n: &[u8]| n[n.iter().position(|&b| b == 1).unwrap() + 1] & 0x1f;
         let body = |n: &[u8]| n[n.iter().position(|&b| b == 1).unwrap() + 2..].to_vec();
-        let first: Vec<&[u8]> = openh264::nal_units(&frames[0]).collect();
-        let sps = body(first.iter().find(|n| nal_type(n) == 7).unwrap());
-        let pps = body(first.iter().find(|n| nal_type(n) == 8).unwrap());
-        let setup = setup_from(&sps, &pps);
+        let nals: Vec<&[u8]> = openh264::nal_units(frame).collect();
+        let sps = body(nals.iter().find(|n| nal_type(n) == 7).unwrap());
+        let pps = body(nals.iter().find(|n| nal_type(n) == 8).unwrap());
+        setup_from(&sps, &pps)
+    }
+
+    #[test]
+    fn rebuilt_parameter_sets_decode_like_the_originals() {
+        let (w, h) = (96usize, 64usize);
+        let frames = encode_clip(w, h, 4);
+        let setup = parameter_setup(&frames[0]);
+        // The reference is flushed per frame so each call returns the picture it
+        // decoded; ours is not flushed, so the picture arrives one submission
+        // later but is still the same picture.
         let mut reference = OpenH264::new().unwrap();
-        let mut ours = Decoder::new().unwrap();
+        let mut want = Vec::new();
         for frame in &frames {
-            let slices: Vec<u8> = openh264::nal_units(frame)
-                .filter(|n| matches!(nal_type(n), 1 | 5))
-                .flatten()
-                .copied()
+            let yuv = reference.decode(frame).unwrap().expect("reference picture");
+            let stride = yuv.strides().0;
+            let rows: Vec<u16> = (0..h)
+                .flat_map(|y| {
+                    yuv.y()[y * stride..y * stride + w]
+                        .iter()
+                        .map(|&v| v as u16)
+                })
                 .collect();
-            let want = reference.decode(frame).unwrap().expect("reference picture");
-            let got = ours.decode(&setup, &slices).unwrap().expect("picture");
-            assert_eq!((got.width, got.height), want.dimensions());
-            assert_eq!(got.bit_depth, BitDepth::Eight);
-            let stride = want.strides().0;
-            for y in 0..h {
-                let row: Vec<u16> = want.y()[y * stride..y * stride + w]
-                    .iter()
-                    .map(|&v| v as u16)
-                    .collect();
-                assert_eq!(&got.y[y * w..(y + 1) * w], &row[..], "row {y}");
+            want.push((yuv.dimensions(), rows));
+        }
+        assert_eq!(want.len(), frames.len());
+        let mut ours = Decoder::new().unwrap();
+        let mut got = Vec::new();
+        for frame in &frames {
+            if let Some(picture) = ours.decode(&setup, &slices_of(frame)).unwrap() {
+                got.push(picture);
             }
         }
+        assert_eq!(got.len(), frames.len() - 1, "one submission of latency");
+        for (i, (got, (dims, rows))) in got.iter().zip(&want).enumerate() {
+            assert_eq!((got.width, got.height), *dims, "picture {i}");
+            assert_eq!(got.bit_depth, BitDepth::Eight);
+            assert_eq!(&got.y[..], &rows[..], "picture {i}");
+        }
+    }
+
+    /// A flush after every picture makes OpenH264 keep each output marked as a
+    /// DPB reference. The picture buffer (`max_num_ref_frames + 2`) then runs
+    /// out after a few GOPs and every later decode fails with dsOutOfMemory
+    /// (16384) and then dsNoParamSets (16). Decoding a stream longer than the
+    /// buffer has to keep going.
+    #[test]
+    fn decodes_more_pictures_than_the_reference_buffer_holds() {
+        let frames = encode_clip(96, 64, 64);
+        assert!(frames.len() > 2 * (16 + 2), "needs more than one refill");
+        let setup = parameter_setup(&frames[0]);
+        let mut decoder = Decoder::new().unwrap();
+        let mut pictures = 0;
+        for (i, frame) in frames.iter().enumerate() {
+            let decoded = decoder
+                .decode(&setup, &slices_of(frame))
+                .unwrap_or_else(|e| panic!("frame {i}: {e}"));
+            if decoded.is_some() {
+                pictures += 1;
+            }
+        }
+        assert_eq!(pictures, frames.len() - 1);
+    }
+
+    #[test]
+    fn first_submission_only_primes_the_decoder() {
+        let frames = encode_clip(96, 64, 2);
+        let setup = parameter_setup(&frames[0]);
+        let mut decoder = Decoder::new().unwrap();
+        assert!(
+            decoder
+                .decode(&setup, &slices_of(&frames[0]))
+                .unwrap()
+                .is_none()
+        );
+        let picture = decoder
+            .decode(&setup, &slices_of(&frames[1]))
+            .unwrap()
+            .expect("the first picture comes out with the second submission");
+        assert_eq!((picture.width, picture.height), (96, 64));
+        // An empty submission asks for nothing and is not an error.
+        assert!(decoder.decode(&setup, &[]).unwrap().is_none());
     }
 
     #[test]

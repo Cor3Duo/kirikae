@@ -5,9 +5,69 @@ use super::textures::DERIVED;
 use super::tiling::deswizzle;
 use super::{Renderer, find_memory};
 use crate::gpu::Gpu;
+use crate::gpu::capture::Capture;
 use crate::mem::GuestMemory;
 
 impl Renderer {
+    /// Writes the image the guest presents at `cpu` when `KIRIKAE_CAPTURE` asks
+    /// for this frame. The image is read even when it was never drawn to, so a
+    /// missing target is captured as the black frame the player would see.
+    pub(crate) fn capture_presented(&mut self, cpu: u64, width: u32, height: u32) -> bool {
+        let Some(capture) = crate::gpu::capture::due() else {
+            return false;
+        };
+        let key = self.find_image(cpu, width, height, vk::Format::R8G8B8A8_UNORM);
+        self.capture_key(key, width, height, capture)
+    }
+
+    pub(super) fn capture_key(
+        &mut self,
+        key: Option<ImageKey>,
+        width: u32,
+        height: u32,
+        capture: &Capture,
+    ) -> bool {
+        if !capture.claim() {
+            return false;
+        }
+        let frame = capture.frame();
+        let Some(key) = key else {
+            eprintln!(
+                "kirikae: capture: no image for the presented target {width}x{height}; writing black"
+            );
+            let _ = capture.write_black(frame, width, height);
+            return true;
+        };
+        eprintln!(
+            "kirikae: capture: image {:#x} {:?} {}x{} (gpu_dirty {})",
+            key.cpu, key.format, key.width, key.height, self.images[&key].gpu_dirty
+        );
+        let Some(pixels) = self.read_image(key) else {
+            eprintln!(
+                "kirikae: capture: cannot read image {:#x} {:?} {}x{}; no file written",
+                key.cpu, key.format, key.width, key.height
+            );
+            return false;
+        };
+        let (w, h) = (key.width.min(width.max(1)), key.height.min(height.max(1)));
+        let cropped: Vec<u32> = if (w, h) == (key.width, key.height) {
+            pixels
+        } else {
+            let mut out = Vec::with_capacity((w * h) as usize);
+            for y in 0..h {
+                out.extend_from_slice(&pixels[(y * key.width) as usize..][..w as usize]);
+            }
+            out
+        };
+        match capture.write(frame, w, h, &cropped) {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!("kirikae: capture: cannot write the frame ({e})");
+                false
+            }
+        }
+    }
+
     pub fn read_pixels(&mut self, cpu: u64, width: u32, height: u32) -> Option<Vec<u32>> {
         let key = self.find_image(cpu, width, height, vk::Format::R8G8B8A8_UNORM)?;
         if !self.images[&key].gpu_dirty {

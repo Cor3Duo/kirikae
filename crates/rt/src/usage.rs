@@ -1085,6 +1085,8 @@ mod tests {
         assert!(is_missing("tex", &["tex"]));
         assert!(is_missing("tex", &["tex (bindless lod)"]));
         assert!(is_missing("tld", &["tld (multisample)"]));
+        assert!(is_missing("tld4", &["tld4 (per-texel offsets)"]));
+        assert!(!is_missing("tld4", &["tex (bindless)"]));
         assert!(!is_missing("tex", &["texs (unknown target)"]));
         assert!(!is_missing("tex", &["tld (multisample)"]));
         assert!(!is_missing("imad", &[]));

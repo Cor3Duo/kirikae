@@ -40,7 +40,8 @@
 //! [`PresentationClock::set_rate`]. Video the guest presents through NVN instead
 //! of VI never reaches this clock.
 //!
-//! Counters are printed with `KIRIKAE_STATS=1`.
+//! Counters are printed with `KIRIKAE_STATS=1`; they include the YUV layers VI
+//! queued, presented, dropped, converted to RGB and failed to convert.
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
@@ -60,7 +61,9 @@ const AUDIO_STALE: Duration = Duration::from_millis(500);
 const AUDIO_SOURCE_TIMEOUT: Duration = Duration::from_millis(250);
 /// How long a VIC output surface stays tagged as video.
 const SURFACE_TTL: Duration = Duration::from_secs(2);
-const SURFACES_MAX: usize = 16;
+/// A composed 4:2:0 surface tags its luma and both chroma planes, so a few
+/// compositions in flight need more slots than one tag each.
+const SURFACES_MAX: usize = 64;
 /// Video frames between `KIRIKAE_STATS` lines (about five seconds at 30 fps).
 const STATS_INTERVAL: u64 = 150;
 
@@ -119,6 +122,16 @@ pub struct Counters {
     pub dropped: u64,
     pub repeated: u64,
     pub discontinuities: u64,
+    /// YUV layers queued by VI.
+    pub yuv_queued: u64,
+    /// YUV layers that reached the display path.
+    pub yuv_presented: u64,
+    /// YUV layers VI dropped because the presentation clock was too far behind.
+    pub yuv_dropped: u64,
+    /// YUV layers decoded and converted to RGB for the swapchain.
+    pub converted: u64,
+    /// YUV layers queued but not presented (unsupported layout, unmapped buffer).
+    pub failed: u64,
     /// Drift of the last presented (or dropped) frame, in nanoseconds.
     pub drift_ns: i64,
     /// Largest absolute drift seen, in nanoseconds.
@@ -285,10 +298,42 @@ impl PresentationClock {
         self.counters.decoded += 1;
     }
 
+    /// Counts a YUV layer queued by VI.
+    pub fn yuv_queued(&mut self) {
+        self.counters.yuv_queued += 1;
+    }
+
+    /// Counts a YUV layer that reached the display path.
+    pub fn yuv_presented(&mut self) {
+        self.counters.yuv_presented += 1;
+    }
+
+    /// Counts a YUV layer the clock dropped as too late.
+    pub fn yuv_dropped(&mut self) {
+        self.counters.yuv_dropped += 1;
+    }
+
+    /// Counts a YUV layer that was converted to RGB for the swapchain.
+    pub fn converted(&mut self) {
+        self.counters.converted += 1;
+    }
+
+    /// Counts a YUV layer that could not be presented.
+    pub fn failed(&mut self) {
+        self.counters.failed += 1;
+    }
+
     /// Tags a VIC output surface as carrying video, so VI can gate an RGBA
     /// presentation that was composed from a YUV source.
     pub fn composed_surface(&mut self, base: u64, len: usize, now: Instant) {
         self.counters.composed += 1;
+        self.tag_video_surface(base, len, now);
+    }
+
+    /// Tags one plane of a composed surface without counting another
+    /// composition. Used for the chroma planes, which may live in a separate
+    /// mapping from the luma plane.
+    pub fn tag_video_surface(&mut self, base: u64, len: usize, now: Instant) {
         self.expire_surfaces(now);
         if self.surfaces.len() == SURFACES_MAX {
             self.surfaces.remove(0);
@@ -546,9 +591,39 @@ pub fn decoded() {
     lock().decoded();
 }
 
+/// Counts a YUV layer queued by VI.
+pub fn yuv_queued() {
+    lock().yuv_queued();
+}
+
+/// Counts a YUV layer that reached the display path.
+pub fn yuv_presented() {
+    lock().yuv_presented();
+}
+
+/// Counts a YUV layer dropped as too late.
+pub fn yuv_dropped() {
+    lock().yuv_dropped();
+}
+
+/// Counts a YUV layer converted to RGB for the swapchain.
+pub fn converted() {
+    lock().converted();
+}
+
+/// Counts a YUV layer that could not be presented.
+pub fn yuv_failed() {
+    lock().failed();
+}
+
 /// Tags a VIC output surface as video.
 pub fn composed_surface(base: u64, len: usize) {
     lock().composed_surface(base, len, Instant::now());
+}
+
+/// Tags one more plane of a composed surface.
+pub fn tag_video_surface(base: u64, len: usize) {
+    lock().tag_video_surface(base, len, Instant::now());
 }
 
 /// Whether `addr` is a surface VIC recently composed from a YUV source.
@@ -592,12 +667,13 @@ fn report(clock: &PresentationClock) {
         return;
     }
     let c = clock.counters();
-    let total = c.presented + c.dropped;
-    if total != 1 && !total.is_multiple_of(STATS_INTERVAL) {
+    let due = |n: u64| n != 0 && (n == 1 || n.is_multiple_of(STATS_INTERVAL));
+    let yuv = c.yuv_queued + c.yuv_presented + c.yuv_dropped + c.converted + c.failed;
+    if !due(c.presented + c.dropped) && !due(yuv) {
         return;
     }
     eprintln!(
-        "kirikae: av: {} decoded, {} composed, {} presented ({} early, {} late, {} dropped, {} repeated, {} seeks), drift {:.1} ms (max {:.1} ms), {} clock",
+        "kirikae: av: {} decoded, {} composed, {} presented ({} early, {} late, {} dropped, {} repeated, {} seeks), drift {:.1} ms (max {:.1} ms), {} clock; YUV {} queued, {} presented, {} dropped, {} converted, {} failed",
         c.decoded,
         c.composed,
         c.presented,
@@ -608,7 +684,12 @@ fn report(clock: &PresentationClock) {
         c.discontinuities,
         c.drift_ns as f64 / 1e6,
         c.max_drift_ns as f64 / 1e6,
-        clock.source()
+        clock.source(),
+        c.yuv_queued,
+        c.yuv_presented,
+        c.yuv_dropped,
+        c.converted,
+        c.failed
     );
 }
 
@@ -813,5 +894,33 @@ mod tests {
         assert!(!clock.is_video_surface(0x8000_1000, base));
         assert!(!clock.is_video_surface(0x8000_0000, at(base, 3_000_000_000)));
         assert_eq!(clock.counters().composed, 1);
+    }
+
+    #[test]
+    fn every_plane_of_a_composed_surface_is_tagged() {
+        let base = base();
+        let mut clock = PresentationClock::new();
+        clock.composed_surface(0x8000_0000, 0x100, base);
+        clock.tag_video_surface(0x9000_0000, 0x80, base);
+        assert!(clock.is_video_surface(0x8000_0000, base));
+        assert!(clock.is_video_surface(0x9000_0040, base));
+        // Tagging the chroma plane does not count a second composition.
+        assert_eq!(clock.counters().composed, 1);
+    }
+
+    #[test]
+    fn yuv_counters_track_the_video_path() {
+        let mut clock = PresentationClock::new();
+        clock.yuv_queued();
+        clock.yuv_presented();
+        clock.yuv_dropped();
+        clock.converted();
+        clock.failed();
+        let c = clock.counters();
+        assert_eq!(c.yuv_queued, 1);
+        assert_eq!(c.yuv_presented, 1);
+        assert_eq!(c.yuv_dropped, 1);
+        assert_eq!(c.converted, 1);
+        assert_eq!(c.failed, 1);
     }
 }

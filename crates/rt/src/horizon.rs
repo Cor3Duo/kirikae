@@ -1,11 +1,13 @@
 use std::io::Write;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use crate::arbiter;
 use crate::cpu::Cpu;
 use crate::kernel::{
-    ClientPort, CodeMemory, ConnectError, Event, GuestSession, KObject, NamedPortError, Port,
-    ResourceLimit, Session, SharedMapError, SharedMemory, SharedMemoryRole, TransferMemory,
+    ClientPort, CodeMemory, ConnectError, Event, GuestSession, KObject, KThread, NamedPortError,
+    Port, ResourceLimit, Session, SharedMapError, SharedMemory, SharedMemoryRole, ThreadContext,
+    TransferMemory,
 };
 use crate::mem::{ADDR_MASK, MirrorError, PAGE, PhysicalError, perm, state};
 use crate::process::Process;
@@ -26,6 +28,10 @@ pub const RESULT_INVALID_POINTER: u64 = 0xe601;
 pub const RESULT_BUSY: u64 = 0xf401;
 pub const RESULT_TOO_MANY_HANDLES: u64 = 0xee01;
 pub const RESULT_REMOTE_DEAD: u64 = 0xf601;
+pub const RESULT_OUT_OF_RANGE: u64 = 0xee01;
+pub const RESULT_INVALID_THREAD_ID: u64 = 0x40c01;
+pub const RESULT_INVALID_ID: u64 = 0x40e01;
+pub const RESULT_TERMINATION_REQUESTED: u64 = 0x7601;
 
 pub const ASLR_BASE: u64 = 0x0800_0000;
 pub const ASLR_SIZE: u64 = 0x7f_f800_0000;
@@ -165,6 +171,11 @@ fn dispatch(c: &mut Cpu, imm: u16) {
         0x34 => arbiter::wait_for_address(c),
         0x35 => arbiter::signal_to_address(c),
         0x37 => get_resource_limit_peak_value(c),
+        // `svcKernelDebug` (0x3C) and `svcChangeKernelTraceState` (0x3D) are
+        // void calls that the retail kernel stubs out: they neither return a
+        // result nor write guest memory. The runtime has no kernel trace
+        // buffer, so ignoring them is the documented behavior.
+        0x3c | 0x3d => {}
         0x40 => create_session(c),
         0x41 => accept_session(c),
         0x42 => reply_and_receive_light(c),
@@ -173,20 +184,54 @@ fn dispatch(c: &mut Cpu, imm: u16) {
         0x45 => threads::create_event(c),
         0x4b => create_code_memory(c),
         0x4c => control_code_memory(c),
+        0x4d => sleep_system(c),
         0x4e => read_write_register(c),
+        0x4f => set_process_activity(c),
         0x50 => create_shared_memory(c),
         0x51 => map_transfer_memory(c),
         0x52 => unmap_transfer_memory(c),
         0x53 => create_interrupt_event(c),
         0x54 => query_physical_address(c),
         0x5d..=0x5f => process_data_cache(c, imm),
+        // The debug SVCs that need a `KDebug` object to attach to, stop or
+        // touch another process keep the retail answers: a console without
+        // debug mode reports 0x4201 and one without a debug object reports an
+        // invalid handle. The calls that only observe or rewrite the caller's
+        // own process are served below (`debug_target`): the runtime is
+        // single-process and its host is also its debugger, so they expose the
+        // only process there is. Hardware breakpoints are recorded but never
+        // armed.
+        0x60 => debug_needs_debugger(c, "svcDebugActiveProcess"),
+        0x61 => debug_needs_debugger(c, "svcBreakDebugProcess"),
+        0x62 => debug_needs_debugger(c, "svcTerminateDebugProcess"),
+        0x63 => debug_needs_handle(c, "svcGetDebugEvent"),
+        0x64 => debug_needs_debugger(c, "svcContinueDebugEvent"),
+        0x65 => get_process_list(c),
+        0x66 => get_thread_list(c),
+        0x67 => get_debug_thread_context(c),
+        0x68 => set_debug_thread_context(c),
+        0x69 => debug_needs_handle(c, "svcQueryDebugProcessMemory"),
+        0x6a => debug_needs_handle(c, "svcReadDebugProcessMemory"),
+        0x6b => debug_needs_debugger(c, "svcWriteDebugProcessMemory"),
+        0x6c => set_hardware_break_point(c),
+        0x6d => get_debug_thread_param(c),
         0x6f => get_system_info(c),
         0x70 => create_port(c),
         0x71 => manage_named_port(c),
         0x72 => connect_to_port(c),
+        0x73 => set_process_memory_permission(c),
+        0x74 | 0x75 => map_unmap_process_memory(c, imm),
+        0x76 => query_process_memory(c),
+        0x77 | 0x78 => map_unmap_process_code_memory(c, imm),
+        0x79 => create_process(c),
+        0x7a => start_process(c),
+        0x7b => terminate_process(c),
         0x7c => get_process_info(c),
         0x7d => create_resource_limit(c),
         0x7e => set_resource_limit_limit_value(c),
+        0x7f => call_secure_monitor(c),
+        0x90 => map_insecure_physical_memory(c),
+        0x91 => unmap_insecure_physical_memory(c),
         0x1f => connect_to_named_port(c),
         0x20 | 0x21 => send_sync_request(c),
         0x22 => c.x[0] = crate::ipc::send_sync_request(c, c.x[2] as u32, c.x[0], c.x[1]),
@@ -221,9 +266,10 @@ fn dispatch(c: &mut Cpu, imm: u16) {
         // the same missing physical map and on an IOMMU, so they keep reporting
         // 0x4201 rather than handing out synthetic physical addresses.
         //
-        // The debug (0x60-0x6D) and multi-process calls (0x4F, 0x73-0x7B, and
-        // the 0x7F secure monitor) need debugger objects and a kernel process
-        // table; the runtime has one process and no attached debugger.
+        // 0x90/0x91 are the exception in the physical family: they allocate new
+        // guest pages, so they are served from the ASLR region as MemType_Insecure
+        // (see `map_insecure_physical_memory`). Nothing here invents device
+        // memory.
         _ => {
             c.process().warn_once(format!(
                 "svc {imm:#04x} is not implemented (first call from {})",
@@ -852,6 +898,15 @@ fn event_signal(c: &mut Cpu, signaled: bool) {
     };
 }
 
+fn release_transfer_memory(p: &Process, handle: u32, tmem: &TransferMemory) {
+    if !tmem.release(&p.memory) {
+        p.warn_once(format!(
+            "svcCloseHandle({handle:#x}): the transfer memory at {:#x} could not release its pages",
+            tmem.addr
+        ));
+    }
+}
+
 fn close_handle(c: &mut Cpu) {
     let handle = c.x[0] as u32;
     let p = c.process();
@@ -871,6 +926,12 @@ fn close_handle(c: &mut Cpu) {
             Some(KObject::Port(port)) => {
                 port.close();
                 crate::sched::wake(p);
+            }
+            // Transfer memory is a lease on the creator's pages: the last handle
+            // clears the lock and restores their state and permission, so the
+            // heap can adopt them again (the kernel does the same).
+            Some(KObject::TransferMemory(tmem)) => {
+                release_transfer_memory(p, handle, &tmem);
             }
             _ => {}
         }
@@ -1048,7 +1109,8 @@ fn unmap_shared_memory(c: &mut Cpu) {
 /// `svcCreateTransferMemory` (0x15): reprotects `addr..addr+size` with `perm`
 /// and marks it as a transfer memory, then returns the object in X1. The kernel
 /// keeps the pages with the creator, so they stay mapped and only their state
-/// and permission change; `svcMapTransferMemory` aliases them elsewhere.
+/// and permission change; `svcMapTransferMemory` aliases them elsewhere. The
+/// retag is a lease: closing the handle restores the pages (see `close_handle`).
 fn create_transfer_memory(c: &mut Cpu) {
     let (addr, size, perm) = (c.x[1], c.x[2], c.x[3] as u32);
     if !addr.is_multiple_of(PAGE) {
@@ -1068,11 +1130,14 @@ fn create_transfer_memory(c: &mut Cpu) {
         return;
     }
     let p = c.process();
-    if !p.memory.retag(addr, end, state::TRANSFER, perm, &LENDABLE) {
+    let Some(saved) = p
+        .memory
+        .retag_leased(addr, end, state::TRANSFER, perm, &LENDABLE)
+    else {
         c.x[0] = RESULT_INVALID_MEMORY_STATE;
         return;
-    }
-    let tmem = TransferMemory::new(addr, size, perm);
+    };
+    let tmem = TransferMemory::new(addr, size, perm, saved);
     let handle = p
         .handles
         .lock()
@@ -1432,6 +1497,13 @@ fn read_write_register(c: &mut Cpu) {
 
 fn query_memory(c: &mut Cpu) {
     let (out, addr) = (c.x[0], c.x[2]);
+    write_memory_info(c, out, addr);
+}
+
+/// The `MemoryInfo`/`PageInfo` pair `svcQueryMemory` (0x06) and
+/// `svcQueryProcessMemory` (0x76) report: a 0x28-byte `MemoryInfo` at `out` and
+/// the 32-bit `PageInfo` in W1 (the wrappers store it in their out pointer).
+fn write_memory_info(c: &mut Cpu, out: u64, addr: u64) {
     let r = c.process().memory.query(addr);
     let mut info = [0u8; 0x28];
     info[0..8].copy_from_slice(&r.range.start.to_le_bytes());
@@ -1533,6 +1605,613 @@ fn get_process_info(c: &mut Cpu) {
         return;
     }
     ok1(c, 2);
+}
+
+/// `svcSleepSystem` (0x4D) is a void call that asks the system to suspend. The
+/// runtime models no system power state and the host keeps running, so the
+/// request is reported once and dropped; there is no result code to return.
+fn sleep_system(c: &mut Cpu) {
+    c.process().warn_once(
+        "svcSleepSystem: the runtime has no system sleep state; the guest keeps running".into(),
+    );
+}
+
+/// `svcSetProcessActivity` (0x4F): W0 is a process handle and W1 the
+/// `ProcessActivity` (0 = none, 1 = runnable). The kernel validates the enum,
+/// resolves the handle and refuses the current process with `ResultBusy`; with
+/// one process and no debug handle for another, those three answers cover every
+/// call.
+fn set_process_activity(c: &mut Cpu) {
+    if c.x[1] > 1 {
+        c.x[0] = RESULT_INVALID_ENUM;
+        return;
+    }
+    if c.x[0] as u32 != CURRENT_PROCESS as u32 {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    }
+    c.x[0] = RESULT_BUSY;
+}
+
+/// The debug SVCs that require a `KDebug` object. A retail console only exposes
+/// them on development units and answers `0x4201` (`NotImplemented`) from an
+/// application; the runtime creates no such object, so it reports the same code
+/// instead of pretending to attach, stop or continue a process.
+fn debug_needs_debugger(c: &mut Cpu, name: &str) {
+    c.process()
+        .warn_once(format!("{name}: the runtime has no debug object"));
+    c.x[0] = RESULT_NOT_IMPLEMENTED;
+}
+
+/// Debug SVCs that take a debug handle but are not gated on debug mode on
+/// hardware: with no `KDebug` object, every handle is invalid.
+fn debug_needs_handle(c: &mut Cpu, name: &str) {
+    c.process().warn_once(format!(
+        "{name}: the runtime creates no debug objects, so the handle is invalid"
+    ));
+    c.x[0] = RESULT_INVALID_HANDLE;
+}
+
+/// The largest element count a process/thread list accepts. The kernel checks
+/// `0 <= max_out_count <= i32::MAX / sizeof(u64)` and reports `0xEE01`
+/// (`OutOfRange`) otherwise.
+const MAX_DEBUG_LIST: i32 = i32::MAX / 8;
+
+fn debug_list_max(c: &mut Cpu) -> Option<u64> {
+    let max = c.x[2] as i32;
+    if !(0..=MAX_DEBUG_LIST).contains(&max) {
+        c.x[0] = RESULT_OUT_OF_RANGE;
+        return None;
+    }
+    let max = max as u64;
+    let buffer = c.x[1];
+    if max > 0 && !c.process().memory.is_mapped(buffer, max * 8) {
+        c.x[0] = RESULT_INVALID_POINTER;
+        return None;
+    }
+    Some(max)
+}
+
+fn write_debug_list(c: &mut Cpu, buffer: u64, ids: &[u64], max: u64) {
+    let take = ids.len().min(max as usize);
+    let mut bytes = Vec::with_capacity(take * 8);
+    for id in &ids[..take] {
+        bytes.extend_from_slice(&id.to_le_bytes());
+    }
+    if take > 0 && !c.process().memory.write(buffer, &bytes) {
+        c.x[0] = RESULT_INVALID_POINTER;
+        return;
+    }
+    // The count is the total number of objects, not how many fit in the array.
+    ok1(c, ids.len() as u64);
+}
+
+/// `svcGetProcessList` (0x65): X1 is the output array, W2 its element count and
+/// W1 returns the number of live processes (all of them, even when the array is
+/// shorter). The runtime runs one process, so the list is just its id.
+///
+/// A retail console gates this on debug mode and would answer `0x4201`; the
+/// runtime's host is also its debugger, so hiding the only process there is
+/// would serve nothing. The calls that need a debug object keep that answer.
+fn get_process_list(c: &mut Cpu) {
+    let buffer = c.x[1];
+    let Some(max) = debug_list_max(c) else {
+        return;
+    };
+    write_debug_list(c, buffer, &[threads::PROCESS_ID], max);
+}
+
+/// `svcGetThreadList` (0x66): X1 = ids, W2 = count, W3 = debug handle, W1 =
+/// total threads. A zero handle asks for the global list, which is this
+/// process's list because it is the only process; a `KDebug` handle or another
+/// process's handle cannot exist here and is the kernel's invalid handle.
+fn get_thread_list(c: &mut Cpu) {
+    let buffer = c.x[1];
+    let Some(max) = debug_list_max(c) else {
+        return;
+    };
+    if c.x[3] as u32 != 0 {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    }
+    // Not while writing guest memory: the handle table is held only to copy the
+    // ids, and a thread that exits meanwhile must not keep it locked.
+    let ids: Vec<u64> = c
+        .process()
+        .handles
+        .lock()
+        .unwrap()
+        .threads()
+        .iter()
+        .map(|t| t.id)
+        .collect();
+    write_debug_list(c, buffer, &ids, max);
+}
+
+/// The runtime has no `KDebug` object, so the debug calls that only ever inspect
+/// or rewrite the caller's own process take the current-process pseudo handle in
+/// the debug-handle slot. Every other value is the kernel's invalid handle.
+fn debug_target(handle: u32) -> bool {
+    handle == CURRENT_PROCESS as u32
+}
+
+fn thread_by_id(p: &Process, id: u64) -> Option<Arc<KThread>> {
+    p.handles
+        .lock()
+        .unwrap()
+        .threads()
+        .into_iter()
+        .find(|t| t.id == id)
+}
+
+fn live_thread_context(c: &Cpu) -> ThreadContext {
+    ThreadContext {
+        x: c.x,
+        sp: c.sp,
+        pc: c.pc,
+        psr: c.nzcv as u32,
+        v: c.v,
+        fpcr: c.fpcr as u32,
+        fpsr: c.fpsr as u32,
+        tpidr: c.tpidr_el0,
+    }
+}
+
+/// Writes the register groups selected by `flags` back into the calling Cpu.
+/// x0 is skipped: the SVC result lands there after the context is applied.
+fn apply_thread_context(c: &mut Cpu, context: &ThreadContext, flags: u32) {
+    if flags & ThreadContext::FLAG_GPRS != 0 {
+        c.x[1..29].copy_from_slice(&context.x[1..29]);
+    }
+    if flags & ThreadContext::FLAG_CONTROL != 0 {
+        c.x[29] = context.x[29];
+        c.x[30] = context.x[30];
+        c.sp = context.sp;
+        c.pc = context.pc;
+        c.nzcv = context.psr as u64;
+        c.tpidr_el0 = context.tpidr;
+    }
+    if flags & ThreadContext::FLAG_VECTOR != 0 {
+        c.v = context.v;
+    }
+    if flags & ThreadContext::FLAG_FP_CONTROL != 0 {
+        c.fpcr = context.fpcr as u64;
+        c.fpsr = context.fpsr as u64;
+    }
+}
+
+/// `svcGetDebugThreadContext` (0x67): X0 is the output `ThreadContext`, X1 the
+/// debug handle, X2 the thread id and W3 the `ThreadContextFlags`.
+///
+/// Only the caller's own process is reachable (see [`debug_target`]). The
+/// caller's registers are live; a thread the guest paused with
+/// `svcSetThreadActivity` reports its saved context. A running thread cannot be
+/// inspected because the runtime never stops it behind its back — the kernel
+/// would suspend it for the debugger — which is `ResultBusy`.
+fn get_debug_thread_context(c: &mut Cpu) {
+    let (out, debug, id, flags) = (c.x[0], c.x[1] as u32, c.x[2], c.x[3] as u32);
+    if flags & !ThreadContext::FLAGS_ALL != 0 {
+        c.x[0] = RESULT_INVALID_ENUM;
+        return;
+    }
+    if !debug_target(debug) {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    }
+    let p = c.process();
+    let Some(t) = thread_by_id(p, id) else {
+        c.x[0] = RESULT_INVALID_ID;
+        return;
+    };
+    let context = if Arc::ptr_eq(&t, &c.thread) {
+        live_thread_context(c)
+    } else if t.exited.load(Ordering::Relaxed) {
+        c.x[0] = RESULT_TERMINATION_REQUESTED;
+        return;
+    } else if t.paused.load(Ordering::Relaxed) {
+        crate::sched::wait_stopped(c, &t);
+        t.context.lock().unwrap().clone()
+    } else {
+        c.x[0] = RESULT_BUSY;
+        return;
+    };
+    let Some(mut bytes) = p.memory.read(out, ThreadContext::SIZE as u64) else {
+        c.x[0] = RESULT_INVALID_POINTER;
+        return;
+    };
+    context.merge_into(&mut bytes, flags);
+    if !p.memory.write(out, &bytes) {
+        c.x[0] = RESULT_INVALID_POINTER;
+        return;
+    }
+    ok(c);
+}
+
+/// `svcSetDebugThreadContext` (0x68): W0 the debug handle, X1 the thread id, X2
+/// the input `ThreadContext` and W3 the flags.
+///
+/// The live register set of the calling thread is the only one the runtime can
+/// really rewrite. Another thread's saved context is a snapshot taken when it
+/// parked; the thread resumes from its live `Cpu`, so writing the snapshot
+/// would be a lie, and the runtime does not suspend a thread to make it true.
+/// That case is `ResultBusy`.
+fn set_debug_thread_context(c: &mut Cpu) {
+    let (debug, id, ptr, flags) = (c.x[0] as u32, c.x[1], c.x[2], c.x[3] as u32);
+    if flags & !ThreadContext::FLAGS_ALL != 0 {
+        c.x[0] = RESULT_INVALID_ENUM;
+        return;
+    }
+    if !debug_target(debug) {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    }
+    let p = c.process();
+    let Some(t) = thread_by_id(p, id) else {
+        c.x[0] = RESULT_INVALID_ID;
+        return;
+    };
+    if t.exited.load(Ordering::Relaxed) {
+        c.x[0] = RESULT_TERMINATION_REQUESTED;
+        return;
+    }
+    if !Arc::ptr_eq(&t, &c.thread) {
+        c.x[0] = RESULT_BUSY;
+        return;
+    }
+    let Some(bytes) = p.memory.read(ptr, ThreadContext::SIZE as u64) else {
+        c.x[0] = RESULT_INVALID_POINTER;
+        return;
+    };
+    let Some(context) = ThreadContext::from_bytes(&bytes) else {
+        c.x[0] = RESULT_INVALID_POINTER;
+        return;
+    };
+    apply_thread_context(c, &context, flags);
+    ok(c);
+}
+
+/// `svcGetDebugThreadParam` (0x6D): X2 is the debug handle, X3 the thread id
+/// and W4 the `DebugThreadParam`; the two outputs are X1 and W2.
+///
+/// The parameters are `0` priority, `1` state, `2` ideal core, `3` current core
+/// and `4` affinity mask. The state is `{suspended, idle, running, queued}`
+/// reported as `{5, 0, 1, 4}` with bit 0 of W2 marking a debug suspend (never
+/// set here) and bit 1 a user suspend (`svcSetThreadActivity`).
+fn get_debug_thread_param(c: &mut Cpu) {
+    let (debug, id, param) = (c.x[2] as u32, c.x[3], c.x[4]);
+    if !debug_target(debug) {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    }
+    let p = c.process();
+    let Some(t) = thread_by_id(p, id) else {
+        c.x[0] = RESULT_INVALID_THREAD_ID;
+        return;
+    };
+    match param {
+        0 => {
+            c.x[0] = RESULT_SUCCESS;
+            c.x[2] = t.effective_priority() as u32 as u64;
+        }
+        1 => {
+            let suspended = t.paused.load(Ordering::Relaxed);
+            let state = if t.exited.load(Ordering::Relaxed) {
+                4
+            } else if suspended {
+                5
+            } else if t.started.load(Ordering::Relaxed) {
+                1
+            } else {
+                0
+            };
+            c.x[0] = RESULT_SUCCESS;
+            c.x[1] = state;
+            c.x[2] = (suspended as u64) << 1;
+        }
+        2 => {
+            c.x[0] = RESULT_SUCCESS;
+            c.x[2] = t.ideal_core.load(Ordering::Relaxed) as u32 as u64;
+        }
+        3 => {
+            c.x[0] = RESULT_SUCCESS;
+            c.x[2] = t.core.load(Ordering::Relaxed) as u32 as u64;
+        }
+        4 => {
+            c.x[0] = RESULT_SUCCESS;
+            c.x[2] = t.affinity.load(Ordering::Relaxed) & 0xffff_ffff;
+        }
+        _ => c.x[0] = RESULT_INVALID_ENUM,
+    }
+}
+
+/// `svcSetHardwareBreakPoint` (0x6C): W0 names the register (0-5 are the six
+/// breakpoints, 0x10-0x13 the four watchpoints), X1 the flag bits the guest may
+/// set and X2 the address. The kernel masks the flags and ORs in its own
+/// security bits (0x4004 for a breakpoint, 0x104004 for a watchpoint).
+///
+/// The runtime records the register and never arms it: guest code runs as
+/// recompiled host functions, not under a per-instruction debug unit, so there
+/// is nothing that could trap at `value`.
+fn set_hardware_break_point(c: &mut Cpu) {
+    let (name, flags, value) = (c.x[0] as u32, c.x[1], c.x[2]);
+    let (slot, allowed, forced) = match name {
+        0..=5 => (name as usize, 0x7f01e1u64, 0x4004u64),
+        0x10..=0x13 => (6 + (name - 0x10) as usize, 0xff0f1ff9u64, 0x104004u64),
+        _ => {
+            c.x[0] = RESULT_INVALID_ENUM;
+            return;
+        }
+    };
+    if flags & !allowed != 0 {
+        c.x[0] = RESULT_INVALID_ENUM;
+        return;
+    }
+    if !crate::kernel::set_hardware_breakpoint(slot, flags | forced, value) {
+        c.x[0] = RESULT_INVALID_ENUM;
+        return;
+    }
+    ok(c);
+}
+
+/// `svcSetProcessMemoryPermission` (0x73): X1 address, X2 size, W3 the new
+/// permission and X0 the process handle. The kernel only accepts the code
+/// states here — the heap belongs to `svcSetMemoryPermission` — and reports
+/// `0xD401` for anything else. Making `CodeStatic` writable turns it into
+/// `CodeMutable`, as the loader's transitions expect.
+fn set_process_memory_permission(c: &mut Cpu) {
+    let (handle, addr, size, perm) = (c.x[0] as u32, c.x[1], c.x[2], c.x[3] as u32);
+    if !addr.is_multiple_of(PAGE) {
+        c.x[0] = RESULT_INVALID_ADDRESS;
+        return;
+    }
+    if size == 0 || !size.is_multiple_of(PAGE) {
+        c.x[0] = RESULT_INVALID_SIZE;
+        return;
+    }
+    let Some(end) = addr.checked_add(size) else {
+        c.x[0] = RESULT_INVALID_MEMORY_STATE;
+        return;
+    };
+    if !matches!(perm, perm::NONE | perm::R | perm::RW | perm::RX) {
+        c.x[0] = RESULT_INVALID_NEW_MEMORY_PERMISSION;
+        return;
+    }
+    if handle != CURRENT_PROCESS as u32 {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    }
+    let p = c.process();
+    let code = [
+        state::CODE_STATIC,
+        state::CODE_MUTABLE,
+        state::CODE_READONLY,
+        state::CODE_WRITABLE,
+    ];
+    let writable = perm & perm::RW == perm::RW;
+    let result = if writable && p.memory.query(addr).state == state::CODE_STATIC {
+        p.memory
+            .retag(addr, end, state::CODE_MUTABLE, perm, &[state::CODE_STATIC])
+    } else {
+        p.memory.protect(addr, end, perm, &code)
+    };
+    c.x[0] = if result {
+        RESULT_SUCCESS
+    } else {
+        RESULT_INVALID_MEMORY_STATE
+    };
+}
+
+/// `svcMapProcessMemory` (0x74) and `svcUnmapProcessMemory` (0x75) map pages of
+/// *another* process into the caller. The kernel resolves the handle without
+/// the current-process pseudo alias, and the runtime has no second process and
+/// no handle for one, so after the address/size validation every call is the
+/// kernel's invalid handle.
+fn map_unmap_process_memory(c: &mut Cpu, imm: u16) {
+    let (dst, src, size) = (c.x[0], c.x[2], c.x[3]);
+    if !dst.is_multiple_of(PAGE) || !src.is_multiple_of(PAGE) {
+        c.x[0] = RESULT_INVALID_ADDRESS;
+        return;
+    }
+    if size == 0 || !size.is_multiple_of(PAGE) {
+        c.x[0] = RESULT_INVALID_SIZE;
+        return;
+    }
+    if dst.checked_add(size).is_none() || src.checked_add(size).is_none() {
+        c.x[0] = RESULT_INVALID_MEMORY_STATE;
+        return;
+    }
+    let name = if imm == 0x74 {
+        "svcMapProcessMemory"
+    } else {
+        "svcUnmapProcessMemory"
+    };
+    c.process().warn_once(format!(
+        "{name}: the runtime has one process and the current-process alias is not accepted"
+    ));
+    c.x[0] = RESULT_INVALID_HANDLE;
+}
+
+/// `svcMapProcessCodeMemory` (0x77) and `svcUnmapProcessCodeMemory` (0x78):
+/// same rule, and the kernel documents that this pair does not accept the
+/// current-process alias at all.
+fn map_unmap_process_code_memory(c: &mut Cpu, imm: u16) {
+    let (dst, src, size) = (c.x[1], c.x[2], c.x[3]);
+    if !dst.is_multiple_of(PAGE) || !src.is_multiple_of(PAGE) {
+        c.x[0] = RESULT_INVALID_ADDRESS;
+        return;
+    }
+    if size == 0 || !size.is_multiple_of(PAGE) {
+        c.x[0] = RESULT_INVALID_SIZE;
+        return;
+    }
+    if dst.checked_add(size).is_none() || src.checked_add(size).is_none() {
+        c.x[0] = RESULT_INVALID_MEMORY_STATE;
+        return;
+    }
+    let name = if imm == 0x77 {
+        "svcMapProcessCodeMemory"
+    } else {
+        "svcUnmapProcessCodeMemory"
+    };
+    c.process().warn_once(format!(
+        "{name}: the runtime has one process and refuses the current-process alias"
+    ));
+    c.x[0] = RESULT_INVALID_HANDLE;
+}
+
+/// `svcQueryProcessMemory` (0x76): like `svcQueryMemory`, with the process
+/// handle in W2 and the address in X3. The only process the handle can name is
+/// the caller, whose memory the query already reads.
+fn query_process_memory(c: &mut Cpu) {
+    if c.x[2] as u32 != CURRENT_PROCESS as u32 {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    }
+    let (out, addr) = (c.x[0], c.x[3]);
+    write_memory_info(c, out, addr);
+}
+
+/// The A64 `CreateProcessParameter` is 0x30 bytes: a 12-byte process name, the
+/// process category, the title id, the code address, the code page count, the
+/// flags (bit 0 AArch64, bits 1-3 address space, bit 4 `EnableDebug`, bit 5
+/// ASLR, bit 6 application, bits 7-10 memory region, bit 11 optimized
+/// allocation), the resource-limit handle and the system-resource page count.
+const CREATE_PROCESS_PARAMETER_SIZE: u64 = 0x30;
+
+/// `svcCreateProcess` (0x79): X1 points at the parameter block, X2 at the
+/// capability array and W3 is its length. A second process needs its own
+/// address space, memory pool and scheduler, which the runtime does not build;
+/// the pointers are validated so a malformed call is reported as such, and then
+/// the call is refused instead of handing back a handle with nothing behind it.
+fn create_process(c: &mut Cpu) {
+    let (params, caps, num_caps) = (c.x[1], c.x[2], c.x[3] as i32);
+    if num_caps < 0 {
+        c.x[0] = RESULT_INVALID_POINTER;
+        return;
+    }
+    let cap_bytes = (num_caps as u64) * 4;
+    if cap_bytes > 0 && !c.process().memory.is_mapped(caps, cap_bytes) {
+        c.x[0] = RESULT_INVALID_POINTER;
+        return;
+    }
+    if !c
+        .process()
+        .memory
+        .is_mapped(params, CREATE_PROCESS_PARAMETER_SIZE)
+    {
+        c.x[0] = RESULT_INVALID_POINTER;
+        return;
+    }
+    c.process()
+        .warn_once("svcCreateProcess: the runtime builds one process per run".into());
+    c.x[0] = RESULT_NOT_IMPLEMENTED;
+}
+
+/// `svcStartProcess` (0x7A): starts a process made by `svcCreateProcess`. No
+/// such process can exist, and the only process handle left is the caller's own
+/// pseudo handle, which is already running; the kernel's answer for starting a
+/// running process is `ResultInvalidState`.
+fn start_process(c: &mut Cpu) {
+    if c.x[0] as u32 != CURRENT_PROCESS as u32 {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    }
+    c.x[0] = RESULT_INVALID_STATE;
+}
+
+/// `svcTerminateProcess` (0x7B): the kernel accepts a process handle, including
+/// the current-process alias, and terminating the caller goes through the same
+/// exit path as `svcExitProcess`.
+fn terminate_process(c: &mut Cpu) {
+    if c.x[0] as u32 != CURRENT_PROCESS as u32 {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    }
+    c.process().terminate(0);
+    c.halt();
+}
+
+/// `SmcResult_NotImplemented` from the secure monitor's own result space.
+const SMC_NOT_IMPLEMENTED: u64 = 1;
+
+/// `svcCallSecureMonitor` (0x7F): X0 is the SMC function id and X1-X7 its
+/// arguments; the monitor's result comes back in the same registers. The
+/// runtime has no secure monitor (there is no TrustZone behind it), so the call
+/// is answered with the monitor's documented `NotImplemented` result instead of
+/// inventing the output of an SMC function.
+fn call_secure_monitor(c: &mut Cpu) {
+    c.process().warn_once(
+        "svcCallSecureMonitor: the runtime has no secure monitor; returning SMC NotImplemented"
+            .into(),
+    );
+    c.x[0] = SMC_NOT_IMPLEMENTED;
+}
+
+/// `svcMapInsecurePhysicalMemory` (0x90) and
+/// `svcUnmapInsecurePhysicalMemory` (0x91), 15.0.0+: the guest asks for a
+/// mapping of freshly allocated pages from the insecure pool. The runtime has
+/// no separate pool, so the pages come from the ASLR region as zeroed guest RAM
+/// with `MemType_Insecure` and are charged to the process's memory budget the
+/// same way `svcMapPhysicalMemory` charges the alias region.
+fn insecure_physical_range(c: &mut Cpu) -> Option<(u64, u64)> {
+    let (addr, size) = (c.x[0], c.x[1]);
+    let layout = c.process().layout;
+    if size == 0 || !size.is_multiple_of(PAGE) {
+        c.x[0] = RESULT_INVALID_SIZE;
+        return None;
+    }
+    if !addr.is_multiple_of(PAGE) {
+        c.x[0] = RESULT_INVALID_ADDRESS;
+        return None;
+    }
+    let Some(end) = addr.checked_add(size) else {
+        c.x[0] = RESULT_INVALID_MEMORY_STATE;
+        return None;
+    };
+    if addr < layout.aslr_base || end > layout.aslr_base + layout.aslr_size {
+        c.x[0] = RESULT_INVALID_MEMORY_REGION;
+        return None;
+    }
+    Some((addr, end))
+}
+
+fn map_insecure_physical_memory(c: &mut Cpu) {
+    let Some((start, end)) = insecure_physical_range(c) else {
+        return;
+    };
+    let p = c.process();
+    let budget = TOTAL_MEMORY.saturating_sub(p.used_memory());
+    match p.memory.map_insecure(start, end, budget) {
+        Ok(bytes) => {
+            p.physical.fetch_add(bytes, Ordering::Relaxed);
+            ok(c);
+        }
+        Err(PhysicalError::State) => c.x[0] = RESULT_INVALID_MEMORY_REGION,
+        Err(PhysicalError::Limit) => c.x[0] = RESULT_LIMIT_REACHED,
+        Err(PhysicalError::Host(e)) => fatal(
+            c,
+            format!("svcMapInsecurePhysicalMemory: the host refused the mapping ({e})"),
+        ),
+    }
+}
+
+fn unmap_insecure_physical_memory(c: &mut Cpu) {
+    let Some((start, end)) = insecure_physical_range(c) else {
+        return;
+    };
+    let p = c.process();
+    match p.memory.unmap_insecure(start, end) {
+        Ok(bytes) => {
+            p.physical.fetch_sub(bytes, Ordering::Relaxed);
+            ok(c);
+        }
+        Err(PhysicalError::State) => c.x[0] = RESULT_INVALID_MEMORY_STATE,
+        Err(PhysicalError::Limit) => c.x[0] = RESULT_LIMIT_REACHED,
+        Err(PhysicalError::Host(e)) => fatal(
+            c,
+            format!("svcUnmapInsecurePhysicalMemory: the host refused the mapping ({e})"),
+        ),
+    }
 }
 
 /// Resource-limit handle reported by `svcGetInfo(9)`.
@@ -1979,6 +2658,14 @@ mod tests {
     /// Runs an entry point that drives `dispatch` on a real `Cpu` with a
     /// process whose guest memory and handle table are live, then halts.
     fn run_entries(entries: Vec<Entry>, expected_exit: i32) -> crate::process::RunResult {
+        run_entries_with(entries, expected_exit, 0)
+    }
+
+    fn run_entries_with(
+        entries: Vec<Entry>,
+        expected_exit: i32,
+        system_resource_size: u64,
+    ) -> crate::process::RunResult {
         let entries: &'static [Entry] = Box::leak(entries.into_boxed_slice());
         let exe = kirikae_loader::Executable {
             modules: Vec::new(),
@@ -1986,7 +2673,7 @@ mod tests {
             arch: kirikae_loader::Arch::A64,
             title_id: None,
             main_stack_size: None,
-            system_resource_size: 0,
+            system_resource_size,
             romfs: None,
         };
         let result = run_executable(
@@ -3011,6 +3698,16 @@ mod tests {
             ],
         );
 
+        // The closing handle releases the lease; the creator's heap tags return.
+        c.x[0] = tmem as u64;
+        dispatch(c, 0x16);
+        let closed = c.x[0];
+        let after = p.memory.query(TMEM_PAGE);
+        record(
+            "tmem_close",
+            &[closed, after.state as u64, after.perm as u64],
+        );
+
         c.x[1] = CODE_SRC;
         c.x[2] = PAGE;
         dispatch(c, 0x4b);
@@ -3125,6 +3822,11 @@ mod tests {
             eight(b"CHANGED"),
             "the mapping writes back to the creator's pages"
         );
+        assert_eq!(
+            observed("tmem_close"),
+            vec![RESULT_SUCCESS, state::HEAP as u64, perm::RW as u64],
+            "the last handle puts the creator's pages back as heap"
+        );
 
         let code = observed("code_create");
         assert_eq!(code[0], RESULT_SUCCESS);
@@ -3153,6 +3855,101 @@ mod tests {
             "code memory starts 0xFF-filled"
         );
         assert_eq!(mapped[6], eight(b"code!"), "the contents survive the unmap");
+    }
+
+    /// The Brilliant Diamond shape: the heap commits a physical range, carves a
+    /// transfer block out of it for bsd, closes the block, and then adopts the
+    /// whole range. The live block is a conflict; the released one is heap.
+    extern "C" fn transfer_memory_then_physical(c: &mut Cpu) {
+        let p = c.process();
+        let base = p.layout.alias_base + 0x1000_0000;
+        let alias = base + 0x1_0000;
+        let mut out = Vec::new();
+
+        c.x[0] = base;
+        c.x[1] = PAGE * 2;
+        dispatch(c, 0x2c);
+        out.push(c.x[0]);
+
+        c.x[1] = base + PAGE;
+        c.x[2] = PAGE;
+        c.x[3] = perm::NONE as u64;
+        dispatch(c, 0x15);
+        let tmem = c.x[1] as u32;
+        out.push(c.x[0]);
+
+        c.x[0] = tmem as u64;
+        c.x[1] = alias;
+        c.x[2] = PAGE;
+        c.x[3] = perm::NONE as u64;
+        dispatch(c, 0x51);
+        out.push(c.x[0]);
+        p.memory.write(alias, b"alias");
+        c.x[0] = tmem as u64;
+        c.x[1] = alias;
+        c.x[2] = PAGE;
+        dispatch(c, 0x52);
+        out.push(c.x[0]);
+        out.push(eight(&p.memory.read(base + PAGE, 5).unwrap_or_default()));
+
+        // A live transfer memory still refuses the adoption.
+        c.x[0] = base;
+        c.x[1] = PAGE * 4;
+        dispatch(c, 0x2c);
+        out.push(c.x[0]);
+        out.push(p.memory.is_mapped(base + PAGE * 2, 1) as u64);
+        c.x[0] = base;
+        c.x[1] = PAGE * 4;
+        dispatch(c, 0x2d);
+        out.push(c.x[0]);
+
+        c.x[0] = tmem as u64;
+        dispatch(c, 0x16);
+        out.push(c.x[0]);
+        out.push(p.memory.query(base + PAGE).state as u64);
+
+        c.x[0] = base;
+        c.x[1] = PAGE * 4;
+        dispatch(c, 0x2c);
+        out.push(c.x[0]);
+        let r = p.memory.query(base);
+        out.push(r.state as u64);
+        out.push(r.range.end - base);
+        out.push(eight(&p.memory.read(base + PAGE, 5).unwrap_or_default()));
+        record("tmem_physical", &out);
+        c.halt();
+    }
+
+    #[test]
+    fn a_guest_releases_transfer_memory_before_adopting_physical_memory() {
+        run_entries_with(
+            vec![Entry {
+                addr: GUEST_ENTRY,
+                func: transfer_memory_then_physical,
+            }],
+            0,
+            0x400_0000,
+        );
+        assert_eq!(
+            observed("tmem_physical"),
+            vec![
+                RESULT_SUCCESS,
+                RESULT_SUCCESS,
+                RESULT_SUCCESS,
+                RESULT_SUCCESS,
+                eight(b"alias"),
+                RESULT_INVALID_MEMORY_STATE,
+                0,
+                RESULT_INVALID_MEMORY_STATE,
+                RESULT_SUCCESS,
+                state::HEAP as u64,
+                RESULT_SUCCESS,
+                state::HEAP as u64,
+                PAGE * 4,
+                eight(b"alias"),
+            ],
+            "the live block conflicts, the released one is adopted with its bytes"
+        );
     }
 
     const MIRROR_SRC: u64 = 0x0F04_0000;
@@ -4346,6 +5143,722 @@ mod tests {
                 RESULT_INVALID_ADDRESS,
             ],
             "MC/PMC registers are unmodelled; anything else is an invalid address"
+        );
+    }
+
+    extern "C" fn process_activity_and_kernel_stubs(c: &mut Cpu) {
+        let mut out = Vec::new();
+        for (handle, activity) in [(CURRENT_PROCESS, 2u64), (CURRENT_PROCESS, 1), (0xdead, 1)] {
+            c.x[0] = handle;
+            c.x[1] = activity;
+            dispatch(c, 0x4f);
+            out.push(c.x[0]);
+        }
+
+        // SleepSystem is void; the runtime has no system state to change.
+        c.x[0] = 0x1234;
+        dispatch(c, 0x4d);
+        out.push(c.x[0]);
+        // KernelDebug and ChangeKernelTraceState are void and stubbed in retail.
+        c.x[0] = 0x5678;
+        dispatch(c, 0x3c);
+        out.push(c.x[0]);
+        c.x[0] = 0x9abc;
+        dispatch(c, 0x3d);
+        out.push(c.x[0]);
+
+        record("process_activity", &out);
+        c.halt();
+    }
+
+    #[test]
+    fn process_activity_sleep_and_kernel_debug_are_safe() {
+        run_guest(process_activity_and_kernel_stubs);
+        assert_eq!(
+            observed("process_activity"),
+            vec![
+                RESULT_INVALID_ENUM,
+                RESULT_BUSY,
+                RESULT_INVALID_HANDLE,
+                0x1234,
+                0x5678,
+                0x9abc,
+            ],
+            "the enum, the handle and the current-process refusal are the kernel's"
+        );
+    }
+
+    extern "C" fn process_and_thread_lists(c: &mut Cpu) {
+        let buffer = c.sp - 0x200;
+        let extra = parked_thread(0x99);
+        c.process()
+            .handles
+            .lock()
+            .unwrap()
+            .insert(KObject::Thread(extra));
+
+        let mut out = Vec::new();
+        // A count of zero writes no ids but still reports the total.
+        c.x[1] = buffer;
+        c.x[2] = 0;
+        dispatch(c, 0x65);
+        out.push(c.x[0]);
+        out.push(c.x[1]);
+        // Room for one id.
+        c.x[1] = buffer;
+        c.x[2] = 1;
+        dispatch(c, 0x65);
+        out.push(c.x[0]);
+        out.push(c.x[1]);
+        out.push(u64::from_le_bytes(
+            c.process()
+                .memory
+                .read(buffer, 8)
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        ));
+        // Out-of-range counts and unmapped arrays.
+        c.x[1] = buffer;
+        c.x[2] = 0x8000_0000;
+        dispatch(c, 0x65);
+        out.push(c.x[0]);
+        c.x[1] = 0xdead_0000;
+        c.x[2] = 1;
+        dispatch(c, 0x65);
+        out.push(c.x[0]);
+
+        // The global thread list is this process's list.
+        c.x[1] = buffer;
+        c.x[2] = 8;
+        c.x[3] = 0;
+        dispatch(c, 0x66);
+        out.push(c.x[0]);
+        out.push(c.x[1]);
+        out.extend(words(
+            &c.process().memory.read(buffer, 16).unwrap_or_default(),
+        ));
+        // Only a debug object or another process's handle can be non-zero.
+        c.x[1] = buffer;
+        c.x[2] = 8;
+        c.x[3] = 1;
+        dispatch(c, 0x66);
+        out.push(c.x[0]);
+        // Zero capacity is still a valid count-only query.
+        c.x[1] = 0;
+        c.x[2] = 0;
+        c.x[3] = 0;
+        dispatch(c, 0x66);
+        out.push(c.x[0]);
+        out.push(c.x[1]);
+
+        record("lists", &out);
+        c.halt();
+    }
+
+    #[test]
+    fn process_and_thread_lists_report_the_running_process() {
+        run_guest(process_and_thread_lists);
+        let got = observed("lists");
+        assert_eq!(
+            &got[..4],
+            &[RESULT_SUCCESS, 1, RESULT_SUCCESS, 1],
+            "one process; the count does not depend on the array size"
+        );
+        assert_eq!(got[4], threads::PROCESS_ID);
+        assert_eq!(got[5], RESULT_OUT_OF_RANGE);
+        assert_eq!(got[6], RESULT_INVALID_POINTER);
+        assert_eq!(&got[7..9], &[RESULT_SUCCESS, 2], "main thread plus 0x99");
+        assert_eq!(&got[9..11], &[MAIN_THREAD_ID, 0x99]);
+        assert_eq!(got[11], RESULT_INVALID_HANDLE);
+        assert_eq!(&got[12..14], &[RESULT_SUCCESS, 2]);
+    }
+
+    extern "C" fn process_memory_svcs(c: &mut Cpu) {
+        const CODE: u64 = 0x3_0000_0000;
+        const HEAP: u64 = 0x2_0000_0000;
+        let p = c.process();
+        p.memory
+            .map_as(CODE, PAGE, state::CODE_STATIC, perm::RX)
+            .expect("the code page maps");
+        p.memory
+            .map_as(HEAP, PAGE, state::HEAP, perm::RW)
+            .expect("the heap page maps");
+
+        let mut out = Vec::new();
+        // 0x73: address, size, permission, handle.
+        for (addr, size, perm_) in [
+            (CODE + 1, PAGE, perm::RW as u64),
+            (CODE, 0, perm::RW as u64),
+            (CODE, PAGE, 7),
+            (CODE, PAGE, 2),
+        ] {
+            c.x[0] = CURRENT_PROCESS;
+            c.x[1] = addr;
+            c.x[2] = size;
+            c.x[3] = perm_;
+            dispatch(c, 0x73);
+            out.push(c.x[0]);
+        }
+        for handle in [0xdead, CURRENT_PROCESS] {
+            c.x[0] = handle;
+            c.x[1] = HEAP;
+            c.x[2] = PAGE;
+            c.x[3] = perm::RX as u64;
+            dispatch(c, 0x73);
+            out.push(c.x[0]);
+        }
+        // CodeStatic becomes CodeMutable when written, then stays mutable when
+        // made executable again.
+        c.x[0] = CURRENT_PROCESS;
+        c.x[1] = CODE;
+        c.x[2] = PAGE;
+        c.x[3] = perm::RW as u64;
+        dispatch(c, 0x73);
+        out.push(c.x[0]);
+        out.push(p.memory.query(CODE).state as u64);
+        out.push(p.memory.query(CODE).perm as u64);
+        c.x[0] = CURRENT_PROCESS;
+        c.x[1] = CODE;
+        c.x[2] = PAGE;
+        c.x[3] = perm::RX as u64;
+        dispatch(c, 0x73);
+        out.push(c.x[0]);
+        out.push(p.memory.query(CODE).perm as u64);
+
+        // 0x74/0x75 validate the range before rejecting the handle.
+        for imm in [0x74u16, 0x75] {
+            c.x[0] = CODE + 1;
+            c.x[1] = CURRENT_PROCESS;
+            c.x[2] = CODE;
+            c.x[3] = PAGE;
+            dispatch(c, imm);
+            out.push(c.x[0]);
+            c.x[0] = CODE;
+            c.x[1] = CURRENT_PROCESS;
+            c.x[2] = CODE;
+            c.x[3] = 0;
+            dispatch(c, imm);
+            out.push(c.x[0]);
+            c.x[0] = CODE;
+            c.x[1] = CURRENT_PROCESS;
+            c.x[2] = CODE;
+            c.x[3] = PAGE;
+            dispatch(c, imm);
+            out.push(c.x[0]);
+        }
+
+        // 0x76: the current process's memory is the caller's memory.
+        let info = c.sp - 0x400;
+        c.x[0] = info;
+        c.x[2] = CURRENT_PROCESS;
+        c.x[3] = CODE;
+        dispatch(c, 0x76);
+        out.push(c.x[0]);
+        out.push(c.x[1]);
+        let bytes = p.memory.read(info, 0x28).unwrap();
+        out.push(u64::from_le_bytes(bytes[0..8].try_into().unwrap()));
+        out.push(u64::from_le_bytes(bytes[8..16].try_into().unwrap()));
+        out.push(u32::from_le_bytes(bytes[16..20].try_into().unwrap()) as u64);
+        c.x[0] = info;
+        c.x[2] = 0xdead;
+        c.x[3] = CODE;
+        dispatch(c, 0x76);
+        out.push(c.x[0]);
+
+        // 0x77/0x78: the current-process alias is not accepted at all.
+        for imm in [0x77u16, 0x78] {
+            c.x[0] = CURRENT_PROCESS;
+            c.x[1] = CODE + 1;
+            c.x[2] = HEAP;
+            c.x[3] = PAGE;
+            dispatch(c, imm);
+            out.push(c.x[0]);
+            c.x[0] = CURRENT_PROCESS;
+            c.x[1] = CODE;
+            c.x[2] = HEAP;
+            c.x[3] = PAGE;
+            dispatch(c, imm);
+            out.push(c.x[0]);
+        }
+
+        // 0x79: pointer validation, then the single-process refusal.
+        let params = c.sp - 0x500;
+        assert!(p.memory.write(params, &[0; 0x30]));
+        c.x[1] = 0xdead_0000;
+        c.x[2] = 0;
+        c.x[3] = 0;
+        dispatch(c, 0x79);
+        out.push(c.x[0]);
+        c.x[1] = params;
+        c.x[3] = u32::MAX as u64;
+        dispatch(c, 0x79);
+        out.push(c.x[0]);
+        c.x[1] = params;
+        c.x[3] = 0;
+        dispatch(c, 0x79);
+        out.push(c.x[0]);
+
+        // 0x7a: the only process is already running.
+        c.x[0] = CURRENT_PROCESS;
+        dispatch(c, 0x7a);
+        out.push(c.x[0]);
+        c.x[0] = 0xdead;
+        dispatch(c, 0x7a);
+        out.push(c.x[0]);
+        // 0x7b: another process cannot exist; terminating self is a separate test.
+        c.x[0] = 0xdead;
+        dispatch(c, 0x7b);
+        out.push(c.x[0]);
+
+        // 0x7f: the SMC result space says NotImplemented, arguments untouched.
+        for (i, r) in c.x.iter_mut().take(8).enumerate() {
+            *r = 0x100 + i as u64;
+        }
+        dispatch(c, 0x7f);
+        out.extend(c.x[..8].iter().copied());
+
+        record("process_memory", &out);
+        c.halt();
+    }
+
+    #[test]
+    fn process_memory_svcs_use_the_documented_errors() {
+        run_guest(process_memory_svcs);
+        let got = observed("process_memory");
+        assert_eq!(
+            &got[..9],
+            &[
+                RESULT_INVALID_ADDRESS,
+                RESULT_INVALID_SIZE,
+                RESULT_INVALID_NEW_MEMORY_PERMISSION,
+                RESULT_INVALID_NEW_MEMORY_PERMISSION,
+                RESULT_INVALID_HANDLE,
+                RESULT_INVALID_MEMORY_STATE,
+                RESULT_SUCCESS,
+                0x04,
+                perm::RW as u64,
+            ],
+            "0x73 validates its arguments and only code states are writable"
+        );
+        assert_eq!(
+            &got[9..11],
+            &[RESULT_SUCCESS, perm::RX as u64],
+            "CodeMutable stays mutable when it is made executable again"
+        );
+        assert_eq!(
+            &got[11..17],
+            &[
+                RESULT_INVALID_ADDRESS,
+                RESULT_INVALID_SIZE,
+                RESULT_INVALID_HANDLE,
+                RESULT_INVALID_ADDRESS,
+                RESULT_INVALID_SIZE,
+                RESULT_INVALID_HANDLE,
+            ],
+            "0x74/0x75 validate before refusing the pseudo process handle"
+        );
+        assert_eq!(
+            &got[17..22],
+            &[RESULT_SUCCESS, 0, 0x3_0000_0000, PAGE, 0x04]
+        );
+        assert_eq!(got[22], RESULT_INVALID_HANDLE);
+        assert_eq!(
+            &got[23..27],
+            &[
+                RESULT_INVALID_ADDRESS,
+                RESULT_INVALID_HANDLE,
+                RESULT_INVALID_ADDRESS,
+                RESULT_INVALID_HANDLE,
+            ]
+        );
+        assert_eq!(
+            &got[27..30],
+            &[
+                RESULT_INVALID_POINTER,
+                RESULT_INVALID_POINTER,
+                RESULT_NOT_IMPLEMENTED
+            ]
+        );
+        assert_eq!(&got[30..32], &[RESULT_INVALID_STATE, RESULT_INVALID_HANDLE]);
+        assert_eq!(got[32], RESULT_INVALID_HANDLE);
+        assert_eq!(
+            &got[33..41],
+            &[1, 0x101, 0x102, 0x103, 0x104, 0x105, 0x106, 0x107]
+        );
+    }
+
+    extern "C" fn debug_context_round_trip(c: &mut Cpu) {
+        let out = c.sp - 0x500;
+        c.tpidr_el0 = 0xfeed;
+        let mut got = Vec::new();
+
+        // The caller is a valid debug target through the current-process handle.
+        c.x[0] = out;
+        c.x[1] = CURRENT_PROCESS;
+        c.x[2] = c.thread.id;
+        c.x[3] = ThreadContext::FLAGS_ALL as u64;
+        dispatch(c, 0x67);
+        got.push(c.x[0]);
+        let original = c
+            .process()
+            .memory
+            .read(out, ThreadContext::SIZE as u64)
+            .unwrap();
+        got.push(u64::from_le_bytes(original[8..16].try_into().unwrap()));
+
+        // Rewrite x1 through the GPR group.
+        let mut patched = original.clone();
+        patched[8..16].copy_from_slice(&0x1234_5678u64.to_le_bytes());
+        assert!(c.process().memory.write(out, &patched));
+        c.x[0] = CURRENT_PROCESS;
+        c.x[1] = c.thread.id;
+        c.x[2] = out;
+        c.x[3] = ThreadContext::FLAG_GPRS as u64;
+        dispatch(c, 0x68);
+        got.push(c.x[0]);
+        got.push(c.x[1]);
+        let sp = c.sp;
+
+        // A control-only read refreshes the control group and leaves x1 alone.
+        assert!(c.process().memory.write(out, &patched));
+        c.x[0] = out;
+        c.x[1] = CURRENT_PROCESS;
+        c.x[2] = c.thread.id;
+        c.x[3] = ThreadContext::FLAG_CONTROL as u64;
+        dispatch(c, 0x67);
+        got.push(c.x[0]);
+        let control = c
+            .process()
+            .memory
+            .read(out, ThreadContext::SIZE as u64)
+            .unwrap();
+        got.push(u64::from_le_bytes(control[0xf8..0x100].try_into().unwrap()));
+        got.push(u64::from_le_bytes(
+            control[0x318..0x320].try_into().unwrap(),
+        ));
+        got.push(u64::from_le_bytes(control[8..16].try_into().unwrap()));
+
+        // Error paths: unknown flags, handle and thread, and an unmapped output.
+        c.x[0] = out;
+        c.x[1] = CURRENT_PROCESS;
+        c.x[2] = c.thread.id;
+        c.x[3] = 0x10;
+        dispatch(c, 0x67);
+        got.push(c.x[0]);
+        c.x[0] = 0xdead;
+        c.x[1] = c.thread.id;
+        c.x[2] = out;
+        c.x[3] = ThreadContext::FLAG_GPRS as u64;
+        dispatch(c, 0x68);
+        got.push(c.x[0]);
+        c.x[0] = CURRENT_PROCESS;
+        c.x[1] = 0x7777;
+        c.x[2] = out;
+        c.x[3] = ThreadContext::FLAG_GPRS as u64;
+        dispatch(c, 0x68);
+        got.push(c.x[0]);
+        c.x[0] = 0xdead_0000;
+        c.x[1] = CURRENT_PROCESS;
+        c.x[2] = c.thread.id;
+        c.x[3] = ThreadContext::FLAGS_ALL as u64;
+        dispatch(c, 0x67);
+        got.push(c.x[0]);
+
+        got.push(sp);
+        record("debug_context", &got);
+        c.halt();
+    }
+
+    #[test]
+    fn debug_thread_context_round_trips_on_the_calling_thread() {
+        run_guest(debug_context_round_trip);
+        let got = observed("debug_context");
+        assert_eq!(got[0], RESULT_SUCCESS);
+        assert_eq!(got[1], CURRENT_PROCESS, "the live x1 was reported");
+        assert_eq!(&got[2..4], &[RESULT_SUCCESS, 0x1234_5678], "Set applied x1");
+        assert_eq!(got[4], RESULT_SUCCESS);
+        assert_eq!(got[5], got[12], "the control read reported the live sp");
+        assert_eq!(got[6], 0xfeed, "TPIDR_EL0 round-trips");
+        assert_eq!(got[7], 0x1234_5678, "an unselected group is left alone");
+        assert_eq!(
+            &got[8..12],
+            &[
+                RESULT_INVALID_ENUM,
+                RESULT_INVALID_HANDLE,
+                RESULT_INVALID_ID,
+                RESULT_INVALID_POINTER,
+            ]
+        );
+    }
+
+    extern "C" fn debug_misc(c: &mut Cpu) {
+        let mut out = Vec::new();
+        // The six-argument debug family with no KDebug object.
+        for imm in [0x60u16, 0x61, 0x62, 0x64, 0x6b] {
+            c.x[0] = 0;
+            dispatch(c, imm);
+            out.push(c.x[0]);
+        }
+        for imm in [0x63u16, 0x69, 0x6a] {
+            c.x[0] = 0;
+            dispatch(c, imm);
+            out.push(c.x[0]);
+        }
+
+        // 0x6C records breakpoint 0 and watchpoint 0x10, rejecting bad names
+        // and flag bits.
+        let mut bp = Vec::new();
+        for (name, flags, value) in [
+            (0u64, 0u64, 0x1000u64),
+            (6, 0, 0x2000),
+            (0x10, 0, 0x3000),
+            (0x14, 0, 0x4000),
+            (0, 0x2, 0x5000),
+        ] {
+            c.x[0] = name;
+            c.x[1] = flags;
+            c.x[2] = value;
+            dispatch(c, 0x6c);
+            bp.push(c.x[0]);
+        }
+        bp.push(
+            crate::kernel::hardware_breakpoint(0)
+                .map(|b| b.flags)
+                .unwrap_or_default(),
+        );
+        bp.push(
+            crate::kernel::hardware_breakpoint(6)
+                .map(|b| b.flags)
+                .unwrap_or_default(),
+        );
+        record("debug_breakpoints", &bp);
+
+        // 0x6D: priority, state, cores and affinity of the caller, then a
+        // paused thread, an unknown thread and an invalid parameter.
+        let mut params = Vec::new();
+        for param in 0..=5u64 {
+            c.x[1] = 0;
+            c.x[2] = CURRENT_PROCESS;
+            c.x[3] = c.thread.id;
+            c.x[4] = param;
+            dispatch(c, 0x6d);
+            params.push(c.x[0]);
+            params.push(c.x[1]);
+            params.push(c.x[2]);
+        }
+        let paused = parked_thread(0x9b);
+        paused.paused.store(true, Ordering::Relaxed);
+        *paused.context.lock().unwrap() = ThreadContext {
+            sp: 0xaaaa,
+            ..Default::default()
+        };
+        let running = parked_thread(0x9c);
+        let exited = parked_thread(0x9d);
+        exited.exited.store(true, Ordering::Relaxed);
+        {
+            let mut handles = c.process().handles.lock().unwrap();
+            handles.insert(KObject::Thread(paused));
+            handles.insert(KObject::Thread(running));
+            handles.insert(KObject::Thread(exited));
+        }
+        let out_ctx = c.sp - 0x500;
+        c.x[1] = 0;
+        c.x[2] = CURRENT_PROCESS;
+        c.x[3] = 0x9b;
+        c.x[4] = 1;
+        dispatch(c, 0x6d);
+        params.push(c.x[0]);
+        params.push(c.x[1]);
+        params.push(c.x[2]);
+        c.x[0] = out_ctx;
+        c.x[1] = CURRENT_PROCESS;
+        c.x[2] = 0x9b;
+        c.x[3] = ThreadContext::FLAGS_ALL as u64;
+        dispatch(c, 0x67);
+        params.push(c.x[0]);
+        let saved = c
+            .process()
+            .memory
+            .read(out_ctx, ThreadContext::SIZE as u64)
+            .unwrap();
+        params.push(u64::from_le_bytes(saved[0xf8..0x100].try_into().unwrap()));
+        c.x[0] = CURRENT_PROCESS;
+        c.x[1] = 0x9b;
+        c.x[2] = out_ctx;
+        c.x[3] = ThreadContext::FLAG_GPRS as u64;
+        dispatch(c, 0x68);
+        params.push(c.x[0]);
+        c.x[0] = out_ctx;
+        c.x[1] = CURRENT_PROCESS;
+        c.x[2] = 0x9c;
+        c.x[3] = ThreadContext::FLAGS_ALL as u64;
+        dispatch(c, 0x67);
+        params.push(c.x[0]);
+        c.x[0] = out_ctx;
+        c.x[1] = CURRENT_PROCESS;
+        c.x[2] = 0x9d;
+        c.x[3] = ThreadContext::FLAGS_ALL as u64;
+        dispatch(c, 0x67);
+        params.push(c.x[0]);
+        c.x[1] = 0;
+        c.x[2] = CURRENT_PROCESS;
+        c.x[3] = 0x9d;
+        c.x[4] = 1;
+        dispatch(c, 0x6d);
+        params.push(c.x[0]);
+        params.push(c.x[1]);
+        params.push(c.x[2]);
+        c.x[0] = CURRENT_PROCESS;
+        c.x[1] = 0x9d;
+        c.x[2] = out_ctx;
+        c.x[3] = ThreadContext::FLAG_GPRS as u64;
+        dispatch(c, 0x68);
+        params.push(c.x[0]);
+        c.x[1] = 0;
+        c.x[2] = CURRENT_PROCESS;
+        c.x[3] = 0x7777;
+        c.x[4] = 1;
+        dispatch(c, 0x6d);
+        params.push(c.x[0]);
+        c.x[2] = 0xdead;
+        dispatch(c, 0x6d);
+        params.push(c.x[0]);
+        record("debug_params", &params);
+        c.halt();
+    }
+
+    #[test]
+    fn debug_svcs_report_the_documented_errors_and_params() {
+        run_guest(debug_misc);
+        assert_eq!(
+            observed("debug_breakpoints"),
+            vec![
+                RESULT_SUCCESS,
+                RESULT_INVALID_ENUM,
+                RESULT_SUCCESS,
+                RESULT_INVALID_ENUM,
+                RESULT_INVALID_ENUM,
+                0x4004,
+                0x104004,
+            ],
+            "the kernel's forced security bits are recorded, never armed"
+        );
+        let got = observed("debug_params");
+        assert_eq!(
+            &got[..3],
+            &[RESULT_SUCCESS, 0, MAIN_THREAD_PRIORITY],
+            "priority is reported in W2"
+        );
+        assert_eq!(&got[3..6], &[RESULT_SUCCESS, 1, 0], "the caller is running");
+        assert_eq!(&got[6..9], &[RESULT_SUCCESS, 0, 0], "ideal core");
+        assert_eq!(&got[9..12], &[RESULT_SUCCESS, 0, 0], "current core");
+        assert_eq!(&got[12..15], &[RESULT_SUCCESS, 0, 1], "affinity mask");
+        assert_eq!(got[15], RESULT_INVALID_ENUM);
+        assert_eq!(&got[18..21], &[RESULT_SUCCESS, 5, 2], "user-suspended");
+        assert_eq!(got[21], RESULT_SUCCESS);
+        assert_eq!(got[22], 0xaaaa, "the paused thread's saved context is read");
+        assert_eq!(got[23], RESULT_BUSY, "a stopped thread is not rewritten");
+        assert_eq!(got[24], RESULT_BUSY, "a running thread is not inspected");
+        assert_eq!(got[25], RESULT_TERMINATION_REQUESTED);
+        assert_eq!(
+            &got[26..29],
+            &[RESULT_SUCCESS, 4, 0],
+            "the exited thread reports the terminating state"
+        );
+        assert_eq!(got[29], RESULT_TERMINATION_REQUESTED);
+        assert_eq!(got[30], RESULT_INVALID_THREAD_ID);
+        assert_eq!(got[31], RESULT_INVALID_HANDLE);
+    }
+
+    extern "C" fn insecure_memory(c: &mut Cpu) {
+        let base = c.process().layout.aslr_base + 0x1000_0000;
+        let mut out = Vec::new();
+        c.x[0] = base;
+        c.x[1] = PAGE + 1;
+        dispatch(c, 0x90);
+        out.push(c.x[0]);
+        c.x[0] = base + 1;
+        c.x[1] = PAGE;
+        dispatch(c, 0x90);
+        out.push(c.x[0]);
+        c.x[0] = 0;
+        c.x[1] = PAGE;
+        dispatch(c, 0x90);
+        out.push(c.x[0]);
+        c.x[0] = base + 0x2000_0000;
+        c.x[1] = TOTAL_MEMORY;
+        dispatch(c, 0x90);
+        out.push(c.x[0]);
+
+        c.x[0] = base;
+        c.x[1] = PAGE;
+        dispatch(c, 0x90);
+        out.push(c.x[0]);
+        out.push(c.process().memory.query(base).state as u64);
+        out.push(c.process().memory.query(base).perm as u64);
+        out.push(u64::from_le_bytes(
+            c.process()
+                .memory
+                .read(base, 8)
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        ));
+        c.x[0] = base;
+        c.x[1] = PAGE;
+        dispatch(c, 0x91);
+        out.push(c.x[0]);
+        out.push(c.process().memory.query(base).state as u64);
+        c.x[0] = base;
+        c.x[1] = PAGE;
+        dispatch(c, 0x91);
+        out.push(c.x[0]);
+        record("insecure", &out);
+        c.halt();
+    }
+
+    #[test]
+    fn insecure_physical_memory_allocates_zeroed_insecure_pages() {
+        run_guest(insecure_memory);
+        assert_eq!(
+            observed("insecure"),
+            vec![
+                RESULT_INVALID_SIZE,
+                RESULT_INVALID_ADDRESS,
+                RESULT_INVALID_MEMORY_REGION,
+                RESULT_LIMIT_REACHED,
+                RESULT_SUCCESS,
+                state::INSECURE as u64,
+                perm::RW as u64,
+                0,
+                RESULT_SUCCESS,
+                state::FREE as u64,
+                RESULT_INVALID_MEMORY_STATE,
+            ]
+        );
+    }
+
+    extern "C" fn terminate_self(c: &mut Cpu) {
+        c.x[0] = CURRENT_PROCESS;
+        dispatch(c, 0x7b);
+        record(
+            "terminate_self",
+            &[
+                c.halted as u64,
+                c.process().sched.exiting.load(Ordering::Relaxed) as u64,
+            ],
+        );
+        c.halt();
+    }
+
+    #[test]
+    fn terminate_process_exits_the_caller() {
+        run_guest(terminate_self);
+        assert_eq!(
+            observed("terminate_self"),
+            vec![1, 1],
+            "svcTerminateProcess on the current process exits and halts it"
         );
     }
 }

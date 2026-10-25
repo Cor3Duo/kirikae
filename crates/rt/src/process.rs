@@ -554,6 +554,7 @@ pub fn run(file: &[u8], entries: &'static [Entry], opts: RunOptions) -> Result<R
         modules: vec![Module {
             name: "main".into(),
             image,
+            module_id: [0; 32],
         }],
         entry,
         arch: kirikae_loader::Arch::A64,
@@ -667,6 +668,7 @@ pub fn run_executable(
         start: Instant::now(),
     }));
 
+    crate::services::ro::register_boot_modules(process, &exe.modules);
     if std::env::var_os("KIRIKAE_STATS").is_some() {
         crate::prof::enable();
         start_stats(process);

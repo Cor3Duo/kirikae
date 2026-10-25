@@ -53,6 +53,20 @@ impl Service for Vi {
     }
 }
 
+/// Geometry of a plane that is not the first one.
+///
+/// The guest's `NvGraphicBuffer` carries an `NvSurface` per plane; the second
+/// and third entries describe where the chroma planes live and how they are
+/// laid out. A packed buffer (the common NV12 case) leaves them zero and the
+/// decoder falls back to the plane following the luma one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PlaneGeometry {
+    offset: u64,
+    pitch: u32,
+    block_linear: bool,
+    block_height_log2: u32,
+}
+
 #[derive(Clone, Debug, Default)]
 struct Slot {
     flattened: Vec<u8>,
@@ -64,6 +78,8 @@ struct Slot {
     pitch: u32,
     block_linear: bool,
     block_height_log2: u32,
+    /// Chroma planes, when the guest describes them separately.
+    chroma: [PlaneGeometry; 2],
 }
 
 #[derive(Default)]
@@ -799,13 +815,19 @@ fn transact(c: &Cpu, id: i32, code: u32, input: &[u8]) -> Vec<u8> {
             };
             match s {
                 Some(s) => {
+                    let yuv = s.is_video_format();
                     let video = is_video_layer(p, &s);
+                    if yuv {
+                        clock::yuv_queued();
+                    }
                     crate::sched::without_gil(c, || {
                         let prof = crate::prof::enter(crate::prof::Cat::Present);
                         let shown = if video { clock::gate(timestamp) } else { true };
-                        if shown {
-                            present(p, &s, transform);
-                        }
+                        let presented = if shown {
+                            present(p, &s, transform)
+                        } else {
+                            false
+                        };
                         drop(prof);
                         // A gated video frame already waited for its presentation
                         // time; adding the generic 60 Hz limiter would make it
@@ -813,6 +835,15 @@ fn transact(c: &Cpu, id: i32, code: u32, input: &[u8]) -> Vec<u8> {
                         if shown && !video {
                             let _prof = crate::prof::enter(crate::prof::Cat::Sleep);
                             pace(crate::games::pace_interval(p, interval));
+                        }
+                        if yuv {
+                            if !shown {
+                                clock::yuv_dropped();
+                            } else if presented {
+                                clock::yuv_presented();
+                            } else {
+                                clock::yuv_failed();
+                            }
                         }
                         if shown {
                             crate::games::presented(p);
@@ -925,18 +956,34 @@ fn parse_graphic_buffer(raw: Vec<u8>) -> Slot {
     };
     let nv = 0x28;
     let surface = nv + 0x34;
+    // `NvSurface` in the marshalled buffer. `NvColorFormat` is a 64-bit enum,
+    // which puts the layout word at 0x10 and the block height at 0x24.
+    let plane = |index: usize| {
+        let at = surface + index * NV_SURFACE_SIZE;
+        PlaneGeometry {
+            offset: u(at + 0x1c) as u64,
+            pitch: u(at + 0x14),
+            block_linear: u(at + 0x10) == 3,
+            block_height_log2: u(at + 0x24).min(5),
+        }
+    };
+    let planes = [plane(0), plane(1), plane(2)];
     Slot {
         nvmap: u(nv + 0x4),
-        offset: u(surface + 0x1c) as u64,
+        offset: planes[0].offset,
         width: u(surface),
         height: u(surface + 0x4),
         format: u(0x10),
-        pitch: u(surface + 0x14),
-        block_linear: u(surface + 0x10) == 3,
-        block_height_log2: u(surface + 0x24).min(5),
+        pitch: planes[0].pitch,
+        block_linear: planes[0].block_linear,
+        block_height_log2: planes[0].block_height_log2,
+        chroma: [planes[1], planes[2]],
         flattened: raw,
     }
 }
+
+/// Size of one `NvSurface` in the marshalled `NvGraphicBuffer`.
+const NV_SURFACE_SIZE: usize = 0x58;
 
 const TRANSFORM_FLIP_H: u32 = 1;
 const TRANSFORM_FLIP_V: u32 = 2;
@@ -966,6 +1013,21 @@ enum YuvLayout {
     I420,
     /// Planar `Y V U` (`PIXEL_FORMAT_YV12`).
     Yv12,
+}
+
+/// Pixel-format codes that name a YUV layer even when the runtime cannot decode
+/// that particular layout. Used to report an unconvertible layer by format
+/// instead of presenting its bytes as RGBA.
+fn is_yuv_format_code(format: u32) -> bool {
+    matches!(
+        format,
+        // Android: YCrCb 4:2:0 SP, YCbCr 4:2:0 P, YCbCr 4:2:0 888.
+        0x11 | 0x13 | 0x23
+            // Android 10-bit semi-planar (P010).
+            | 0x36 | 0x38
+            // Gralloc fourccs: NV12 and YV12.
+            | 0x3231_564E | 0x3231_5659
+    )
 }
 
 impl PixelFormat {
@@ -1039,26 +1101,42 @@ struct LayerPlane {
     height: u64,
     /// Bytes per sample.
     bpp: u64,
+    block_linear: bool,
+    block_height_log2: u32,
 }
 
 impl LayerPlane {
-    fn new(slot: &Slot, start: u64, width: u64, height: u64, bpp: u64) -> LayerPlane {
-        let row_bytes = if slot.block_linear {
+    fn new(
+        geometry: PlaneGeometry,
+        start: u64,
+        width: u64,
+        height: u64,
+        bpp: u64,
+        fallback_pitch: u32,
+    ) -> LayerPlane {
+        let pitch = if geometry.pitch != 0 {
+            geometry.pitch
+        } else {
+            fallback_pitch
+        };
+        let row_bytes = if geometry.block_linear {
             (width * bpp).div_ceil(64) * 64
         } else {
-            (slot.pitch as u64).max(width * bpp)
+            (pitch as u64).max(width * bpp)
         };
         LayerPlane {
             start,
             row_bytes,
             height,
             bpp,
+            block_linear: geometry.block_linear,
+            block_height_log2: geometry.block_height_log2,
         }
     }
 
-    fn size(&self, slot: &Slot) -> u64 {
-        let rows = if slot.block_linear {
-            let gob = 8u64 << slot.block_height_log2;
+    fn size(&self) -> u64 {
+        let rows = if self.block_linear {
+            let gob = 8u64 << self.block_height_log2;
             self.height.div_ceil(gob) * gob
         } else {
             self.height
@@ -1067,9 +1145,9 @@ impl LayerPlane {
     }
 
     /// Byte offset of the sample at (`x`, `y`) inside the layer buffer.
-    fn offset(&self, slot: &Slot, x: u64, y: u64) -> usize {
-        let at = if slot.block_linear {
-            crate::gpu::block_linear_offset(x * self.bpp, y, self.row_bytes, slot.block_height_log2)
+    fn offset(&self, x: u64, y: u64) -> usize {
+        let at = if self.block_linear {
+            crate::gpu::block_linear_offset(x * self.bpp, y, self.row_bytes, self.block_height_log2)
         } else {
             y * self.row_bytes + x * self.bpp
         };
@@ -1079,33 +1157,78 @@ impl LayerPlane {
 
 impl Slot {
     fn is_video_format(&self) -> bool {
-        matches!(
-            PixelFormat::from_android(self.format),
-            Some(PixelFormat::Yuv(_))
-        )
+        is_yuv_format_code(self.format)
+            || matches!(
+                PixelFormat::from_android(self.format),
+                Some(PixelFormat::Yuv(_))
+            )
+    }
+
+    /// Layout of plane `index`, with a packed buffer's planes inheriting the
+    /// luma layout when the guest leaves the secondary `NvSurface` empty.
+    fn plane(&self, index: usize) -> PlaneGeometry {
+        if index == 0 {
+            return PlaneGeometry {
+                offset: self.offset,
+                pitch: self.pitch,
+                block_linear: self.block_linear,
+                block_height_log2: self.block_height_log2,
+            };
+        }
+        let plane = self.chroma[index - 1];
+        if plane == PlaneGeometry::default() {
+            PlaneGeometry {
+                offset: 0,
+                pitch: 0,
+                block_linear: self.block_linear,
+                block_height_log2: self.block_height_log2,
+            }
+        } else {
+            plane
+        }
+    }
+
+    /// Start of plane `index` measured from the first byte of the buffer.
+    fn plane_start(&self, index: usize, fallback: u64) -> u64 {
+        if index == 0 {
+            return 0;
+        }
+        let offset = self.chroma[index - 1].offset;
+        if offset == 0 {
+            fallback
+        } else {
+            offset.saturating_sub(self.offset)
+        }
     }
 
     /// Planes of this layer buffer in `format`.
     ///
-    /// Chroma follows the luma plane directly: the layer stack allocates one
-    /// buffer per layer, and every format we accept packs its planes back to
-    /// back (planar or interleaved) in that order.
+    /// Chroma follows the luma plane unless the guest's `NvGraphicBuffer`
+    /// describes the secondary planes itself, which is what planar 4:2:0
+    /// allocations and buffers with a padded luma plane do.
     fn planes(&self, format: PixelFormat) -> Option<Vec<LayerPlane>> {
         let (w, h) = (self.width as u64, self.height as u64);
         if w == 0 || h == 0 {
             return None;
         }
         let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
-        let luma = LayerPlane::new(self, 0, w, h, format.bytes_per_pixel());
-        let after_luma = luma.size(self);
+        let luma = LayerPlane::new(self.plane(0), 0, w, h, format.bytes_per_pixel(), self.pitch);
+        let after_luma = luma.size();
         Some(match format {
             PixelFormat::Yuv(YuvLayout::Nv12 | YuvLayout::Nv21) => {
-                vec![luma, LayerPlane::new(self, after_luma, cw * 2, ch, 1)]
+                let start = self.plane_start(1, after_luma);
+                vec![
+                    luma,
+                    LayerPlane::new(self.plane(1), start, cw * 2, ch, 1, self.pitch),
+                ]
             }
             PixelFormat::Yuv(YuvLayout::I420 | YuvLayout::Yv12) => {
-                let plane = LayerPlane::new(self, after_luma, cw, ch, 1);
-                let after = after_luma + plane.size(self);
-                vec![luma, plane, LayerPlane::new(self, after, cw, ch, 1)]
+                let start = self.plane_start(1, after_luma);
+                let u = LayerPlane::new(self.plane(1), start, cw, ch, 1, self.pitch);
+                let after_u = u.start + u.size();
+                let start = self.plane_start(2, after_u);
+                let v = LayerPlane::new(self.plane(2), start, cw, ch, 1, self.pitch);
+                vec![luma, u, v]
             }
             _ => vec![luma],
         })
@@ -1114,13 +1237,10 @@ impl Slot {
 
 impl YuvLayout {
     /// The U and V samples of the chroma block that covers pixel (`x`, `y`).
-    fn chroma(self, bytes: &[u8], slot: &Slot, planes: &[LayerPlane], x: u64, y: u64) -> (u8, u8) {
+    fn chroma(self, bytes: &[u8], planes: &[LayerPlane], x: u64, y: u64) -> (u8, u8) {
         let (cx, cy) = (x / 2, y / 2);
         let at = |plane: &LayerPlane, sample: u64| {
-            bytes
-                .get(plane.offset(slot, sample, cy))
-                .copied()
-                .unwrap_or(0)
+            bytes.get(plane.offset(sample, cy)).copied().unwrap_or(0)
         };
         // Interleaved planes hold one U and one V byte per chroma sample, so the
         // byte index is twice the chroma coordinate.
@@ -1134,12 +1254,8 @@ impl YuvLayout {
 }
 
 /// Bytes needed to read the whole layer buffer.
-fn buffer_size(slot: &Slot, planes: &[LayerPlane]) -> u64 {
-    planes
-        .iter()
-        .map(|p| p.start + p.size(slot))
-        .max()
-        .unwrap_or(0)
+fn buffer_size(planes: &[LayerPlane]) -> u64 {
+    planes.iter().map(|p| p.start + p.size()).max().unwrap_or(0)
 }
 
 /// Decodes a layer buffer into `0x00RRGGBB` pixels.
@@ -1149,11 +1265,11 @@ fn decode_layer(bytes: &[u8], slot: &Slot, planes: &[LayerPlane], format: PixelF
     let luma = &planes[0];
     for y in 0..h {
         for x in 0..w {
-            let at = luma.offset(slot, x, y);
+            let at = luma.offset(x, y);
             let pixel = match format {
                 PixelFormat::Yuv(layout) => {
                     let sample = bytes.get(at).copied().unwrap_or(0);
-                    let (u, v) = layout.chroma(bytes, slot, planes, x, y);
+                    let (u, v) = layout.chroma(bytes, planes, x, y);
                     yuv_to_rgb(sample, u, v)
                 }
                 _ => {
@@ -1168,6 +1284,27 @@ fn decode_layer(bytes: &[u8], slot: &Slot, planes: &[LayerPlane], format: PixelF
         }
     }
     pixels
+}
+
+/// Decodes a whole layer buffer into the frame the presenter uploads.
+///
+/// Returns `None` instead of a black frame when the buffer is shorter than the
+/// planes the guest described, so a truncated or unmapped layer is reported and
+/// skipped rather than shown as black video.
+fn decode_frame(bytes: &[u8], slot: &Slot, format: PixelFormat, transform: u32) -> Option<Frame> {
+    let planes = slot.planes(format)?;
+    if buffer_size(&planes) > bytes.len() as u64 {
+        return None;
+    }
+    let pixels = decode_layer(bytes, slot, &planes, format);
+    Some(transformed(
+        Frame {
+            width: slot.width,
+            height: slot.height,
+            pixels,
+        },
+        transform,
+    ))
 }
 
 /// Applies the buffer's transform (flips and quarter-turn rotation) while
@@ -1223,17 +1360,8 @@ fn read_frame_from_memory(
     transform: u32,
 ) -> Option<Frame> {
     let planes = s.planes(format)?;
-    let size = buffer_size(s, &planes);
-    let bytes = p.memory.read(cpu, size)?;
-    let pixels = decode_layer(&bytes, s, &planes, format);
-    Some(transformed(
-        Frame {
-            width: s.width,
-            height: s.height,
-            pixels,
-        },
-        transform,
-    ))
+    let bytes = p.memory.read(cpu, buffer_size(&planes))?;
+    decode_frame(&bytes, s, format, transform)
 }
 
 /// Whether a layer carries video.
@@ -1249,22 +1377,36 @@ fn is_video_layer(p: &Process, s: &Slot) -> bool {
             .is_some_and(|m| clock::is_video_surface(m.addr + s.offset))
 }
 
-fn present(p: &Process, s: &Slot, transform: u32) {
+/// Presents one queued layer buffer. Returns whether a frame reached the
+/// display path.
+fn present(p: &Process, s: &Slot, transform: u32) -> bool {
     if transform & !TRANSFORM_MASK != 0 {
         p.warn_once(format!(
             "vi: buffer transform {transform:#x} is not supported"
         ));
     }
-    let format = PixelFormat::from_android(s.format).unwrap_or_else(|| {
-        p.warn_once(format!(
-            "vi: pixel format {} is shown as RGBA8888",
-            s.format
-        ));
-        PixelFormat::Rgba8888
-    });
+    let format = match PixelFormat::from_android(s.format) {
+        Some(format) => format,
+        None if is_yuv_format_code(s.format) => {
+            // A YUV layer we cannot convert is a gap in the pipeline, not an
+            // RGBA layer: show the last frame and name the format.
+            p.warn_once(format!(
+                "vi: YUV layer format {} cannot be converted; frame not presented",
+                s.format
+            ));
+            return false;
+        }
+        None => {
+            p.warn_once(format!(
+                "vi: pixel format {} is shown as RGBA8888",
+                s.format
+            ));
+            PixelFormat::Rgba8888
+        }
+    };
     let Some(m) = p.gpu.nvmap(s.nvmap) else {
         p.warn_once(format!("vi: buffer uses unknown nvmap handle {}", s.nvmap));
-        return;
+        return false;
     };
     if let Some(dir) = std::env::var_os("KIRIKAE_TARGET_DUMP") {
         let n = display::FRAMES.load(std::sync::atomic::Ordering::Relaxed) + 1;
@@ -1278,6 +1420,21 @@ fn present(p: &Process, s: &Slot, transform: u32) {
         }
     }
     let cpu = m.addr + s.offset;
+    // YUV layers never reach the swapchain as an image: decode the planes and
+    // upload the BT.601-converted pixels through the RGB present path, applying
+    // the layer transform while copying.
+    if matches!(format, PixelFormat::Yuv(_)) {
+        let Some(frame) = read_frame_from_memory(p, cpu, s, format, transform) else {
+            p.warn_once(format!(
+                "vi: YUV layer format {} at {cpu:#x} could not be read; frame not presented",
+                s.format
+            ));
+            return false;
+        };
+        clock::converted();
+        present_frame(p, frame);
+        return true;
+    }
     let (flip_h, flip_v) = (
         transform & TRANSFORM_FLIP_H != 0,
         transform & TRANSFORM_FLIP_V != 0,
@@ -1298,21 +1455,22 @@ fn present(p: &Process, s: &Slot, transform: u32) {
             None
         };
         display::presented(p, frame.as_ref());
-        return;
+        return true;
     }
     if direct && display::headless() && !dump && p.gpu.rendered(cpu, s.width, s.height) {
         display::presented(p, None);
-        return;
+        return true;
     }
     if readable && let Some(frame) = read_frame(p, s, transform) {
         present_frame(p, frame);
-        return;
+        return true;
     }
     let Some(frame) = read_frame_from_memory(p, cpu, s, format, transform) else {
         p.warn_once(format!("vi: buffer at {cpu:#x} is not readable"));
-        return;
+        return false;
     };
     present_frame(p, frame);
+    true
 }
 
 /// Presents a decoded frame: through the swapchain when one is available,
@@ -1525,7 +1683,7 @@ mod tests {
 
     fn decode(slot: &Slot, format: PixelFormat, bytes: &[u8]) -> Vec<u32> {
         let planes = slot.planes(format).unwrap();
-        assert!(buffer_size(slot, &planes) as usize <= bytes.len());
+        assert!(buffer_size(&planes) as usize <= bytes.len());
         decode_layer(bytes, slot, &planes, format)
     }
 
@@ -1607,7 +1765,7 @@ mod tests {
     #[test]
     fn yuv_buffer_size_covers_the_chroma_plane() {
         let slot = yuv_slot(4, 2, 8);
-        let size = |format| buffer_size(&slot, &slot.planes(format).unwrap());
+        let size = |format| buffer_size(&slot.planes(format).unwrap());
         // Both luma and chroma rows use the layer pitch.
         assert_eq!(size(PixelFormat::Yuv(YuvLayout::Nv12)), 16 + 8);
         assert_eq!(size(PixelFormat::Yuv(YuvLayout::I420)), 16 + 8 + 8);
@@ -1619,12 +1777,212 @@ mod tests {
             ..yuv_slot(4, 2, 8)
         };
         assert_eq!(
-            buffer_size(
-                &block,
-                &block.planes(PixelFormat::Yuv(YuvLayout::Nv12)).unwrap()
-            ),
+            buffer_size(&block.planes(PixelFormat::Yuv(YuvLayout::Nv12)).unwrap()),
             64 * 16 + 64 * 16
         );
+    }
+
+    /// The bytes `Gpu::present_pixels` uploads: each `0x00RRGGBB` word as a
+    /// little-endian BGRA texel.
+    fn swapchain_bytes(pixels: &[u32]) -> Vec<u8> {
+        pixels.iter().flat_map(|p| p.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn a_yuv_frame_reaches_the_swapchain_as_bt601_rgb() {
+        let slot = yuv_slot(4, 1, 4);
+        let mut bytes = LUMA.to_vec();
+        for (u, v) in CHROMA {
+            bytes.extend_from_slice(&[u, v]);
+        }
+        let frame = decode_frame(&bytes, &slot, PixelFormat::Yuv(YuvLayout::Nv12), 0).unwrap();
+        assert_eq!(frame.pixels, expected());
+        // B8G8R8A8: black keeps alpha at zero, white is all-ones, and the chroma
+        // pair lands on pure red.
+        assert_eq!(
+            swapchain_bytes(&frame.pixels),
+            [
+                0, 0, 0, 0, // black
+                255, 255, 255, 0, // white
+                0, 0, 255, 0, // red
+                0, 0, 255, 0, // red
+            ]
+        );
+    }
+
+    #[test]
+    fn every_yuv_layout_converts_to_the_same_swapchain_bytes() {
+        let slot = yuv_slot(4, 1, 4);
+        let mut u: Vec<u8> = CHROMA.iter().map(|c| c.0).collect();
+        u.resize(4, 0);
+        let mut v: Vec<u8> = CHROMA.iter().map(|c| c.1).collect();
+        v.resize(4, 0);
+
+        let mut nv12 = LUMA.to_vec();
+        for (u, v) in CHROMA {
+            nv12.extend_from_slice(&[u, v]);
+        }
+        let mut nv21 = LUMA.to_vec();
+        for (u, v) in CHROMA {
+            nv21.extend_from_slice(&[v, u]);
+        }
+        let mut i420 = LUMA.to_vec();
+        i420.extend_from_slice(&u);
+        i420.extend_from_slice(&v);
+        let mut yv12 = LUMA.to_vec();
+        yv12.extend_from_slice(&v);
+        yv12.extend_from_slice(&u);
+
+        for (layout, bytes) in [
+            (YuvLayout::Nv12, nv12),
+            (YuvLayout::Nv21, nv21),
+            (YuvLayout::I420, i420),
+            (YuvLayout::Yv12, yv12),
+        ] {
+            let frame = decode_frame(&bytes, &slot, PixelFormat::Yuv(layout), 0).unwrap();
+            assert_eq!(frame.pixels, expected(), "{layout:?}");
+            assert_eq!(
+                swapchain_bytes(&frame.pixels),
+                swapchain_bytes(&expected()),
+                "{layout:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn block_linear_yuv_planes_decode_in_gob_order() {
+        let slot = Slot {
+            width: 4,
+            height: 2,
+            block_linear: true,
+            block_height_log2: 1,
+            ..Slot::default()
+        };
+        let planes = slot.planes(PixelFormat::Yuv(YuvLayout::Nv12)).unwrap();
+        let luma = crate::host1x::to_block_linear(&[16, 235, 81, 81, 16, 16, 16, 16], 4, 4, 2, 1);
+        let chroma = crate::host1x::to_block_linear(&[128, 128, 90, 240], 4, 4, 1, 1);
+        let mut bytes = vec![0u8; buffer_size(&planes) as usize];
+        bytes[..luma.len()].copy_from_slice(&luma);
+        let after_luma = planes[0].size() as usize;
+        bytes[after_luma..after_luma + chroma.len()].copy_from_slice(&chroma);
+
+        let frame = decode_frame(&bytes, &slot, PixelFormat::Yuv(YuvLayout::Nv12), 0).unwrap();
+        let red = yuv_to_rgb(16, 90, 240);
+        assert_eq!(
+            frame.pixels,
+            [
+                0x000000,
+                0x00ff_ffff,
+                0x00ff_0000,
+                0x00ff_0000,
+                0,
+                0,
+                red,
+                red,
+            ]
+        );
+    }
+
+    #[test]
+    fn secondary_plane_geometry_from_the_graphic_buffer_is_honoured() {
+        let mut raw = vec![0u8; 8 + 0x140];
+        {
+            let mut put = |at: usize, value: u32| {
+                raw[8 + at..8 + at + 4].copy_from_slice(&value.to_le_bytes());
+            };
+            put(0x10, 0x11); // android format: YCrCb 420 SP
+            put(0x2c, 7); // nvmap id
+            put(0x5c, 4); // width
+            put(0x60, 2); // height
+            put(0x6c, 1); // plane 0 layout: pitch
+            put(0x70, 8); // plane 0 pitch
+            put(0x78, 0x100); // plane 0 offset
+            put(0xb4 + 0x10, 1);
+            put(0xb4 + 0x14, 4); // chroma pitch
+            put(0xb4 + 0x1c, 0x120);
+            put(0x10c + 0x10, 1);
+            put(0x10c + 0x14, 4);
+            put(0x10c + 0x1c, 0x140);
+        }
+        let slot = parse_graphic_buffer(raw);
+        assert_eq!(slot.nvmap, 7);
+        assert_eq!((slot.width, slot.height), (4, 2));
+        assert_eq!(slot.format, 0x11);
+        assert_eq!((slot.offset, slot.pitch), (0x100, 8));
+        assert_eq!((slot.chroma[0].offset, slot.chroma[0].pitch), (0x120, 4));
+        assert_eq!((slot.chroma[1].offset, slot.chroma[1].pitch), (0x140, 4));
+
+        // Chroma starts where the guest says, not immediately after luma.
+        let nv21 = slot.planes(PixelFormat::Yuv(YuvLayout::Nv21)).unwrap();
+        assert_eq!(nv21[1].start, 0x120 - 0x100);
+        assert_eq!(nv21[1].row_bytes, 4);
+        let i420 = slot.planes(PixelFormat::Yuv(YuvLayout::I420)).unwrap();
+        assert_eq!(i420[1].start, 0x20);
+        assert_eq!(i420[2].start, 0x40);
+    }
+
+    #[test]
+    fn rgba_layers_do_not_go_through_the_yuv_conversion() {
+        let slot = Slot {
+            width: 1,
+            height: 1,
+            pitch: 4,
+            format: 1, // PIXEL_FORMAT_RGBA_8888
+            ..Slot::default()
+        };
+        assert!(!slot.is_video_format());
+        assert!(!is_yuv_format_code(slot.format));
+        // Luma 16 would be video black; RGBA 16 is a dark grey.
+        let frame = decode_frame(
+            &[16, 16, 16, 0xff],
+            &slot,
+            PixelFormat::from_android(slot.format).unwrap(),
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame.pixels, [0x0010_1010]);
+        // Formats the runtime knows are YUV but cannot decode are still video.
+        for format in [0x11, 0x13, 0x23, 0x36, 0x38, 0x3231_564E, 0x3231_5659] {
+            assert!(is_yuv_format_code(format), "{format:#x}");
+        }
+        assert!(!is_yuv_format_code(1));
+        assert!(!is_yuv_format_code(0x16));
+    }
+
+    #[test]
+    fn yuv_frames_apply_the_layer_transform() {
+        let slot = yuv_slot(3, 2, 4);
+        let mut bytes = vec![10, 20, 30, 0, 40, 50, 60, 0];
+        bytes.extend_from_slice(&[128, 128, 128, 128]);
+
+        let plain = decode_frame(&bytes, &slot, PixelFormat::Yuv(YuvLayout::Nv12), 0).unwrap();
+        let turned = decode_frame(
+            &bytes,
+            &slot,
+            PixelFormat::Yuv(YuvLayout::Nv12),
+            TRANSFORM_ROT_90,
+        )
+        .unwrap();
+        assert_eq!((turned.width, turned.height), (2, 3));
+        // Clockwise: bottom-left, top-left, bottom-middle, ...
+        assert_eq!(
+            turned.pixels,
+            [
+                plain.pixels[3],
+                plain.pixels[0],
+                plain.pixels[4],
+                plain.pixels[1],
+                plain.pixels[5],
+                plain.pixels[2],
+            ]
+        );
+    }
+
+    #[test]
+    fn a_truncated_yuv_buffer_is_not_presented_as_black() {
+        let slot = yuv_slot(4, 2, 8);
+        // The luma plane alone is not enough for the NV12 buffer.
+        assert!(decode_frame(&[16; 16], &slot, PixelFormat::Yuv(YuvLayout::Nv12), 0).is_none());
     }
 
     #[test]

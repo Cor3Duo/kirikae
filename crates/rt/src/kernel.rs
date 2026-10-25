@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-use crate::mem::GuestMemory;
+use crate::mem::{GuestMemory, Region};
 use crate::services::Service;
 
 pub const PSEUDO_CURRENT_THREAD: u32 = 0xffff_8000;
@@ -620,21 +620,32 @@ pub fn named_port_count() -> usize {
 /// host view, so a mapping is a copy that is written back when it is unmapped;
 /// the creator's pages stay the source of truth, which is why only one mapping
 /// exists at a time, as the kernel guarantees.
+///
+/// The claim is a lease, not a new home: closing every handle clears the lock
+/// and resets the state and permission the pages had before creation (the
+/// `MemState_TransferMemAllowed` they came from). Without that release a block
+/// would keep pages out of the heap forever, which is what stopped the nlibsdk
+/// heap in Brilliant Diamond from adopting its physical range.
 pub struct TransferMemory {
     pub addr: u64,
     pub size: u64,
     /// The permission the creating process kept.
     pub perm: u32,
+    /// State and permission the pages had before the retag.
+    saved: Vec<Region>,
     mapped_at: Mutex<Option<u64>>,
+    released: Mutex<bool>,
 }
 
 impl TransferMemory {
-    pub fn new(addr: u64, size: u64, perm: u32) -> Arc<TransferMemory> {
+    pub fn new(addr: u64, size: u64, perm: u32, saved: Vec<Region>) -> Arc<TransferMemory> {
         Arc::new(TransferMemory {
             addr,
             size,
             perm,
+            saved,
             mapped_at: Mutex::new(None),
+            released: Mutex::new(false),
         })
     }
 
@@ -669,6 +680,30 @@ impl TransferMemory {
         }
         *mapped_at = None;
         memory.unmap(addr, self.size).is_ok()
+    }
+
+    /// `svcCloseHandle` of the last handle: drops any alias (writing it back)
+    /// and restores the creator's pages. Idempotent; `false` when the saved
+    /// pages are no longer transfer memory, in which case nothing is released.
+    pub fn release(&self, memory: &GuestMemory) -> bool {
+        let mut released = self.released.lock().unwrap();
+        if *released {
+            return true;
+        }
+        if let Some(at) = self.mapped_at.lock().unwrap().take() {
+            let copied = memory.copy(self.addr, at, self.size);
+            let unmapped = memory.unmap(at, self.size).is_ok();
+            if !copied || !unmapped {
+                *self.mapped_at.lock().unwrap() = Some(at);
+                return false;
+            }
+        }
+        if memory.restore(&self.saved) {
+            *released = true;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn mapped_at(&self) -> Option<u64> {
@@ -1055,7 +1090,7 @@ impl KThread {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ThreadContext {
     pub x: [u64; 31],
     pub sp: u64,
@@ -1069,6 +1104,26 @@ pub struct ThreadContext {
 
 impl ThreadContext {
     pub const SIZE: usize = 0x320;
+
+    /// `ThreadContextFlags` from the SVC page: the register groups
+    /// `svcGetDebugThreadContext` and `svcSetDebugThreadContext` select.
+    pub const FLAG_GPRS: u32 = 1;
+    pub const FLAG_CONTROL: u32 = 2;
+    pub const FLAG_VECTOR: u32 = 4;
+    pub const FLAG_FP_CONTROL: u32 = 8;
+    pub const FLAGS_ALL: u32 = 0xf;
+
+    /// x0..x28 end here; x29/x30 belong to the control group.
+    const GPRS_END: usize = 0xe8;
+    /// fp, lr, sp, pc and psr end here.
+    const CONTROL_END: usize = 0x10c;
+    const SP: usize = 0xf8;
+    const PC: usize = 0x100;
+    const PSR: usize = 0x108;
+    const VECTOR_START: usize = 0x110;
+    const VECTOR_END: usize = 0x310;
+    const FP_CONTROL: usize = 0x310;
+    const TPIDR: usize = 0x318;
 
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(Self::SIZE);
@@ -1086,6 +1141,97 @@ impl ThreadContext {
         debug_assert_eq!(out.len(), Self::SIZE);
         out
     }
+
+    /// Parses the kernel's `ThreadContext`. `None` when `bytes` is shorter
+    /// than [`Self::SIZE`], which is the only way this can fail.
+    pub fn from_bytes(bytes: &[u8]) -> Option<ThreadContext> {
+        fn word(bytes: &[u8], at: usize) -> Option<u64> {
+            Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
+        }
+        fn dword(bytes: &[u8], at: usize) -> Option<u32> {
+            Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+        }
+        if bytes.len() < Self::SIZE {
+            return None;
+        }
+        let mut x = [0u64; 31];
+        for (i, r) in x.iter_mut().enumerate() {
+            *r = word(bytes, i * 8)?;
+        }
+        let mut v = [[0u64; 2]; 32];
+        for (i, q) in v.iter_mut().enumerate() {
+            q[0] = word(bytes, Self::VECTOR_START + i * 16)?;
+            q[1] = word(bytes, Self::VECTOR_START + i * 16 + 8)?;
+        }
+        Some(ThreadContext {
+            x,
+            sp: word(bytes, Self::SP)?,
+            pc: word(bytes, Self::PC)?,
+            psr: dword(bytes, Self::PSR)?,
+            v,
+            fpcr: dword(bytes, Self::FP_CONTROL)?,
+            fpsr: dword(bytes, Self::FP_CONTROL + 4)?,
+            tpidr: word(bytes, Self::TPIDR)?,
+        })
+    }
+
+    /// Writes the register groups `flags` selects into `out`, leaving every
+    /// other byte untouched. This is what the kernel does with the output
+    /// buffer of `svcGetDebugThreadContext`.
+    pub fn merge_into(&self, out: &mut [u8], flags: u32) {
+        debug_assert_eq!(out.len(), Self::SIZE);
+        let src = self.to_bytes();
+        let mut copy = |range: std::ops::Range<usize>| {
+            out[range.clone()].copy_from_slice(&src[range]);
+        };
+        if flags & Self::FLAG_GPRS != 0 {
+            copy(0..Self::GPRS_END);
+        }
+        if flags & Self::FLAG_CONTROL != 0 {
+            copy(Self::GPRS_END..Self::CONTROL_END);
+            copy(Self::TPIDR..Self::SIZE);
+        }
+        if flags & Self::FLAG_VECTOR != 0 {
+            copy(Self::VECTOR_START..Self::VECTOR_END);
+        }
+        if flags & Self::FLAG_FP_CONTROL != 0 {
+            copy(Self::VECTOR_END..Self::TPIDR);
+        }
+    }
+}
+
+/// A hardware breakpoint or watchpoint set with `svcSetHardwareBreakPoint`.
+/// The runtime records it but never arms it: guest code runs as recompiled host
+/// functions, so there is no per-instruction debug unit to match and no
+/// debugger to stop at the address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HardwareBreakpoint {
+    pub flags: u64,
+    pub value: u64,
+}
+
+/// Six breakpoints (`DBGBCR0..5`) and four watchpoints (`DBGWCR0..3`).
+pub const HARDWARE_BREAKPOINTS: usize = 6;
+pub const HARDWARE_WATCHPOINTS: usize = 4;
+
+static BREAKPOINTS: Mutex<
+    [Option<HardwareBreakpoint>; HARDWARE_BREAKPOINTS + HARDWARE_WATCHPOINTS],
+> = Mutex::new([None; HARDWARE_BREAKPOINTS + HARDWARE_WATCHPOINTS]);
+
+/// Records breakpoint `slot` (0-5 for breakpoints, 6-9 for watchpoints).
+/// `false` when the slot does not exist.
+pub fn set_hardware_breakpoint(slot: usize, flags: u64, value: u64) -> bool {
+    let mut breakpoints = BREAKPOINTS.lock().unwrap();
+    let Some(entry) = breakpoints.get_mut(slot) else {
+        return false;
+    };
+    *entry = Some(HardwareBreakpoint { flags, value });
+    true
+}
+
+/// The breakpoint recorded in `slot`, for diagnostics and tests.
+pub fn hardware_breakpoint(slot: usize) -> Option<HardwareBreakpoint> {
+    BREAKPOINTS.lock().unwrap().get(slot).copied().flatten()
 }
 
 #[derive(Clone)]
@@ -1304,6 +1450,57 @@ mod tests {
         assert_eq!(u64_at(0x108), 0x6000_0000);
         assert_eq!((u64_at(0x300), u64_at(0x308)), (0x11, 0x22));
         assert_eq!((u64_at(0x310), u64_at(0x318)), (7 | 8 << 32, 0x9999));
+        assert_eq!(
+            ThreadContext::from_bytes(&b),
+            Some(ctx),
+            "the kernel ThreadContext parses back"
+        );
+    }
+
+    #[test]
+    fn thread_context_groups_leave_unselected_bytes_alone() {
+        let mut ctx = ThreadContext {
+            sp: 0x1111,
+            pc: 0x2222,
+            psr: 0x3333,
+            fpcr: 0x4444,
+            fpsr: 0x5555,
+            tpidr: 0x6666,
+            ..Default::default()
+        };
+        ctx.x[0] = 0x7777;
+        ctx.x[29] = 0x8888;
+        ctx.x[30] = 0x9999;
+        ctx.v[0] = [0xaaaa, 0xbbbb];
+        let src = ctx.to_bytes();
+        let untouched = 0x5a;
+
+        let mut out = vec![untouched; ThreadContext::SIZE];
+        ctx.merge_into(&mut out, ThreadContext::FLAG_GPRS);
+        assert_eq!(&out[..0xe8], &src[..0xe8], "x0..x28");
+        assert!(out[0xe8..].iter().all(|&b| b == untouched));
+
+        let mut out = vec![untouched; ThreadContext::SIZE];
+        ctx.merge_into(&mut out, ThreadContext::FLAG_CONTROL);
+        assert!(out[..0xe8].iter().all(|&b| b == untouched));
+        assert_eq!(&out[0xe8..0x10c], &src[0xe8..0x10c], "fp, lr, sp, pc, psr");
+        assert_eq!(&out[0x318..], &src[0x318..], "tpidr");
+        assert!(out[0x10c..0x318].iter().all(|&b| b == untouched));
+
+        let mut out = vec![untouched; ThreadContext::SIZE];
+        ctx.merge_into(
+            &mut out,
+            ThreadContext::FLAG_VECTOR | ThreadContext::FLAG_FP_CONTROL,
+        );
+        assert_eq!(&out[0x110..0x310], &src[0x110..0x310], "v0..v31");
+        assert_eq!(&out[0x310..0x318], &src[0x310..0x318], "fpcr, fpsr");
+        assert!(out[..0x110].iter().all(|&b| b == untouched));
+
+        assert_eq!(
+            ThreadContext::from_bytes(&src[..ThreadContext::SIZE - 1]),
+            None,
+            "a short buffer is refused, not read past its end"
+        );
     }
 
     #[test]
@@ -1437,14 +1634,16 @@ mod tests {
             .unwrap();
         assert!(memory.write(0x2_0000_0000, b"jit"));
         // svcCreateTransferMemory keeps the pages with the creator, retagged.
-        assert!(memory.retag(
-            0x2_0000_0000,
-            0x2_0000_2000,
-            crate::mem::state::TRANSFER,
-            crate::mem::perm::NONE,
-            &[crate::mem::state::NORMAL],
-        ));
-        let tmem = TransferMemory::new(0x2_0000_0000, 0x2000, crate::mem::perm::NONE);
+        let saved = memory
+            .retag_leased(
+                0x2_0000_0000,
+                0x2_0000_2000,
+                crate::mem::state::TRANSFER,
+                crate::mem::perm::NONE,
+                &[crate::mem::state::NORMAL],
+            )
+            .expect("the pages become transfer memory");
+        let tmem = TransferMemory::new(0x2_0000_0000, 0x2000, crate::mem::perm::NONE, saved);
         assert!(tmem.map(&memory, 0x2_0000_2000, crate::mem::perm::NONE));
         assert_eq!(
             memory.query(0x2_0000_2000).state,
@@ -1465,6 +1664,24 @@ mod tests {
         assert_eq!(tmem.mapped_at(), None);
         assert!(tmem.map(&memory, 0x2_0000_2000, crate::mem::perm::NONE));
         assert_eq!(&memory.read(0x2_0000_2000, 3).unwrap(), b"NEW");
+
+        // The last handle releases the lease: the creator's tags come back and
+        // a live alias is dropped after writing it back.
+        assert!(memory.write(0x2_0000_2000, b"END"));
+        assert!(tmem.release(&memory));
+        assert!(!memory.is_mapped(0x2_0000_2000, 1), "the alias is gone");
+        let restored = memory.query(0x2_0000_0000);
+        assert_eq!(
+            (restored.range, restored.state, restored.perm),
+            (
+                0x2_0000_0000..0x2_0000_2000,
+                crate::mem::state::NORMAL,
+                crate::mem::perm::RW
+            ),
+            "the pages return to the state and permission they had"
+        );
+        assert_eq!(&memory.read(0x2_0000_0000, 3).unwrap(), b"END");
+        assert!(tmem.release(&memory), "release is idempotent");
     }
 
     #[test]

@@ -8,6 +8,9 @@ use crate::{Error, Image, LOAD_BASE, align_up, nca, nro, nso, pfs0};
 pub struct Module {
     pub name: String,
     pub image: Image,
+    /// The `ModuleId` from the NSO header: the build id the SDK reports to
+    /// `nn::ro`. Homebrew modules and synthetic test images may leave it zero.
+    pub module_id: [u8; 32],
 }
 
 /// Instruction set of the program's code modules.
@@ -76,10 +79,12 @@ pub fn from_exefs(
             continue;
         };
         let image = nso::load(bytes, base)?;
+        let module_id = nso::Header::parse(bytes)?.module_id;
         base = align_up(image.end(), 0x1000);
         modules.push(Module {
             name: name.to_string(),
             image,
+            module_id,
         });
     }
     let entry = modules
@@ -178,6 +183,7 @@ fn single(name: &str, image: Image) -> Executable {
         modules: vec![Module {
             name: name.to_string(),
             image,
+            module_id: [0; 32],
         }],
         entry,
         arch: Arch::A64,

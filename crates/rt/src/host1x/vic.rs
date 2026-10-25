@@ -536,14 +536,34 @@ impl Vic {
         }
         if video {
             let (cw, ch) = surface.chroma;
-            let len = match format {
-                OutputFormat::Nv12 => width * height + cw * 2 * ch,
-                OutputFormat::I420 => width * height + 2 * cw * ch,
-                OutputFormat::P010 => width * height * 2 + cw * 4 * ch,
-                _ => width * height * format.bytes_per_pixel(),
-            };
-            if let Some(cpu) = dma.cpu(offset, len) {
-                clock::composed_surface(cpu, len);
+            // Each plane may live in its own mapping: tag them separately so a
+            // composed NV12/I420/P010 surface is recognised by VI as video.
+            let mut planes: Vec<(u32, usize)> =
+                vec![(offset, width * height * format.bytes_per_pixel())];
+            match format {
+                OutputFormat::Nv12 => {
+                    planes[0].1 = width * height;
+                    planes.push((self.regs[reg::OUTPUT_SURFACE + 1], cw * 2 * ch));
+                }
+                OutputFormat::I420 => {
+                    planes[0].1 = width * height;
+                    planes.push((self.regs[reg::OUTPUT_SURFACE + 1], cw * ch));
+                    planes.push((self.regs[reg::OUTPUT_SURFACE + 2], cw * ch));
+                }
+                OutputFormat::P010 => {
+                    planes[0].1 = width * height * 2;
+                    planes.push((self.regs[reg::OUTPUT_SURFACE + 1], cw * 4 * ch));
+                }
+                _ => {}
+            }
+            for (index, (at, len)) in planes.into_iter().enumerate() {
+                if let Some(cpu) = dma.cpu(at, len) {
+                    if index == 0 {
+                        clock::composed_surface(cpu, len);
+                    } else {
+                        clock::tag_video_surface(cpu, len);
+                    }
+                }
             }
         }
         Ok(())
@@ -1526,5 +1546,17 @@ mod tests {
             words(&h.read_plane(h.output_u, 2 * 2 * 2, 1)),
             [400u16, 440, 480, 520]
         );
+    }
+
+    #[test]
+    fn composing_a_yuv_slot_tags_every_output_plane() {
+        let mut h = Harness::new(4, 2, format::Y8_V8U8_N420);
+        h.write_luma(4, &[&[16, 235, 81, 81], &[16, 16, 16, 16]]);
+        h.write_chroma(4, &[&[128, 128, 90, 240]]);
+        h.compose().unwrap();
+        // Luma and chroma may be separate mappings; both must be tagged so VI
+        // recognises the queued surface as video.
+        assert!(clock::is_video_surface(h.guest + h.output as u64));
+        assert!(clock::is_video_surface(h.guest + h.output_u as u64));
     }
 }

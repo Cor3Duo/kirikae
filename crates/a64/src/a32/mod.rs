@@ -5,9 +5,9 @@
 //! See `docs/plan/findings/aarch32.md` and `docs/plan/findings/aarch32-frontend.md`.
 //!
 //! This module is self-contained on purpose: it does not import the A64 lifter, the
-//! recompiler or the runtime, and nothing calls it yet. It answers one question —
-//! whether a small, exact A32 decoder and a matching IR fit the shape of the project —
-//! before committing to a full frontend.
+//! recompiler or the runtime. `crates/rt/src/interp_a32.rs` executes the slice as an
+//! interpreter; the Cranelift lowering is still a work item, so discovery and the
+//! generated project do not know about A32 yet.
 //!
 //! # Scope
 //!
@@ -18,12 +18,24 @@
 //!   `teq`, `cmp`, `cmn`, `orr`, `mov`, `bic`, `mvn`) with immediate or register/shifted
 //!   operands, and `movw`/`movt`;
 //! - `b`, `bl`, `bx`, `blx`;
-//! - `ldr`/`str` (byte and word, immediate or register offset, pre/post-indexed);
+//! - `ldr`/`str` (byte and word), `ldrh`/`strh`, `ldrsb`/`ldrsh`, `ldrd`/`strd`, and
+//!   `ldrex`/`strex` with their byte and halfword forms, all immediate or register
+//!   offset and pre/post-indexed;
 //! - `ldm`/`stm` in all four addressing modes;
-//! - `mul`/`mla`;
+//! - `mul`/`mla`, `umull`/`umlal`/`smull`/`smlal`, and the halfword multiplies
+//!   (`smla<x><y>`, `smlaw<y>`, `smul<x><y>`, `smulw<y>`, `smlal<x><y>`);
+//! - the media instructions: `uxtb`/`uxth`/`sxtb`/`sxth`, their 16-bit and accumulating
+//!   forms, `rev`/`rev16`/`revsh`/`rbit`/`clz`, `pkhbt`/`pkhtb`, `sel`, `ssat`/`usat`
+//!   and their 16-bit forms, `bfc`/`bfi`/`sbfx`/`ubfx`, and the whole parallel
+//!   add/subtract family (`sadd16` … `uhsub8`);
+//! - `qadd`/`qsub`/`qdadd`/`qdsub` and the system instructions `mrs`, `msr` of the
+//!   flags byte, and the hints (`nop`, `yield`, `wfe`, `wfi`, `sev`);
 //! - `svc` and `bkpt` so the discovery loop can stop at a supervisor call or a trap.
 //!
 //! Everything else is rejected with a [`DecodeError`], never guessed and never panics.
+//! That includes the deprecated `swp`, any `msr` of the control or status fields, and
+//! the media multiply-accumulate forms (`smlad`, `smmul`), which need the Q flag rules
+//! this slice does not model.
 //!
 //! # Intended integration (not wired yet)
 //!
@@ -54,9 +66,11 @@
 
 pub mod decode;
 pub mod ir;
+pub mod opcode;
 
 pub use decode::{DecodeError, decode};
 pub use ir::{
-    Block, BlockMode, Cond, ExecState, Insn, Mem, MemSize, Offset, Opcode, Operand, Reg, RegList,
-    Shift, Target,
+    Block, BlockMode, Cond, ExecState, Insn, Mem, MemSize, Offset, Operand, Reg, RegList, Shift,
+    Target,
 };
+pub use opcode::Opcode;

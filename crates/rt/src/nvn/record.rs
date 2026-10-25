@@ -47,6 +47,13 @@
 //! blobs live in this process, keyed at `EndRecording` by the handle the driver returned, and the driver keeps its
 //! memory and its stream to itself. A submit that names such a handle resolves to the arena list by that key.
 //! `KIRIKAE_NVN=trace` and `shadow` are not affected: they keep the driver as their oracle and never write here.
+//!
+//! **Chaining.** A pass can straddle an `EndRecording`: the render targets and binds end in one chunk and the draw
+//! that uses them is recorded into the next. When the driver closes a chunk under a pointer above the GPU space, the
+//! host keeps it and makes it the prefix of the next list closed under a usable handle ([`Recorder::chain`]). A
+//! replay walks the prefix first, in recording order, so the draw sees the state that precedes it. Nothing is copied
+//! and the driver's memory is never written. A chunk goes when the list that carries it does, and a submit's arena
+//! lists are retired once its replay is done — both keep the arena bounded (`docs/nvn/CONTRACT.md` §3).
 
 use std::collections::BTreeMap;
 
@@ -151,6 +158,7 @@ pub enum Op {
     BindVertexStreamState = 0x27,
     BindTexture = 0x28,
     BindUniformBuffer = 0x29,
+    BindStorageBuffer = 0x2e,
     SetSamplerPool = 0x2a,
     SetTexturePool = 0x2b,
     BindVertexBuffer = 0x2c,
@@ -187,6 +195,7 @@ impl Op {
             0x27 => BindVertexStreamState,
             0x28 => BindTexture,
             0x29 => BindUniformBuffer,
+            0x2e => BindStorageBuffer,
             0x2a => SetSamplerPool,
             0x2b => SetTexturePool,
             0x2c => BindVertexBuffer,
@@ -641,6 +650,9 @@ pub struct List {
     pub handle: u64,
     /// The list lives in [`Recorder`]'s arena, not in the game's command memory.
     pub arena: bool,
+    /// The recorder generation this list was opened at. A host that holds a key across records compares it, so a
+    /// recycled arena slot is not mistaken for the list it held.
+    pub generation: u64,
     /// The arena records themselves, one [`RECORD_SIZE`] per command. Empty for a guest list.
     pub data: Vec<u8>,
     pub cmdbuf: u64,
@@ -656,7 +668,11 @@ pub struct List {
     pub blob_top: u64,
     /// Absolute address of each blob this list wrote, so its host copy can be retired with the list.
     pub blob_addrs: Vec<u64>,
-    /// Nesting below this list; 0 when it names no other list.
+    /// Lists whose records precede this one in the same command stream, in recording order. An implicit chunk the
+    /// driver closed under an internal pointer is one of these: the list that follows it continues its state, so a
+    /// replay walks it first and does not copy its records (`docs/nvn/CONTRACT.md` §3).
+    pub chained: Vec<u64>,
+    /// Nesting below this list; 0 when it names no other list and continues none.
     pub depth: u32,
 }
 
@@ -676,6 +692,9 @@ pub struct Report {
     pub recorded_draws: u64,
     /// Clear records, same rule.
     pub recorded_clears: u64,
+    /// Chain links a live list still carries, and arena lists retired once their submit was replayed.
+    pub chained: u64,
+    pub retired: u64,
 }
 
 #[derive(Default)]
@@ -690,11 +709,18 @@ pub struct Recorder {
     arena_owners: BTreeMap<u64, u64>,
     /// Next arena slot to hand out.
     arena_next: u64,
+    /// Live lists that continue each chunk, by the chunk's key. The slot rotation skips a chunk a live list still
+    /// names, so a chain never loses a rule it replays.
+    chain_refs: BTreeMap<u64, u32>,
+    /// Chunks the host is holding for a handle that has not arrived yet. The rotation skips them: recycling one
+    /// would make the host chain a different list than the one it recorded.
+    protected: std::collections::HashSet<u64>,
     usage: Usage,
     submits: u64,
     rejected: u64,
     recorded_draws: u64,
     recorded_clears: u64,
+    retired: u64,
     generation: u64,
     last: Option<u64>,
 }
@@ -720,6 +746,7 @@ impl Recorder {
         let list = List {
             key: base,
             handle: base,
+            generation,
             cmdbuf,
             capacity,
             blob_top: base.checked_add(capacity).ok_or(Error::Overflow)?,
@@ -742,10 +769,23 @@ impl Recorder {
     /// memory: the driver is the only writer of its pushbuffer (`docs/nvn/CONTRACT.md` §3). The key is the storage
     /// address until the caller refiles the closed list under the handle the driver returned.
     pub fn begin_arena(&mut self, mem: &dyn Memory, cmdbuf: u64) -> Result<u64, Error> {
-        let storage = ARENA_BASE
-            .checked_add((self.arena_next % ARENA_SLOTS) * ARENA_SLOT)
-            .ok_or(Error::Overflow)?;
-        self.arena_next = self.arena_next.wrapping_add(1);
+        // Never take back the slot of a list that is still being recorded, still waiting for its handle, or still
+        // continued by another list: the driver cannot reuse memory it is writing into or that a live list names.
+        // The held slots are few, so a short scan finds a free one.
+        let mut storage = None;
+        for _ in 0..ARENA_SLOTS {
+            let candidate = ARENA_BASE
+                .checked_add((self.arena_next % ARENA_SLOTS) * ARENA_SLOT)
+                .ok_or(Error::Overflow)?;
+            self.arena_next = self.arena_next.wrapping_add(1);
+            if !self.slot_in_use(candidate) {
+                storage = Some(candidate);
+                break;
+            }
+        }
+        // Every slot is still reachable: the caller reports it and that list stays with the driver instead of the
+        // rotation dropping a list an open buffer or a live chain still names.
+        let storage = storage.ok_or(Error::Full)?;
         // A slot that comes around again wins over whatever list still held it, the same rule guest memory has.
         if let Some(old) = self.arena_owners.insert(storage, storage) {
             self.forget(old);
@@ -756,6 +796,7 @@ impl Recorder {
             key: storage,
             handle: storage,
             arena: true,
+            generation,
             cmdbuf,
             capacity: ARENA_CAPACITY,
             blob_top: storage.checked_add(ARENA_CAPACITY).ok_or(Error::Overflow)?,
@@ -843,6 +884,90 @@ impl Recorder {
     /// Drops a list by key (a superseded arena list that was never filed under a usable handle).
     pub fn drop_list(&mut self, key: u64) {
         self.forget(key);
+    }
+
+    /// Marks a chunk the host is keeping until the handle that continues it arrives.
+    pub fn pin(&mut self, key: u64) {
+        if self.lists.contains_key(&key) {
+            self.protected.insert(key);
+        }
+    }
+
+    /// Releases a chunk the host consumed (chained, refiled or dropped).
+    pub fn unpin(&mut self, key: u64) {
+        self.protected.remove(&key);
+    }
+
+    /// Whether an arena slot is still reachable: the list being recorded on some buffer, a chunk a live list
+    /// continues, or one the host holds for a handle that has not arrived. Any other slot may be handed out again,
+    /// the way guest command memory is reused.
+    fn slot_in_use(&self, key: u64) -> bool {
+        self.protected.contains(&key)
+            || self.chain_refs.get(&key).is_some_and(|count| *count > 0)
+            || self.active.values().any(|value| *value == key)
+    }
+
+    /// The generation of a live list, so a key held across records can be checked against a recycled slot.
+    pub fn generation(&self, key: u64) -> Option<u64> {
+        self.lists.get(&key).map(|list| list.generation)
+    }
+
+    /// Attaches `predecessors` to `key`, in recording order: a replay walks their records before the list's own,
+    /// the way one command stream continues across the driver's internal `EndRecording`. Nothing is copied: the
+    /// chunks keep their own records and blobs, and the list names them until it is retired.
+    ///
+    /// A chain is a nesting level of the same limit `CallCommands` uses (`docs/nvn/CONTRACT.md` §4), and a list
+    /// cannot continue itself.
+    pub fn chain(&mut self, key: u64, predecessors: &[u64]) -> Result<(), Error> {
+        if predecessors.is_empty() {
+            return Ok(());
+        }
+        if predecessors.contains(&key) {
+            self.rejected += 1;
+            return Err(Error::Nesting);
+        }
+        let list = self.lists.get(&key).ok_or(Error::UnknownList)?;
+        let mut depth = list.depth;
+        for &predecessor in predecessors {
+            let Some(source) = self.lists.get(&predecessor) else {
+                self.rejected += 1;
+                return Err(Error::UnknownList);
+            };
+            depth = depth.max(1 + source.depth);
+        }
+        if depth > MAX_NESTING {
+            self.rejected += 1;
+            return Err(Error::Nesting);
+        }
+        let Some(list) = self.lists.get_mut(&key) else {
+            return Err(Error::UnknownList);
+        };
+        for &predecessor in predecessors {
+            if !list.chained.contains(&predecessor) {
+                list.chained.push(predecessor);
+                *self.chain_refs.entry(predecessor).or_default() += 1;
+            }
+        }
+        list.depth = depth;
+        Ok(())
+    }
+
+    /// Retires the arena lists of a replayed submit. The submit's snapshot owns their records while it is queued,
+    /// and once its replay is done no queued replay can name them (`CONTRACT.md` §7); a later submit that names one
+    /// of them is a handle the host no longer records, which stays with the driver. Guest lists are the game's own
+    /// command memory and are never retired here.
+    pub fn retire_replayed(&mut self, keys: &[u64]) -> u64 {
+        let mut retired = 0;
+        for &key in keys {
+            let arena = self.lists.get(&key).is_some_and(|list| list.arena);
+            if arena && !self.protected.contains(&key) {
+                let before = self.lists.len();
+                self.forget(key);
+                retired += (before - self.lists.len()) as u64;
+            }
+        }
+        self.retired += retired;
+        retired
     }
 
     pub fn emit(&mut self, mem: &dyn Memory, cmdbuf: u64, record: Record) -> Result<u64, Error> {
@@ -994,6 +1119,12 @@ impl Recorder {
             rejected: self.rejected,
             recorded_draws: self.recorded_draws,
             recorded_clears: self.recorded_clears,
+            chained: self
+                .lists
+                .values()
+                .map(|list| list.chained.len() as u64)
+                .sum(),
+            retired: self.retired,
         }
     }
 
@@ -1207,14 +1338,40 @@ impl Recorder {
         }
     }
 
-    /// Drops a list and the host copy of its blobs.
+    /// Drops a list and the host copy of its blobs. A chunk the list continues goes with it, unless the host still
+    /// holds it or another live list names it: a chain is only reachable through the list that carries it.
     fn forget(&mut self, key: u64) -> Option<List> {
         let list = self.lists.remove(&key)?;
+        self.protected.remove(&key);
+        // Whatever named this list stops naming it: a chain is only as long as the list that carries it. Every
+        // reference is dropped here, so a recycled arena slot can never be reached through an older chain.
+        for other in self.lists.values_mut() {
+            if other.chained.contains(&key) {
+                other.chained.retain(|chained| *chained != key);
+                if let Some(count) = self.chain_refs.get_mut(&key) {
+                    *count = count.saturating_sub(1);
+                }
+            }
+        }
+        self.chain_refs.remove(&key);
         for at in &list.blob_addrs {
             self.blobs.remove(at);
         }
         if list.arena {
             self.arena_owners.remove(&list.handle);
+        }
+        for chained in &list.chained {
+            let last = self
+                .chain_refs
+                .get_mut(chained)
+                .map(|count| {
+                    *count = count.saturating_sub(1);
+                    *count == 0
+                })
+                .unwrap_or(false);
+            if last && !self.protected.contains(chained) {
+                self.forget(*chained);
+            }
         }
         Some(list)
     }
@@ -2085,5 +2242,91 @@ mod tests {
             recorder.list(0x2117_fc208).is_none(),
             "the newer list wins over the older handle"
         );
+    }
+
+    #[test]
+    fn chained_chunks_replay_before_their_list_and_go_when_it_does() {
+        let mem = memory();
+        let mut recorder = Recorder::default();
+        // Two chunks the driver ended under its internal pointer, in recording order.
+        recorder.begin_arena(&mem, CMD).expect("first chunk");
+        let mut program = Record::new(Op::BindProgram);
+        program.set_word(0, 0x9000);
+        recorder.emit(&mem, CMD, program).expect("program");
+        let first = recorder.end_arena(&mem, CMD).expect("end first");
+        recorder.begin_arena(&mem, CMD).expect("second chunk");
+        let mut texture = Record::new(Op::BindTexture);
+        texture.set_word(0, 0x0020_2007);
+        recorder.emit(&mem, CMD, texture).expect("texture");
+        let second = recorder.end_arena(&mem, CMD).expect("end second");
+
+        // The list the next usable handle names continues both.
+        recorder.begin_arena(&mem, CMD).expect("successor");
+        let mut draw = Record::new(Op::DrawArrays);
+        draw.set_int(0, 4);
+        draw.set_word(1, 3);
+        recorder.emit(&mem, CMD, draw).expect("draw");
+        let successor = recorder.end_arena(&mem, CMD).expect("end successor");
+
+        recorder.chain(successor, &[first, second]).expect("chain");
+        let list = recorder.list(successor).expect("successor live");
+        assert_eq!(list.chained, [first, second], "recording order is kept");
+        assert_eq!(list.depth, 1, "a chain is one nesting level");
+        assert_eq!(list.draws, 1);
+
+        assert!(recorder.refile(successor, 0x2117_fc208));
+        assert_eq!(recorder.report().chained, 2);
+        // The chunks are reachable only through the list that continues them.
+        assert_eq!(recorder.retire_replayed(&[0x2117_fc208]), 3);
+        assert_eq!(recorder.live(), 0);
+        assert_eq!(recorder.report().retired, 3);
+        assert_eq!(recorder.retire_replayed(&[0x2117_fc208]), 0, "idempotent");
+    }
+
+    #[test]
+    fn a_chain_refuses_a_missing_chunk_and_an_unknown_list() {
+        let mem = memory();
+        let mut recorder = Recorder::default();
+        recorder.begin_arena(&mem, CMD).expect("chunk");
+        recorder
+            .emit(&mem, CMD, Record::new(Op::Barrier))
+            .expect("bind");
+        let chunk = recorder.end_arena(&mem, CMD).expect("end");
+        recorder.begin_arena(&mem, CMD).expect("successor");
+        let successor = recorder.end_arena(&mem, CMD).expect("end successor");
+
+        assert_eq!(
+            recorder.chain(successor, &[0xdead_0000]),
+            Err(Error::UnknownList)
+        );
+        assert!(recorder.list(successor).expect("live").chained.is_empty());
+        assert_eq!(recorder.chain(successor, &[successor]), Err(Error::Nesting));
+        assert_eq!(recorder.chain(successor, &[chunk]), Ok(()));
+        assert_eq!(recorder.list(successor).expect("live").chained, [chunk]);
+    }
+
+    #[test]
+    fn retiring_a_replayed_submit_drops_only_arena_lists() {
+        let mem = memory();
+        let mut recorder = Recorder::default();
+        recorder
+            .begin(&mem, CMD, BASE, CAPACITY)
+            .expect("guest list");
+        let guest = recorder.end(&mem, CMD).expect("end guest");
+        recorder.begin_arena(&mem, CMD).expect("arena list");
+        let mut draw = Record::new(Op::DrawArrays);
+        draw.set_int(0, 4);
+        recorder.emit(&mem, CMD, draw).expect("draw");
+        let arena = recorder.end_arena(&mem, CMD).expect("end arena");
+
+        assert_eq!(
+            recorder.retire_replayed(&[guest]),
+            0,
+            "the game's command memory is not ours to retire"
+        );
+        assert!(recorder.list(guest).is_some());
+        assert_eq!(recorder.retire_replayed(&[arena]), 1);
+        assert!(recorder.list(arena).is_none());
+        assert_eq!(recorder.report().retired, 1);
     }
 }

@@ -27,6 +27,8 @@ pub mod state {
     pub const TRANSFER: u32 = 0x0e;
     pub const CODE_READONLY: u32 = 0x14;
     pub const CODE_WRITABLE: u32 = 0x15;
+    /// `MemType_Insecure`, the pages `svcMapInsecurePhysicalMemory` allocates.
+    pub const INSECURE: u32 = 0x17;
 }
 
 pub mod perm {
@@ -92,6 +94,67 @@ fn insert_merged(mapped: &mut BTreeMap<u64, Region>, mut r: Region) {
         mapped.remove(&key);
     }
     mapped.insert(r.range.start, r);
+}
+
+/// Splits and retags `start..end`, returning the slices it replaced. Every
+/// page must be mapped with a state in `allowed`; on any other page nothing
+/// changes.
+fn reprotect_locked(
+    mapped: &mut BTreeMap<u64, Region>,
+    start: u64,
+    end: u64,
+    state: Option<u32>,
+    perm: u32,
+    allowed: &[u32],
+) -> Option<Vec<Region>> {
+    let mut at = start;
+    let mut touched = Vec::new();
+    while at < end {
+        match mapped.range(..=at).next_back() {
+            Some((&key, r)) if r.range.contains(&at) && allowed.contains(&r.state) => {
+                touched.push(key);
+                at = r.range.end;
+            }
+            _ => return None,
+        }
+    }
+    let mut saved = Vec::with_capacity(touched.len());
+    for key in touched {
+        let r = mapped.remove(&key)?;
+        if r.range.start < start {
+            mapped.insert(
+                r.range.start,
+                Region {
+                    range: r.range.start..start,
+                    ..r.clone()
+                },
+            );
+        }
+        if r.range.end > end {
+            mapped.insert(
+                end,
+                Region {
+                    range: end..r.range.end,
+                    ..r.clone()
+                },
+            );
+        }
+        let inner = r.range.start.max(start)..r.range.end.min(end);
+        saved.push(Region {
+            range: inner.clone(),
+            state: r.state,
+            perm: r.perm,
+        });
+        insert_merged(
+            mapped,
+            Region {
+                range: inner,
+                state: state.unwrap_or(r.state),
+                perm,
+            },
+        );
+    }
+    Some(saved)
 }
 
 pub struct GuestMemory {
@@ -265,6 +328,56 @@ impl GuestMemory {
         Ok(held)
     }
 
+    /// `svcMapInsecurePhysicalMemory`: commits zero-filled pages for the whole
+    /// range. Unlike `map_physical`, the range must be completely free: the
+    /// insecure pool hands out new pages, it does not adopt existing heap.
+    pub fn map_insecure(&self, start: u64, end: u64, budget: u64) -> Result<u64, PhysicalError> {
+        if start >= end || !start.is_multiple_of(PAGE) || !end.is_multiple_of(PAGE) {
+            return Err(PhysicalError::State);
+        }
+        let mut mapped = self.mapped.lock().unwrap();
+        if mapped.range(..end).any(|(_, r)| r.range.end > start) {
+            return Err(PhysicalError::State);
+        }
+        let total = end - start;
+        if total > budget {
+            return Err(PhysicalError::Limit);
+        }
+        if !unsafe { sys::commit(self.base.add(start as usize), total as usize) } {
+            return Err(PhysicalError::Host(io::Error::last_os_error()));
+        }
+        insert_merged(
+            &mut mapped,
+            Region {
+                range: start..end,
+                state: state::INSECURE,
+                perm: perm::RW,
+            },
+        );
+        Ok(total)
+    }
+
+    /// `svcUnmapInsecurePhysicalMemory`: every page must belong to an insecure
+    /// mapping; the range may be a part of one.
+    pub fn unmap_insecure(&self, start: u64, end: u64) -> Result<u64, PhysicalError> {
+        if start >= end || !start.is_multiple_of(PAGE) || !end.is_multiple_of(PAGE) {
+            return Err(PhysicalError::State);
+        }
+        let mut mapped = self.mapped.lock().unwrap();
+        let mut at = start;
+        while at < end {
+            match mapped.range(..=at).next_back() {
+                Some((_, r)) if r.range.contains(&at) && r.state == state::INSECURE => {
+                    at = r.range.end;
+                }
+                _ => return Err(PhysicalError::State),
+            }
+        }
+        self.unmap_locked(&mut mapped, start, end)
+            .map_err(PhysicalError::Host)?;
+        Ok(end - start)
+    }
+
     pub fn protect(&self, start: u64, end: u64, perm: u32, allowed: &[u32]) -> bool {
         self.reprotect(start, end, None, perm, allowed)
     }
@@ -276,6 +389,58 @@ impl GuestMemory {
         self.reprotect(start, end, Some(state), perm, allowed)
     }
 
+    /// Retags a range and returns the tags it replaced, so the caller can put
+    /// them back when its claim ends. Transfer memory uses this: the creator's
+    /// pages are retagged and locked for as long as the object lives, and the
+    /// kernel restores their state and permission when the last handle closes.
+    pub fn retag_leased(
+        &self,
+        start: u64,
+        end: u64,
+        state: u32,
+        perm: u32,
+        allowed: &[u32],
+    ) -> Option<Vec<Region>> {
+        let mut mapped = self.mapped.lock().unwrap();
+        reprotect_locked(&mut mapped, start, end, Some(state), perm, allowed)
+    }
+
+    /// Puts back the tags returned by `retag_leased`. Every saved slice must
+    /// still be transfer memory: `false` means the pages were released or
+    /// reused since and nothing is changed.
+    pub fn restore(&self, saved: &[Region]) -> bool {
+        if saved.is_empty() {
+            return false;
+        }
+        let mut mapped = self.mapped.lock().unwrap();
+        for r in saved {
+            let mut at = r.range.start;
+            while at < r.range.end {
+                match mapped.range(..=at).next_back() {
+                    Some((_, cur)) if cur.range.contains(&at) && cur.state == state::TRANSFER => {
+                        at = cur.range.end;
+                    }
+                    _ => return false,
+                }
+            }
+        }
+        for r in saved {
+            if reprotect_locked(
+                &mut mapped,
+                r.range.start,
+                r.range.end,
+                Some(r.state),
+                r.perm,
+                &[state::TRANSFER],
+            )
+            .is_none()
+            {
+                return false;
+            }
+        }
+        true
+    }
+
     fn reprotect(
         &self,
         start: u64,
@@ -285,48 +450,7 @@ impl GuestMemory {
         allowed: &[u32],
     ) -> bool {
         let mut mapped = self.mapped.lock().unwrap();
-        let mut at = start;
-        let mut touched = Vec::new();
-        while at < end {
-            match mapped.range(..=at).next_back() {
-                Some((&key, r)) if r.range.contains(&at) && allowed.contains(&r.state) => {
-                    touched.push(key);
-                    at = r.range.end;
-                }
-                _ => return false,
-            }
-        }
-        for key in touched {
-            let r = mapped.remove(&key).unwrap();
-            if r.range.start < start {
-                mapped.insert(
-                    r.range.start,
-                    Region {
-                        range: r.range.start..start,
-                        ..r.clone()
-                    },
-                );
-            }
-            if r.range.end > end {
-                mapped.insert(
-                    end,
-                    Region {
-                        range: end..r.range.end,
-                        ..r.clone()
-                    },
-                );
-            }
-            let inner = r.range.start.max(start)..r.range.end.min(end);
-            insert_merged(
-                &mut mapped,
-                Region {
-                    range: inner,
-                    state: state.unwrap_or(r.state),
-                    perm,
-                },
-            );
-        }
-        true
+        reprotect_locked(&mut mapped, start, end, state, perm, allowed).is_some()
     }
 
     /// `svcMapMemory`: makes `dst` a view of `src`. The kernel borrows the
@@ -686,6 +810,169 @@ mod tests {
             Err(PhysicalError::State)
         ));
         assert!(m.is_mapped(base + 0x1000, 1));
+    }
+
+    #[test]
+    fn a_lease_restores_the_tags_it_replaced() {
+        let m = GuestMemory::new().unwrap();
+        let base = 0x10_0000_0000;
+        m.map_as(base, 0x2000, state::HEAP, perm::RW).unwrap();
+        m.map_as(base + 0x2000, 0x2000, state::NORMAL, perm::R)
+            .unwrap();
+        let saved = m
+            .retag_leased(
+                base,
+                base + 0x4000,
+                state::TRANSFER,
+                perm::NONE,
+                &[state::HEAP, state::NORMAL],
+            )
+            .expect("both kinds of page may be leased");
+        assert_eq!(saved.len(), 2, "the split keeps both original tags");
+        assert_eq!(m.query(base).state, state::TRANSFER);
+        assert_eq!(m.query(base + 0x3000).state, state::TRANSFER);
+        assert_eq!(m.query(base).perm, perm::NONE);
+        assert!(
+            !m.retag_leased(
+                base,
+                base + 0x4000,
+                state::TRANSFER,
+                perm::NONE,
+                &[state::HEAP, state::NORMAL]
+            )
+            .is_some(),
+            "a leased block cannot be leased twice"
+        );
+        assert!(m.restore(&saved));
+        let first = m.query(base);
+        assert_eq!(
+            (first.range, first.state, first.perm),
+            (base..base + 0x2000, state::HEAP, perm::RW)
+        );
+        let second = m.query(base + 0x3000);
+        assert_eq!(
+            (second.state, second.perm),
+            (state::NORMAL, perm::R),
+            "every slice gets its own tag back"
+        );
+        assert!(!m.restore(&saved), "restore is not repeatable");
+    }
+
+    #[test]
+    fn physical_memory_adopts_a_released_transfer_range() {
+        let m = GuestMemory::new().unwrap();
+        let base = 0x10_0000_0000;
+        m.map_as(base, 0x2000, state::HEAP, perm::RW).unwrap();
+        let saved = m
+            .retag_leased(
+                base,
+                base + 0x2000,
+                state::TRANSFER,
+                perm::NONE,
+                &[state::HEAP],
+            )
+            .expect("the heap pages become transfer memory");
+
+        // A live transfer memory is a genuine conflict: the documented 0xD401
+        // path, not something to move behind the guest's back.
+        assert!(matches!(
+            m.map_physical(base, base + 0x4000, u64::MAX),
+            Err(PhysicalError::State)
+        ));
+        assert!(
+            !m.is_mapped(base + 0x2000, 1),
+            "a refused mapping commits nothing"
+        );
+        assert_eq!(m.query(base).state, state::TRANSFER);
+
+        assert!(m.restore(&saved));
+        // The restored pages are heap again, so adopting the range only has to
+        // fill the hole after them.
+        assert_eq!(
+            m.map_physical(base, base + 0x4000, u64::MAX).unwrap(),
+            0x2000
+        );
+        assert_eq!(m.query(base).state, state::HEAP);
+        assert_eq!(
+            m.query(base).range,
+            base..base + 0x4000,
+            "the released pages merge with the fresh heap"
+        );
+    }
+
+    #[test]
+    fn unmap_physical_restores_the_pages_to_free() {
+        let m = GuestMemory::new().unwrap();
+        let base = 0x10_0000_0000;
+        assert_eq!(
+            m.map_physical(base, base + 0x2000, u64::MAX).unwrap(),
+            0x2000
+        );
+        assert_eq!(m.unmap_physical(base, base + 0x2000).unwrap(), 0x2000);
+        assert_eq!(m.query(base).state, state::FREE);
+        assert_eq!(
+            m.map_physical(base, base + 0x2000, u64::MAX).unwrap(),
+            0x2000,
+            "the unmapped pages can be adopted again"
+        );
+    }
+
+    #[test]
+    fn insecure_memory_maps_zeroed_pages_and_only_unmaps_its_own() {
+        let m = GuestMemory::new().unwrap();
+        let base = 0x0800_0000;
+        m.map_as(base + 0x2000, 0x1000, state::HEAP, perm::RW)
+            .unwrap();
+
+        assert!(matches!(
+            m.map_insecure(base, base + 0x3000, u64::MAX),
+            Err(PhysicalError::State)
+        ));
+        assert_eq!(
+            m.map_insecure(base, base + 0x2000, u64::MAX).unwrap(),
+            0x2000
+        );
+        assert_eq!(m.query(base).state, state::INSECURE);
+        assert_eq!(m.query(base + 0x1000).perm, perm::RW);
+        assert_eq!(m.read(base, 4).unwrap(), vec![0; 4], "pages are zeroed");
+        assert_eq!(
+            m.query(base + 0x2000).state,
+            state::HEAP,
+            "the heap next door keeps its state"
+        );
+        assert!(matches!(
+            m.map_insecure(base + 0x4000, base + 0x6000, 0),
+            Err(PhysicalError::Limit)
+        ));
+        assert!(
+            matches!(
+                m.map_insecure(base, base + 0x3000, u64::MAX),
+                Err(PhysicalError::State)
+            ),
+            "an insecure mapping never adopts the heap"
+        );
+
+        assert_eq!(
+            m.unmap_insecure(base + 0x1000, base + 0x2000).unwrap(),
+            0x1000
+        );
+        assert_eq!(m.query(base).state, state::INSECURE);
+        assert_eq!(m.query(base + 0x1000).state, state::FREE);
+        assert!(matches!(
+            m.unmap_insecure(base, base + 0x3000),
+            Err(PhysicalError::State)
+        ));
+        assert!(matches!(
+            m.unmap_insecure(base + 0x1000, base + 0x2000),
+            Err(PhysicalError::State)
+        ));
+        assert_eq!(m.unmap_insecure(base, base + 0x1000).unwrap(), 0x1000);
+        assert_eq!(m.query(base).state, state::FREE);
+        assert_eq!(
+            m.query(base + 0x2000).state,
+            state::HEAP,
+            "unmapping insecure pages never touches the heap"
+        );
     }
 
     #[test]
