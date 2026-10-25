@@ -1,12 +1,3 @@
-//! `pdm:qry` — play-log queries.
-//!
-//! The runtime keeps no play log yet, so every query answers with an empty range
-//! and zeroed statistics for the asked application. The reply shapes follow
-//! libnx's `pdm.h` (16.0.0+ layouts): `PdmPlayStatistics` 0x48, `PdmLastPlayTime`
-//! 0x18, `PdmAppletEvent` 0x28 and `PdmAccountEvent` 0x38 bytes. Command numbers
-//! are the ones `pdm.c` dispatches to; a game that only wants "how long did the
-//! user play" gets a valid zero, not a malformed buffer.
-
 use crate::cpu::Cpu;
 use crate::services::stub::unimplemented_named;
 use crate::services::{Reply, Request, Service};
@@ -22,7 +13,6 @@ const ACCOUNT_EVENT_SIZE: usize = 0x38;
 pub struct PdmQry;
 
 impl PdmQry {
-    /// A `PdmPlayStatistics` with no launches: only `program_id` is meaningful.
     fn play_statistics(application_id: u64) -> [u8; PLAY_STATISTICS_SIZE] {
         let mut out = [0u8; PLAY_STATISTICS_SIZE];
         out[..8].copy_from_slice(&application_id.to_le_bytes());
@@ -30,7 +20,6 @@ impl PdmQry {
     }
 
     fn application_id(data: &[u8]) -> u64 {
-        // 10.0.0+ prepends a flag byte and padding to the id.
         if data.len() >= 16 {
             u64::from_le_bytes(data[8..16].try_into().unwrap_or_default())
         } else {
@@ -46,27 +35,16 @@ impl Service for PdmQry {
 
     fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
         match req.cmd {
-            // QueryAppletEvent
             0 => Reply::ok().u32(0),
-            // QueryPlayStatisticsByApplicationId
             4 => Reply::ok().bytes(&Self::play_statistics(Self::application_id(&req.data))),
-            // QueryPlayStatisticsByApplicationIdAndUserAccountId
             5 => Reply::ok().bytes(&Self::play_statistics(Self::application_id(&req.data))),
-            // QueryLastPlayTime: no entries.
             7 | 17 => Reply::ok().u32(0),
-            // QueryPlayEvent
             8 => Reply::ok().u32(0),
-            // GetAvailablePlayEventRange
             9 => Reply::ok().u32(0).u32(0).u32(0),
-            // QueryAccountEvent
             10 => Reply::ok().u32(0),
-            // QueryAccountPlayEvent
             11 => Reply::ok().u32(0),
-            // GetAvailableAccountPlayEventRange
             12 => Reply::ok().u32(0).u32(0).u32(0),
-            // QueryRecentlyPlayedApplication
             14 => Reply::ok().u32(0),
-            // GetRecentlyPlayedApplicationUpdateEvent: never raised.
             15 => {
                 let handle = *c
                     .process()
