@@ -1,25 +1,12 @@
-//! `nfc:user` / `nfc:sys` / `nfc:mf:u` — NFC and Mii-mifare queries.
-//!
-//! The runtime has no NFC controller. The services still answer the queries a
-//! game can ask offline: the interface initializes, `GetState` reports
-//! initialized, `IsNfcEnabled` reports disabled, `ListDevices` is an empty list,
-//! and a device state is `Unavailable` (5). Detection, tag reads and mifare
-//! writes need hardware and return `InvalidArgument` instead of a fake tag.
-//!
-//! Command numbers follow Switchbrew's "NFC services" page and libnx's `nfc.c`.
-
 use std::sync::Mutex;
 
 use crate::cpu::Cpu;
 use crate::services::stub::unimplemented_named;
 use crate::services::{Reply, Request, Service};
 
-/// `NfcState::NonInitialized` / `Initialized`.
 const STATE_NON_INITIALIZED: u32 = 0;
 const STATE_INITIALIZED: u32 = 1;
-/// `DeviceState::Unavailable`.
 const DEVICE_STATE_UNAVAILABLE: u32 = 5;
-/// `ResultInvalidArgument`.
 const INVALID_ARGUMENT: u32 = 0x2EE202;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -63,7 +50,6 @@ impl Service for Nfc {
     }
 
     fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
-        // Every manager has one creator command (0).
         if req.cmd == 0 {
             return Reply::ok().object(std::sync::Arc::new(NfcSession::new(self.kind)));
         }
@@ -116,8 +102,6 @@ impl NfcSession {
     }
 
     fn refuse_detection(&self) -> Reply {
-        // No controller is attached, so detection cannot start even after the
-        // interface was initialized.
         Reply::err(INVALID_ARGUMENT)
     }
 }
@@ -128,9 +112,6 @@ impl Service for NfcSession {
     }
 
     fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
-        // Legacy aliases (0-3 / 100) and the 4.0.0+ numbering (400+) are the
-        // same commands. 100/500 are SetNfcEnabled. For mifare the commands are
-        // renumbered, so fold them into the same internal numbers.
         let cmd = match self.kind {
             Kind::User | Kind::System => match req.cmd {
                 0 | 400 => 0,
@@ -174,36 +155,21 @@ impl Service for NfcSession {
             },
         };
         match cmd {
-            // Initialize
             0 => self.set_initialized(true),
-            // Finalize
             1 => self.set_initialized(false),
-            // GetState
             2 => self.state(),
-            // IsNfcEnabled
             3 => self.is_enabled(),
-            // SetNfcEnabled, bool input
             100 => self.set_enabled(req.data.first().is_some_and(|&b| b != 0)),
-            // ListDevices: empty list, out count 0.
             4 => Reply::ok().u32(0),
-            // GetDeviceState
             5 => Reply::ok().u32(DEVICE_STATE_UNAVAILABLE),
-            // GetNpadId: no controller carries a tag.
             6 => Reply::err(INVALID_ARGUMENT),
-            // GetAvailabilityChangeEventHandle
             7 => event(c, "nfc.availability"),
-            // StartDetection / StopDetection
             8 | 9 => self.refuse_detection(),
-            // GetTagInfo
             10 => Reply::err(INVALID_ARGUMENT),
-            // GetActivateEventHandle / GetDeactivateEventHandle
             11 => event(c, "nfc.activate"),
             12 => event(c, "nfc.deactivate"),
-            // OutputTestWave
             510 => Reply::ok(),
-            // ReadMifare / WriteMifare
             1000 | 1001 => Reply::err(INVALID_ARGUMENT),
-            // SendCommandByPassThrough / KeepPassThroughSession / Release.
             1300 => Reply::err(INVALID_ARGUMENT),
             1301 | 1302 => Reply::ok(),
             _ => unimplemented_named("nfc", nfc_command_name(req.cmd), c, req),
