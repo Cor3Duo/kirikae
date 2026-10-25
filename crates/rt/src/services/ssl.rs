@@ -5,22 +5,12 @@ use crate::cpu::Cpu;
 use crate::services::stub::unimplemented_named;
 use crate::services::{Buf, Reply, Request, Service};
 
-/// `nn::ssl::ResultNotAvailable`, the result the sysmodule returns when the
-/// requested object or operation cannot exist in this environment.
-///
-/// The runtime terminates no TLS: there is no certificate store, no NSS and no
-/// private key. A title that asks for one of those gets this result and can fall
-/// back to its offline path instead of aborting on an unimplemented command.
 pub const SSL_NOT_AVAILABLE: u32 = 0x0021_2a0a;
 
-/// Longest host name `SetHostName` accepts (`bufsize < 0x100`).
 const HOST_NAME_MAX: usize = 0xff;
-/// Size of `nn::ssl::Connection::CipherInfo` (`CipherInfo` on Switchbrew).
 #[cfg(test)]
 const CIPHER_INFO_SIZE: usize = 0x48;
-/// Size of `nn::TimeSpan` returned by `GetDtlsHandshakeTimeout`.
 const DTLS_TIMEOUT_SIZE: usize = 8;
-/// Every documented `OptionType` fits in a four-entry bool table.
 const OPTION_TYPES: usize = 4;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -36,30 +26,6 @@ fn write_guest(c: &Cpu, buf: Buf, data: &[u8]) -> bool {
     c.process().memory.write(buf.addr, &data[..n])
 }
 
-/// `ssl` (`nn::ssl::sf::ISslService`) and `ssl:s` (`ISslServiceForSystem`).
-///
-/// The command dispatch and the reply widths follow Switchbrew "SSL services".
-/// Everything that only needs client-side state (versions, options, host names,
-/// ALPN blobs, socket descriptors) is stored and echoed back, so a title can
-/// finish its initialization. Every command that would need a TLS engine replies
-/// [`SSL_NOT_AVAILABLE`]; the certificate store is empty rather than fabricated.
-///
-/// # What a real implementation needs
-///
-/// The sysmodule is a client-mode TLS 1.2/1.3 stack built on NSS. Providing it
-/// means, in order: (1) the CertStore title's `ssl_TrustedCerts.bdf`,
-/// `ssl_Crl.bdf` and `ssl_CaFingerprints.bdf` in RomFS, which is what
-/// `GetCertificates`/`GetCertificateBufSize` return; (2) the device client
-/// certificate and key from `set:cal` (`GetSslCert`/`GetSslKey`), decrypted
-/// through SPL, for `RegisterInternalPki(DeviceClientCertDefault)` and
-/// mutual-TLS servers; (3) a TLS engine (NSS, or a Rust crate such as `rustls`
-/// with a DER trust store) driving the socket that `SetSocketDescriptor`
-/// duplicates; (4) the NSS session cache, ALPN negotiation, DTLS/SRTP for the
-/// game's peer-to-peer transports, and `GetCipherInfo`/
-/// `GetVerifyCertErrors` from the handshake. Without (1) and (3) the honest
-/// answer for every crypto command is [`SSL_NOT_AVAILABLE`], and the runtime
-/// keeps the client-side state so a caller that retries after an offline error
-/// still sees consistent options.
 pub struct Ssl {
     name: &'static str,
     interface_version: AtomicU32,
@@ -90,10 +56,6 @@ impl Ssl {
     }
 
     fn get_certificates(&self, c: &Cpu, req: &Request) -> Reply {
-        // The built-in store is title data the runtime does not carry, and
-        // fabricating DER would be a lie. An empty list is the documented
-        // "no certificates" answer and sends callers to their offline path, so
-        // the caller's buffer is left untouched.
         let _ = (c, req);
         if self.interface_version.load(Relaxed) >= 1 {
             Reply::ok().u32(0)
@@ -103,8 +65,6 @@ impl Ssl {
     }
 
     fn flush_session_cache(&self) -> Reply {
-        // The cache belongs to the (absent) TLS engine; an empty cache is
-        // already flushed. The input buffer is the optional host string.
         Reply::ok().u32(0)
     }
 
@@ -116,8 +76,6 @@ impl Ssl {
         let Some(buf) = req.in_buf(0) else {
             return Reply::err(SSL_NOT_AVAILABLE);
         };
-        // The API validates that the buffer is non-empty before it copies the
-        // first byte to state.
         if buf.size == 0 {
             return Reply::err(SSL_NOT_AVAILABLE);
         }
@@ -153,7 +111,6 @@ impl Service for Ssl {
             1 => Reply::ok().u32(self.context_count.load(Relaxed)),
             2 => self.get_certificates(c, req),
             3 => Reply::ok().u32(0),
-            // DebugIoctl is stubbed on retail and returns an error.
             4 => Reply::err(SSL_NOT_AVAILABLE),
             5 => self.set_interface_version(req),
             6 => self.flush_session_cache(),
@@ -162,7 +119,6 @@ impl Service for Ssl {
             9 => Reply::ok(),
             10 => Reply::err(SSL_NOT_AVAILABLE),
             11 => Reply::ok().u32(0),
-            // ssl:s
             100 => self.create_context(),
             101 => {
                 self.core_mask.store(req.u64(0), Relaxed);
@@ -176,9 +132,7 @@ impl Service for Ssl {
     }
 }
 
-/// `nn::ssl::sf::ISslContext` / `ISslContextForSystem`.
 struct SslContext {
-    /// `CrlImportDateCheckEnable` defaults to 1 at context creation.
     crl_import_date_check: AtomicU32,
     connections: AtomicU32,
 }
@@ -197,7 +151,6 @@ impl SslContext {
                 self.crl_import_date_check.store(req.u32(4), Relaxed);
                 Reply::ok()
             }
-            // ContextOption::None is a documented no-op.
             0 => Reply::ok(),
             _ => Reply::err(SSL_NOT_AVAILABLE),
         }
@@ -225,7 +178,6 @@ impl Service for SslContext {
                 Reply::ok().object(Arc::new(SslConnection::new()))
             }
             3 => Reply::ok().u32(self.connections.load(Relaxed)),
-            // Certificate and key stores need the real TLS stack.
             4 | 5 | 8 | 10 | 12 | 13 => Reply::err(SSL_NOT_AVAILABLE),
             6 | 7 | 11 => Reply::ok(),
             9 => Reply::ok(),
@@ -234,13 +186,10 @@ impl Service for SslContext {
     }
 }
 
-/// `nn::ssl::sf::ISslConnection`.
 struct SslConnection {
     socket: AtomicI32,
     host_name: Mutex<Vec<u8>>,
-    /// `VerifyOption` defaults to PeerCa | HostName.
     verify: AtomicU32,
-    /// `IoMode` defaults to Blocking.
     io_mode: AtomicU32,
     io_timeout: AtomicU32,
     session_cache: AtomicU32,
@@ -287,8 +236,6 @@ impl SslConnection {
     }
 
     fn set_alpn(&self, c: &Cpu, req: &Request) -> Reply {
-        // The buffer is a list of length-prefixed protocol names. It is kept
-        // verbatim; with no handshake it is never negotiated.
         if let Some(buf) = req.in_buf(0)
             && let Some(bytes) = read_guest(c, buf)
         {
@@ -301,7 +248,6 @@ impl SslConnection {
         if let Some(buf) = req.out_buf(0) {
             let _ = write_guest(c, buf, &[]);
         }
-        // AlpnProtoState::NoSupport, then an empty output string.
         Reply::ok().u32(0).u32(0)
     }
 
@@ -331,9 +277,6 @@ impl Service for SslConnection {
 
     fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
         match req.cmd {
-            // SetSocketDescriptor returns the descriptor the client passed in;
-            // no duplication takes place because both services share the bsd
-            // handle table in this runtime.
             0 => {
                 let fd = req.u32(0) as i32;
                 self.socket.store(fd, Relaxed);
@@ -352,13 +295,10 @@ impl Service for SslConnection {
             5 => self.get_host_name(c, req),
             6 => Reply::ok().u32(self.verify.load(Relaxed)),
             7 => Reply::ok().u32(self.io_mode.load(Relaxed)),
-            // Handshake, record I/O, renegotiation, key export, DTLS and the
-            // cipher/ALPN results all need a TLS engine.
             8 | 9 | 10 | 11 | 13 | 14 | 25 | 31 | 32 | 33 | 36 | 37 => {
                 Reply::err(SSL_NOT_AVAILABLE)
             }
             12 => Reply::ok().u32(0),
-            // No verification ran, so there is no certificate error to report.
             15 => Reply::ok(),
             16 => Reply::ok().u32(0),
             17 => {
@@ -383,7 +323,6 @@ impl Service for SslConnection {
                 Reply::ok().u32(fd as u32)
             }
             29 => {
-                // `nn::TimeSpan` is two u32s; zero is a valid "no timeout".
                 if let Some(buf) = req.out_buf(0) {
                     let _ = write_guest(c, buf, &[0u8; DTLS_TIMEOUT_SIZE]);
                 }
