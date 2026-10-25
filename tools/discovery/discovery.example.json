@@ -1,0 +1,16 @@
+{
+  "kirikae": "target/release/kirikae.exe",
+  "games": [
+    {
+      "name": "smbw",
+      "source": "myswitch/extracted",
+      "out": "myswitch/build",
+      "build_args": ["--profile"],
+      "build_timeout": 1800,
+      "scenarios": [
+        {"name": "boot", "seconds": 60},
+        {"name": "menu", "seconds": 120, "input": "2:PLUS,6:Z"}
+      ]
+    }
+  ]
+}

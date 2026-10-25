@@ -1,0 +1,8 @@
+{
+  "kirikae": "target/release/kirikae.exe",
+  "games_root": "myswitch/extracted",
+  "work": "%LOCALAPPDATA%/kirikae-discovery/batch",
+  "boot_seconds": 20,
+  "build_timeout": 1800,
+  "scenarios": [{"name": "boot", "seconds": 20}]
+}
