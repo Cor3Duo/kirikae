@@ -17,6 +17,7 @@ pub mod lm;
 pub mod mii;
 pub mod mm;
 pub mod nfp;
+pub mod ngc;
 pub mod nvdrv;
 pub mod omm;
 pub mod pctl;
@@ -143,6 +144,7 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "irs" => Arc::new(irs::Irs),
         "csrng" => Arc::new(csrng::Csrng),
         "omm" => Arc::new(omm::Omm),
+        "ngc:u" => Arc::new(ngc::Ngc),
         "pctl" => Arc::new(pctl::Pctl { name: "pctl" }),
         "pdm:qry" => Arc::new(pdm::PdmQry),
         "pctl:s" => Arc::new(pctl::Pctl { name: "pctl:s" }),
