@@ -10,10 +10,6 @@ const SHARED_SIZE: u64 = 0x1000;
 const CLOCK_SOURCE: [u8; 16] = *b"kirikae-steady\0\0";
 const LOCATION: &str = "UTC";
 
-/// `nn::time::sf::ClockSnapshot` is 0xD0 bytes: two `SystemClockContext`s, the
-/// user and network POSIX times, their calendar forms and additional info, the
-/// steady time point, the location name, the automatic-correction flag, the
-/// requested `nn::time::TimeType` and a reserved u16.
 const CLOCK_SNAPSHOT_SIZE: usize = 0xd0;
 
 fn now_unix() -> i64 {
@@ -44,28 +40,6 @@ fn put_time_point(b: &mut [u8], offset: usize, seconds: i64) {
     b[offset + 8..offset + 0x18].copy_from_slice(&CLOCK_SOURCE);
 }
 
-/// `nn::time::sf::ClockSnapshot` as `GetClockSnapshot` returns it
-/// (https://switchbrew.org/wiki/PCV_services#time:u,_time:a,_time:s, command 400;
-/// layout from Ryujinx's `ClockSnapshot`):
-///
-/// | Offset | Field |
-/// |---|---|
-/// | 0x00 | User `SystemClockContext` |
-/// | 0x20 | Network `SystemClockContext` |
-/// | 0x40 | User POSIX time (s64) |
-/// | 0x48 | Network POSIX time (s64) |
-/// | 0x50 | User `CalendarTime` |
-/// | 0x58 | Network `CalendarTime` |
-/// | 0x60 | User `CalendarAdditionalInfo` |
-/// | 0x78 | Network `CalendarAdditionalInfo` |
-/// | 0x90 | `SteadyClockTimePoint` |
-/// | 0xA8 | `LocationName` (0x24 bytes) |
-/// | 0xCC | `IsAutomaticCorrectionEnabled` (bool) |
-/// | 0xCD | Requested `TimeType` |
-/// | 0xCE | Reserved u16 |
-///
-/// There is no network clock, so both times are the same user time and both
-/// contexts point at the synthetic steady clock.
 fn clock_snapshot(steady: i64, unix: i64, clock_type: u8) -> [u8; CLOCK_SNAPSHOT_SIZE] {
     let mut b = [0; CLOCK_SNAPSHOT_SIZE];
     let offset = unix - steady;
@@ -82,18 +56,11 @@ fn clock_snapshot(steady: i64, unix: i64, clock_type: u8) -> [u8; CLOCK_SNAPSHOT
     b[0x78..0x90].copy_from_slice(&cal[8..0x20]);
     put_time_point(&mut b, 0x90, steady);
     b[0xa8..0xcc].copy_from_slice(&location_name());
-    // The runtime reports the automatic correction as disabled in command 100, so the
-    // snapshot keeps the same answer.
     b[0xcc] = 0;
     b[0xcd] = clock_type;
     b
 }
 
-/// Where `GetClockSnapshot` has to put the snapshot: the type-0x1a receive
-/// pointer buffer. The HIPC parser files those under `c`; `x`/`b` are accepted
-/// too for callers that arrive through another descriptor form. A buffer
-/// smaller than the snapshot is left untouched, like the other commands in this
-/// service.
 fn clock_snapshot_output(
     req: &Request,
     steady: i64,
@@ -137,12 +104,8 @@ pub struct Time {
 }
 
 impl Time {
-    /// Commands whose reply does not need the process, kept apart from `call` so they
-    /// can be tested without a guest CPU.
     fn stateless_command(&self, req: &Request) -> Option<Reply> {
         match req.cmd {
-            // IsStandardNetworkSystemClockAccuracySufficient: no network clock is
-            // provided, so its accuracy is never sufficient. Output bool.
             200 => Some(Reply::ok().u8(0)),
             _ => None,
         }
@@ -168,9 +131,6 @@ impl Service for Time {
                 let base = req.u64(0) as i64 + req.u64(8) as i64;
                 Reply::ok().u64(base as u64)
             }
-            // 400 GetClockSnapshot(nn::time::TimeType) -> nn::time::sf::ClockSnapshot:
-            // writes the 0xD0-byte snapshot to the receive pointer buffer, no raw
-            // output. The buffer counts as a pointer list (type 0x1a) in the request.
             400 => {
                 if let Some((addr, snapshot)) =
                     clock_snapshot_output(req, steady_seconds(c), now_unix())
@@ -399,7 +359,6 @@ mod tests {
             100
         );
 
-        // A pointer descriptor of the other form is accepted too.
         let pointer = Request {
             cmd: 400,
             x: vec![Buf {
@@ -413,7 +372,6 @@ mod tests {
             Some(0x2800)
         );
 
-        // A type-0x6 map descriptor is accepted as well.
         let mapped = Request {
             cmd: 400,
             b: vec![Buf {
@@ -427,7 +385,6 @@ mod tests {
             Some(0x3000)
         );
 
-        // No buffer, or one too short for the 0xD0-byte struct, is left untouched.
         let bare = Request {
             cmd: 400,
             ..Request::default()
@@ -436,7 +393,6 @@ mod tests {
         let short = snapshot_request(0x2000, CLOCK_SNAPSHOT_SIZE as u64 - 1, 0);
         assert!(clock_snapshot_output(&short, 10, 100).is_none());
 
-        // No TimeType byte reads as UserSystemClock (0).
         let untyped = Request {
             cmd: 400,
             x: vec![Buf {
@@ -456,8 +412,6 @@ mod tests {
     #[test]
     fn time_u_400_goes_through_the_per_process_path() {
         let time = Time { name: "time:u" };
-        // GetClockSnapshot needs the process clocks, so it is not in the
-        // stateless table; unknown commands stay unimplemented.
         for cmd in [400, 401, 402] {
             assert!(
                 time.stateless_command(&Request {
