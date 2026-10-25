@@ -1,47 +1,4 @@
 #Requires -Version 5.1
-<#
-.SYNOPSIS
-    Add (or remove) Windows Defender exclusions for the directories a kirikae build writes to.
-
-.DESCRIPTION
-    A release build links hundreds of megabytes of objects and writes multi-hundred-megabyte
-    executables. Real-time scanning every write costs minutes per build, so this script
-    excludes only the build directories:
-
-      * the cargo target directory of the kirikae workspace (CARGO_TARGET_DIR, else <repo>\target),
-      * %TEMP%\kirikae-build, where the generated projects keep their per-game target dirs,
-      * the output root passed with -OutputRoot (the directory given to `kirikae build -o`).
-
-    Nothing else is changed: the script never touches real-time protection, cloud-delivered
-    protection, ASR rules or any other Defender setting. It is idempotent: paths already
-    excluded are reported and left alone. Missing build directories are created so the
-    exclusion points at a real path, which is what Defender requires.
-
-    Adding exclusions needs an elevated PowerShell. Without elevation the script changes
-    nothing, prints the exact commands to run as administrator and exits with code 2.
-
-.PARAMETER OutputRoot
-    Build output root, the directory passed to `kirikae build -o`. Repeatable.
-
-.PARAMETER TargetDir
-    Extra cargo target directory to exclude. The workspace target dir and
-    %TEMP%\kirikae-build are always included.
-
-.PARAMETER Remove
-    Remove the exclusions for exactly the computed paths instead of adding them.
-
-.PARAMETER WhatIf
-    Print the Add-MpPreference/Remove-MpPreference commands without running them.
-
-.EXAMPLE
-    powershell -ExecutionPolicy Bypass -File tools\windows\defender_exclude.ps1 `
-        -OutputRoot C:\k\smbw
-
-.EXAMPLE
-    # In an elevated PowerShell, undo what the script added:
-    powershell -ExecutionPolicy Bypass -File tools\windows\defender_exclude.ps1 `
-        -OutputRoot C:\k\smbw -Remove
-#>
 [CmdletBinding()]
 param(
     [string[]] $OutputRoot = @(),
@@ -59,7 +16,6 @@ function Test-Administrator {
 }
 
 function Add-TrailingSlash([string] $Path) {
-    # Defender stores exclusions without the trailing separator; normalise before comparing.
     $full = [System.IO.Path]::GetFullPath($Path)
     if ($full.Length -gt 3) {
         return $full.TrimEnd([char[]]@('\', '/'))
