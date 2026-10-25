@@ -36,8 +36,23 @@ pub fn movk(is64: bool, rd: u32, imm16: u32, hw: u32) -> u32 {
 pub fn movn(is64: bool, rd: u32, imm16: u32, hw: u32) -> u32 {
     sf(is64) | 0b100101 << 23 | hw << 21 | (imm16 & 0xffff) << 5 | rd
 }
-pub fn addsub_imm(is64: bool, sub: bool, setflags: bool, rd: u32, rn: u32, imm12: u32, lsl12: bool) -> u32 {
-    sf(is64) | (sub as u32) << 30 | (setflags as u32) << 29 | 0b100010 << 23 | (lsl12 as u32) << 22 | (imm12 & 0xfff) << 10 | rn << 5 | rd
+pub fn addsub_imm(
+    is64: bool,
+    sub: bool,
+    setflags: bool,
+    rd: u32,
+    rn: u32,
+    imm12: u32,
+    lsl12: bool,
+) -> u32 {
+    sf(is64)
+        | (sub as u32) << 30
+        | (setflags as u32) << 29
+        | 0b100010 << 23
+        | (lsl12 as u32) << 22
+        | (imm12 & 0xfff) << 10
+        | rn << 5
+        | rd
 }
 pub fn add_imm(rd: u32, rn: u32, imm12: u32) -> u32 {
     addsub_imm(true, false, false, rd, rn, imm12, false)
@@ -51,8 +66,25 @@ pub fn subs_imm(rd: u32, rn: u32, imm12: u32) -> u32 {
 pub fn cmp_imm(rn: u32, imm12: u32) -> u32 {
     subs_imm(XZR, rn, imm12)
 }
-pub fn addsub_reg(is64: bool, sub: bool, setflags: bool, rd: u32, rn: u32, rm: u32, shift: u32, amount: u32) -> u32 {
-    sf(is64) | (sub as u32) << 30 | (setflags as u32) << 29 | 0b01011 << 24 | shift << 22 | rm << 16 | amount << 10 | rn << 5 | rd
+pub fn addsub_reg(
+    is64: bool,
+    sub: bool,
+    setflags: bool,
+    rd: u32,
+    rn: u32,
+    rm: u32,
+    shift: u32,
+    amount: u32,
+) -> u32 {
+    sf(is64)
+        | (sub as u32) << 30
+        | (setflags as u32) << 29
+        | 0b01011 << 24
+        | shift << 22
+        | rm << 16
+        | amount << 10
+        | rn << 5
+        | rd
 }
 pub fn add_reg(rd: u32, rn: u32, rm: u32) -> u32 {
     addsub_reg(true, false, false, rd, rn, rm, 0, 0)
@@ -60,11 +92,46 @@ pub fn add_reg(rd: u32, rn: u32, rm: u32) -> u32 {
 pub fn sub_reg(rd: u32, rn: u32, rm: u32) -> u32 {
     addsub_reg(true, true, false, rd, rn, rm, 0, 0)
 }
-pub fn addsub_ext(is64: bool, sub: bool, setflags: bool, rd: u32, rn: u32, rm: u32, option: u32, shift: u32) -> u32 {
-    sf(is64) | (sub as u32) << 30 | (setflags as u32) << 29 | 0b01011 << 24 | 1 << 21 | rm << 16 | option << 13 | shift << 10 | rn << 5 | rd
+pub fn addsub_ext(
+    is64: bool,
+    sub: bool,
+    setflags: bool,
+    rd: u32,
+    rn: u32,
+    rm: u32,
+    option: u32,
+    shift: u32,
+) -> u32 {
+    sf(is64)
+        | (sub as u32) << 30
+        | (setflags as u32) << 29
+        | 0b01011 << 24
+        | 1 << 21
+        | rm << 16
+        | option << 13
+        | shift << 10
+        | rn << 5
+        | rd
 }
-pub fn logical_reg(is64: bool, opc: u32, invert: bool, rd: u32, rn: u32, rm: u32, shift: u32, amount: u32) -> u32 {
-    sf(is64) | opc << 29 | 0b01010 << 24 | shift << 22 | (invert as u32) << 21 | rm << 16 | amount << 10 | rn << 5 | rd
+pub fn logical_reg(
+    is64: bool,
+    opc: u32,
+    invert: bool,
+    rd: u32,
+    rn: u32,
+    rm: u32,
+    shift: u32,
+    amount: u32,
+) -> u32 {
+    sf(is64)
+        | opc << 29
+        | 0b01010 << 24
+        | shift << 22
+        | (invert as u32) << 21
+        | rm << 16
+        | amount << 10
+        | rn << 5
+        | rd
 }
 pub fn mov_reg(rd: u32, rm: u32) -> u32 {
     logical_reg(true, 1, false, rd, XZR, rm, 0, 0)
@@ -73,7 +140,14 @@ pub fn logical_imm(is64: bool, opc: u32, rd: u32, rn: u32, n: u32, immr: u32, im
     sf(is64) | opc << 29 | 0b100100 << 23 | n << 22 | immr << 16 | imms << 10 | rn << 5 | rd
 }
 pub fn bitfield(is64: bool, opc: u32, rd: u32, rn: u32, immr: u32, imms: u32) -> u32 {
-    sf(is64) | opc << 29 | 0b100110 << 23 | (is64 as u32) << 22 | immr << 16 | imms << 10 | rn << 5 | rd
+    sf(is64)
+        | opc << 29
+        | 0b100110 << 23
+        | (is64 as u32) << 22
+        | immr << 16
+        | imms << 10
+        | rn << 5
+        | rd
 }
 pub fn lsl_imm(rd: u32, rn: u32, amount: u32) -> u32 {
     bitfield(true, 2, rd, rn, (64 - amount) % 64, 63 - amount)
@@ -118,17 +192,46 @@ pub fn str(rt: u32, rn: u32, offset: u32) -> u32 {
     ldst_uimm(3, 0, rt, rn, offset)
 }
 pub fn ldst_imm9(size: u32, opc: u32, rt: u32, rn: u32, imm9: i32, idx: u32) -> u32 {
-    size << 30 | 0b111000 << 24 | opc << 22 | ((imm9 as u32) & 0x1ff) << 12 | idx << 10 | rn << 5 | rt
+    size << 30
+        | 0b111000 << 24
+        | opc << 22
+        | ((imm9 as u32) & 0x1ff) << 12
+        | idx << 10
+        | rn << 5
+        | rt
 }
 pub fn ldst_reg(size: u32, opc: u32, rt: u32, rn: u32, rm: u32, option: u32, scaled: bool) -> u32 {
-    size << 30 | 0b111000 << 24 | opc << 22 | 1 << 21 | rm << 16 | option << 13 | (scaled as u32) << 12 | 0b10 << 10 | rn << 5 | rt
+    size << 30
+        | 0b111000 << 24
+        | opc << 22
+        | 1 << 21
+        | rm << 16
+        | option << 13
+        | (scaled as u32) << 12
+        | 0b10 << 10
+        | rn << 5
+        | rt
 }
 pub fn ldstp(opc: u32, idx: u32, load: bool, rt: u32, rt2: u32, rn: u32, offset: i32) -> u32 {
     let scale = if opc == 2 { 8 } else { 4 };
-    opc << 30 | 0b101 << 27 | idx << 23 | (load as u32) << 22 | (((offset / scale) as u32) & 0x7f) << 15 | rt2 << 10 | rn << 5 | rt
+    opc << 30
+        | 0b101 << 27
+        | idx << 23
+        | (load as u32) << 22
+        | (((offset / scale) as u32) & 0x7f) << 15
+        | rt2 << 10
+        | rn << 5
+        | rt
 }
 pub fn ldaxr(is64: bool, rt: u32, rn: u32) -> u32 {
-    (2 + is64 as u32) << 30 | 0b001000 << 24 | 1 << 22 | 31 << 16 | 1 << 15 | 31 << 10 | rn << 5 | rt
+    (2 + is64 as u32) << 30
+        | 0b001000 << 24
+        | 1 << 22
+        | 31 << 16
+        | 1 << 15
+        | 31 << 10
+        | rn << 5
+        | rt
 }
 pub fn stlxr(is64: bool, rs: u32, rt: u32, rn: u32) -> u32 {
     (2 + is64 as u32) << 30 | 0b001000 << 24 | rs << 16 | 1 << 15 | 31 << 10 | rn << 5 | rt
@@ -153,7 +256,12 @@ pub fn cbz(is64: bool, nonzero: bool, rt: u32, offset: i64) -> u32 {
     sf(is64) | 0b011010 << 25 | (nonzero as u32) << 24 | ((offset >> 2) as u32 & 0x7ffff) << 5 | rt
 }
 pub fn tbz(nonzero: bool, rt: u32, bit: u32, offset: i64) -> u32 {
-    (bit >> 5) << 31 | 0b011011 << 25 | (nonzero as u32) << 24 | (bit & 31) << 19 | ((offset >> 2) as u32 & 0x3fff) << 5 | rt
+    (bit >> 5) << 31
+        | 0b011011 << 25
+        | (nonzero as u32) << 24
+        | (bit & 31) << 19
+        | ((offset >> 2) as u32 & 0x3fff) << 5
+        | rt
 }
 pub fn br(rn: u32) -> u32 {
     0xD61F_0000 | rn << 5
@@ -169,6 +277,82 @@ pub fn svc(imm: u32) -> u32 {
 }
 pub fn nop() -> u32 {
     0xD503_201F
+}
+
+/// Advanced SIMD three-same bitwise: `size` 0/1/2 picks AND/BIC/ORR/ORN with
+/// `u = false` and EOR/BSL/BIT/BIF with `u = true`.
+pub fn neon_logic(q: bool, u: bool, size: u32, rm: u32, rn: u32, rd: u32) -> u32 {
+    (q as u32) << 30
+        | (u as u32) << 29
+        | 0b01110 << 24
+        | (size & 3) << 22
+        | 1 << 21
+        | rm << 16
+        | 0b00011 << 11
+        | 1 << 10
+        | rn << 5
+        | rd
+}
+
+/// Advanced SIMD three-same arithmetic: `opcode` `0b10000` is `ADD`/`SUB` (`u` picks
+/// `SUB`), `0b10011` is `MUL` with `u = false`, `0b01100`/`0b01101` are `MAX`/`MIN` with
+/// `u` picking the unsigned form.
+pub fn neon_three_same(q: bool, u: bool, size: u32, opcode: u32, rm: u32, rn: u32, rd: u32) -> u32 {
+    (q as u32) << 30
+        | (u as u32) << 29
+        | 0b01110 << 24
+        | (size & 3) << 22
+        | 1 << 21
+        | rm << 16
+        | (opcode & 0x1f) << 11
+        | 1 << 10
+        | rn << 5
+        | rd
+}
+
+/// Advanced SIMD two-register miscellaneous: `opcode` `0b01011` is `ABS`/`NEG` (`u`
+/// picks `NEG`).
+pub fn neon_two_misc(q: bool, u: bool, size: u32, opcode: u32, rn: u32, rd: u32) -> u32 {
+    (q as u32) << 30
+        | (u as u32) << 29
+        | 0b01110 << 24
+        | (size & 3) << 22
+        | 0b10000 << 17
+        | (opcode & 0x1f) << 12
+        | 0b10 << 10
+        | rn << 5
+        | rd
+}
+
+/// Advanced SIMD shift by immediate, vector form. `immhb` is `immh:immb`: 0 gives
+/// `SHL #es`, `2*es - n` gives USHR/SSHR `#n`.
+pub fn neon_shift_imm(q: bool, u: bool, immhb: u32, opcode: u32, rn: u32, rd: u32) -> u32 {
+    (q as u32) << 30
+        | (u as u32) << 29
+        | 0b1111 << 24
+        | (immhb & 0x7f) << 16
+        | (opcode & 0x1f) << 11
+        | 1 << 10
+        | rn << 5
+        | rd
+}
+
+/// `imm5` for the copy group: lane width `es = 8 << (imm5.trailing_zeros())`.
+pub fn neon_imm5(es: u32, index: u32) -> u32 {
+    let size = (es / 8).trailing_zeros();
+    (1 << size) | (index << (size + 1))
+}
+
+/// Advanced SIMD copy: `op = 0` is DUP (element), `op = 1` is INS (element).
+pub fn neon_copy(q: bool, op: bool, imm5: u32, imm4: u32, rn: u32, rd: u32) -> u32 {
+    (q as u32) << 30
+        | (op as u32) << 29
+        | 0b01110 << 24
+        | (imm5 & 0x1f) << 16
+        | (imm4 & 0xf) << 11
+        | 1 << 10
+        | rn << 5
+        | rd
 }
 
 #[derive(Clone, Copy)]
@@ -191,7 +375,12 @@ pub struct Asm {
 
 impl Asm {
     pub fn new(base: u64) -> Self {
-        Asm { base, words: Vec::new(), labels: HashMap::new(), fixups: Vec::new() }
+        Asm {
+            base,
+            words: Vec::new(),
+            labels: HashMap::new(),
+            fixups: Vec::new(),
+        }
     }
 
     pub fn here(&self) -> u64 {
@@ -205,12 +394,18 @@ impl Asm {
 
     pub fn label(&mut self, name: &str) -> &mut Self {
         let at = self.here();
-        assert!(self.labels.insert(name.to_string(), at).is_none(), "duplicate label {name}");
+        assert!(
+            self.labels.insert(name.to_string(), at).is_none(),
+            "duplicate label {name}"
+        );
         self
     }
 
     pub fn label_addr(&self, name: &str) -> u64 {
-        *self.labels.get(name).unwrap_or_else(|| panic!("undefined label {name}"))
+        *self
+            .labels
+            .get(name)
+            .unwrap_or_else(|| panic!("undefined label {name}"))
     }
 
     pub fn define(&mut self, name: &str, addr: u64) -> &mut Self {
@@ -250,7 +445,8 @@ impl Asm {
     }
     pub fn addr_of(&mut self, rd: u32, l: &str) -> &mut Self {
         self.fix(l, Fix::Adrp(rd));
-        self.fixups.push((self.words.len(), l.to_string(), Fix::Adrp(rd | 0x100)));
+        self.fixups
+            .push((self.words.len(), l.to_string(), Fix::Adrp(rd | 0x100)));
         self.words.push(0);
         self
     }
@@ -268,7 +464,10 @@ impl Asm {
 
     pub fn finish(mut self) -> Vec<u32> {
         for (index, name, fix) in std::mem::take(&mut self.fixups) {
-            let target = *self.labels.get(&name).unwrap_or_else(|| panic!("undefined label {name}"));
+            let target = *self
+                .labels
+                .get(&name)
+                .unwrap_or_else(|| panic!("undefined label {name}"));
             let pc = self.base + 4 * index as u64;
             let off = target.wrapping_sub(pc) as i64;
             self.words[index] = match fix {
@@ -326,12 +525,31 @@ mod tests {
         assert_eq!(ldaxr(false, 9, 20), 0x885ffe89);
         assert_eq!(stlxr(false, 10, 19, 20), 0x880afe93);
         assert_eq!(ldaxr(true, 0, 1), 0xc85ffc20);
+        assert_eq!(
+            neon_three_same(true, false, 2, 0b10000, 17, 1, 1),
+            0x4eb1_8421
+        );
+        assert_eq!(
+            neon_three_same(true, false, 2, 0b10011, 2, 1, 0),
+            0x4ea2_9c20
+        );
+        assert_eq!(
+            neon_three_same(true, false, 0, 0b01100, 2, 1, 0),
+            0x4e22_6420
+        );
+        assert_eq!(neon_two_misc(true, false, 0, 0b01011, 1, 0), 0x4e20_b820);
+        assert_eq!(neon_two_misc(true, true, 0, 0b01011, 1, 0), 0x6e20_b820);
     }
 
     #[test]
     fn labels_resolve() {
         let mut a = Asm::new(0x1000);
-        a.label("top").emit(nop()).b_to("top").bl_to("end").label("end").emit(ret());
+        a.label("top")
+            .emit(nop())
+            .b_to("top")
+            .bl_to("end")
+            .label("end")
+            .emit(ret());
         let words = a.finish();
         assert_eq!(words[1], b(-4));
         assert_eq!(words[2], bl(4));

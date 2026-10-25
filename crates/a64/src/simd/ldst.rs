@@ -1,4 +1,4 @@
-use super::{bits, lane, set_lane, sized, Env};
+use super::{Env, bits, lane, set_lane, sized};
 
 pub fn exec(e: &mut dyn Env, w: u32) -> bool {
     if w & 0xbfbf_0000 == 0x0c00_0000 || w & 0xbfa0_0000 == 0x0c80_0000 {
@@ -17,14 +17,24 @@ fn base(e: &dyn Env, rn: u32) -> u64 {
 fn writeback(e: &mut dyn Env, rn: u32, rm: u32, addr: u64, imm: u64) {
     let off = if rm == 31 { imm } else { e.x(rm) };
     let v = addr.wrapping_add(off);
-    if rn == 31 { e.set_sp(v) } else { e.set_x(rn, v) }
+    if rn == 31 {
+        e.set_sp(v)
+    } else {
+        e.set_x(rn, v)
+    }
 }
 
 fn multiple(e: &mut dyn Env, w: u32) -> bool {
     let q = bits(w, 30, 1);
     let load = bits(w, 22, 1) == 1;
     let post = bits(w, 23, 1) == 1;
-    let (rm, opcode, size, rn, rt) = (bits(w, 16, 5), bits(w, 12, 4), bits(w, 10, 2), bits(w, 5, 5), bits(w, 0, 5));
+    let (rm, opcode, size, rn, rt) = (
+        bits(w, 16, 5),
+        bits(w, 12, 4),
+        bits(w, 10, 2),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     let (rpt, selem) = match opcode {
         0b0000 => (1, 4),
         0b0010 => (4, 1),
@@ -43,7 +53,8 @@ fn multiple(e: &mut dyn Env, w: u32) -> bool {
     let datasize = 64 << q;
     let elems = datasize / es;
     let addr = base(e, rn);
-    let mut regs: [u128; 4] = std::array::from_fn(|k| if load { 0 } else { e.v((rt + k as u32) % 32) });
+    let mut regs: [u128; 4] =
+        std::array::from_fn(|k| if load { 0 } else { e.v((rt + k as u32) % 32) });
     let mut offs = 0u64;
     for r in 0..rpt {
         for i in 0..elems {
@@ -76,7 +87,14 @@ fn single(e: &mut dyn Env, w: u32) -> bool {
     let load = bits(w, 22, 1) == 1;
     let post = bits(w, 23, 1) == 1;
     let r = bits(w, 21, 1);
-    let (rm, opcode, s, size, rn, rt) = (bits(w, 16, 5), bits(w, 13, 3), bits(w, 12, 1), bits(w, 10, 2), bits(w, 5, 5), bits(w, 0, 5));
+    let (rm, opcode, s, size, rn, rt) = (
+        bits(w, 16, 5),
+        bits(w, 13, 3),
+        bits(w, 12, 1),
+        bits(w, 10, 2),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     let selem = ((opcode & 1) << 1 | r) + 1;
     let scale = opcode >> 1;
     let (es, index, replicate) = match scale {

@@ -4,7 +4,11 @@ use crate::ops::Op;
 
 pub fn lift(pc: u64, word: u32) -> Insn {
     let stmts = lift_stmts(pc, word).unwrap_or_else(|| vec![Stmt::Undefined(word)]);
-    Insn { addr: pc, word, stmts }
+    Insn {
+        addr: pc,
+        word,
+        stmts,
+    }
 }
 
 fn lift_stmts(pc: u64, w: u32) -> Option<Vec<Stmt>> {
@@ -15,7 +19,10 @@ fn lift_stmts(pc: u64, w: u32) -> Option<Vec<Stmt>> {
         0b0101 | 0b1101 => dp_reg(w),
         _ => None,
     };
-    stmts.or_else(|| crate::lift_fp::lift(w)).or_else(|| crate::simd::supported(w).then(|| vec![Stmt::Simd(w)]))
+    stmts
+        .or_else(|| crate::lift_fp::lift(w))
+        .or_else(|| crate::lift_neon::lift(w))
+        .or_else(|| crate::simd::supported(w).then(|| vec![Stmt::Simd(w)]))
 }
 
 fn field(w: u32, lo: u32, bits: u32) -> u32 {
@@ -27,7 +34,11 @@ fn rz(n: u32) -> Expr {
 }
 
 fn rsp(n: u32) -> Expr {
-    if n == 31 { Expr::Sp } else { Expr::Reg(n as u8) }
+    if n == 31 {
+        Expr::Sp
+    } else {
+        Expr::Reg(n as u8)
+    }
 }
 
 fn wz(out: &mut Vec<Stmt>, n: u32, e: Expr) {
@@ -37,7 +48,11 @@ fn wz(out: &mut Vec<Stmt>, n: u32, e: Expr) {
 }
 
 fn wsp(out: &mut Vec<Stmt>, n: u32, e: Expr) {
-    out.push(if n == 31 { Stmt::SetSp(e) } else { Stmt::SetReg(n as u8, e) });
+    out.push(if n == 31 {
+        Stmt::SetSp(e)
+    } else {
+        Stmt::SetReg(n as u8, e)
+    });
 }
 
 fn width(e: Expr, sf: bool) -> Expr {
@@ -58,7 +73,11 @@ fn shift_op(kind: u32, sf: bool) -> Op {
 }
 
 fn shifted(e: Expr, kind: u32, amount: u32, sf: bool) -> Expr {
-    if amount == 0 { e } else { op2(shift_op(kind, sf), e, c(amount as u64)) }
+    if amount == 0 {
+        e
+    } else {
+        op2(shift_op(kind, sf), e, c(amount as u64))
+    }
 }
 
 fn extended(e: Expr, option: u32, shift: u32) -> Expr {
@@ -71,25 +90,57 @@ fn extended(e: Expr, option: u32, shift: u32) -> Expr {
         6 => op1(Op::Sext32, e),
         _ => e,
     };
-    if shift == 0 { e } else { op2(Op::Lsl64, e, c(shift as u64)) }
+    if shift == 0 {
+        e
+    } else {
+        op2(Op::Lsl64, e, c(shift as u64))
+    }
 }
 
 fn add_flags(sf: bool, a: Expr, b: Expr, carry: Expr) -> Expr {
-    op3(if sf { Op::FlagsAdd64 } else { Op::FlagsAdd32 }, a, b, carry)
+    op3(
+        if sf { Op::FlagsAdd64 } else { Op::FlagsAdd32 },
+        a,
+        b,
+        carry,
+    )
 }
 
 fn logic_flags(sf: bool, r: Expr) -> Expr {
-    op1(if sf { Op::FlagsLogic64 } else { Op::FlagsLogic32 }, r)
+    op1(
+        if sf {
+            Op::FlagsLogic64
+        } else {
+            Op::FlagsLogic32
+        },
+        r,
+    )
 }
 
-fn addsub(sf: bool, sub: bool, set_flags: bool, a: Expr, b: Expr, rd: u32, dest_sp: bool) -> Vec<Stmt> {
+fn addsub(
+    sf: bool,
+    sub: bool,
+    set_flags: bool,
+    a: Expr,
+    b: Expr,
+    rd: u32,
+    dest_sp: bool,
+) -> Vec<Stmt> {
     let mut out = vec![Stmt::Let(0, a), Stmt::Let(1, b)];
     let res = width(op2(if sub { Op::Sub } else { Op::Add }, t(0), t(1)), sf);
     if set_flags {
-        let (b2, carry) = if sub { (op1(Op::Not, t(1)), c(1)) } else { (t(1), c(0)) };
+        let (b2, carry) = if sub {
+            (op1(Op::Not, t(1)), c(1))
+        } else {
+            (t(1), c(0))
+        };
         out.push(Stmt::SetNzcv(add_flags(sf, t(0), b2, carry)));
     }
-    if dest_sp && !set_flags { wsp(&mut out, rd, res) } else { wz(&mut out, rd, res) }
+    if dest_sp && !set_flags {
+        wsp(&mut out, rd, res)
+    } else {
+        wz(&mut out, rd, res)
+    }
     out
 }
 
@@ -101,7 +152,11 @@ fn dp_imm(pc: u64, w: u32) -> Option<Vec<Stmt>> {
 
     if field(w, 24, 5) == 0b10000 {
         let imm = sext(((field(w, 5, 19) << 2) | field(w, 29, 2)) as u64, 21);
-        let value = if w >> 31 == 0 { pc.wrapping_add(imm) } else { (pc & !0xfff).wrapping_add(imm << 12) };
+        let value = if w >> 31 == 0 {
+            pc.wrapping_add(imm)
+        } else {
+            (pc & !0xfff).wrapping_add(imm << 12)
+        };
         wz(&mut out, rd, c(value));
         return Some(out);
     }
@@ -118,7 +173,13 @@ fn dp_imm(pc: u64, w: u32) -> Option<Vec<Stmt>> {
             if !sf && n == 1 {
                 return None;
             }
-            let (imm, _) = decode_bit_masks(n, field(w, 10, 6), field(w, 16, 6), true, if sf { 64 } else { 32 })?;
+            let (imm, _) = decode_bit_masks(
+                n,
+                field(w, 10, 6),
+                field(w, 16, 6),
+                true,
+                if sf { 64 } else { 32 },
+            )?;
             let opc = field(w, 29, 2);
             let o = [Op::And, Op::Or, Op::Xor, Op::And][opc as usize];
             out.push(Stmt::Let(0, width(op2(o, rz(rn), c(imm)), sf)));
@@ -142,7 +203,14 @@ fn dp_imm(pc: u64, w: u32) -> Option<Vec<Stmt>> {
             let value = match opc {
                 0 => c(!imm & mask),
                 2 => c(imm),
-                _ => width(op2(Op::Or, op2(Op::And, rz(rd), c(!(0xffffu64 << shift))), c(imm)), sf),
+                _ => width(
+                    op2(
+                        Op::Or,
+                        op2(Op::And, rz(rd), c(!(0xffffu64 << shift))),
+                        c(imm),
+                    ),
+                    sf,
+                ),
             };
             wz(&mut out, rd, value);
             Some(out)
@@ -171,7 +239,11 @@ fn dp_imm(pc: u64, w: u32) -> Option<Vec<Stmt>> {
         0b100111 => {
             let n = field(w, 22, 1);
             let lsb = field(w, 10, 6);
-            if field(w, 29, 2) != 0 || field(w, 21, 1) != 0 || (sf as u32) != n || (!sf && lsb >= 32) {
+            if field(w, 29, 2) != 0
+                || field(w, 21, 1) != 0
+                || (sf as u32) != n
+                || (!sf && lsb >= 32)
+            {
                 return None;
             }
             let rm = field(w, 16, 5);
@@ -223,7 +295,11 @@ fn branch_sys(pc: u64, w: u32) -> Option<Vec<Stmt>> {
         let bit = (field(w, 31, 1) << 5) | field(w, 19, 5);
         let target = pc.wrapping_add(sext((field(w, 5, 14) as u64) << 2, 16));
         let tested = op2(Op::Bit, rz(field(w, 0, 5)), c(bit as u64));
-        let cond = if field(w, 24, 1) == 1 { tested } else { op2(Op::Eq, tested, c(0)) };
+        let cond = if field(w, 24, 1) == 1 {
+            tested
+        } else {
+            op2(Op::Eq, tested, c(0))
+        };
         out.push(Stmt::JumpIf(cond, target));
         return Some(out);
     }
@@ -233,7 +309,10 @@ fn branch_sys(pc: u64, w: u32) -> Option<Vec<Stmt>> {
         if cc >= 14 {
             out.push(Stmt::Jump(target));
         } else {
-            out.push(Stmt::JumpIf(op2(Op::Cond, Expr::Nzcv, c(cc as u64)), target));
+            out.push(Stmt::JumpIf(
+                op2(Op::Cond, Expr::Nzcv, c(cc as u64)),
+                target,
+            ));
         }
         return Some(out);
     }
@@ -265,7 +344,11 @@ fn branch_sys(pc: u64, w: u32) -> Option<Vec<Stmt>> {
     if w & 0xFFFF_F01F == 0xD503_301F {
         let (crm, op2) = (field(w, 8, 4), field(w, 5, 3));
         match op2 {
-            0b010 => out.push(Stmt::Monitor { addr: c(u64::MAX), lo: c(0), hi: c(0) }),
+            0b010 => out.push(Stmt::Monitor {
+                addr: c(u64::MAX),
+                lo: c(0),
+                hi: c(0),
+            }),
             0b100 | 0b101 if crm & 3 == 3 => out.push(Stmt::Fence),
             _ => {}
         }
@@ -275,7 +358,11 @@ fn branch_sys(pc: u64, w: u32) -> Option<Vec<Stmt>> {
     if w & !0x1f == 0xD50B_7420 {
         out.push(Stmt::Let(0, op2(Op::And, rz(rt), c(!63))));
         for i in 0..8u64 {
-            out.push(Stmt::Store { size: 8, addr: op2(Op::Add, t(0), c(i * 8)), value: c(0) });
+            out.push(Stmt::Store {
+                size: 8,
+                addr: op2(Op::Add, t(0), c(i * 8)),
+                value: c(0),
+            });
         }
         return Some(out);
     }
@@ -337,13 +424,24 @@ fn loaded(kind: &Access, bytes: u8, addr: Expr) -> Expr {
     }
 }
 
-fn single(kind: Access, bytes: u8, rt: u32, rn: u32, addr: Expr, writeback: Option<Expr>) -> Vec<Stmt> {
+fn single(
+    kind: Access,
+    bytes: u8,
+    rt: u32,
+    rn: u32,
+    addr: Expr,
+    writeback: Option<Expr>,
+) -> Vec<Stmt> {
     let mut out = vec![Stmt::Let(0, addr)];
     match kind {
         Access::Prefetch => {}
         Access::Store => {
             out.push(Stmt::Let(1, rz(rt)));
-            out.push(Stmt::Store { size: bytes, addr: t(0), value: t(1) });
+            out.push(Stmt::Store {
+                size: bytes,
+                addr: t(0),
+                value: t(1),
+            });
         }
         ref k => out.push(Stmt::Let(1, loaded(k, bytes, t(0)))),
     }
@@ -374,10 +472,20 @@ fn load_store(pc: u64, w: u32) -> Option<Vec<Stmt>> {
             (0, 0) => {
                 if l == 1 {
                     out.push(Stmt::Let(1, load(bytes, t(0))));
-                    out.push(Stmt::Monitor { addr: t(0), lo: t(1), hi: c(0) });
+                    out.push(Stmt::Monitor {
+                        addr: t(0),
+                        lo: t(1),
+                        hi: c(0),
+                    });
                     wz(&mut out, rt, t(1));
                 } else {
-                    out.push(Stmt::StoreExclusive { size: bytes, addr: t(0), lo: rz(rt), hi: c(0), status: rs });
+                    out.push(Stmt::StoreExclusive {
+                        size: bytes,
+                        addr: t(0),
+                        lo: rz(rt),
+                        hi: c(0),
+                        status: rs,
+                    });
                 }
             }
             (1, 0) => {
@@ -385,30 +493,58 @@ fn load_store(pc: u64, w: u32) -> Option<Vec<Stmt>> {
                     out.push(Stmt::Let(1, load(bytes, t(0))));
                     wz(&mut out, rt, t(1));
                 } else {
-                    out.push(Stmt::Store { size: bytes, addr: t(0), value: rz(rt) });
+                    out.push(Stmt::Store {
+                        size: bytes,
+                        addr: t(0),
+                        value: rz(rt),
+                    });
                     out.push(Stmt::Fence);
                 }
             }
             (0, 1) if size == 2 => {
                 if l == 1 {
                     out.push(Stmt::Let(1, load(8, t(0))));
-                    out.push(Stmt::Monitor { addr: t(0), lo: t(1), hi: c(0) });
+                    out.push(Stmt::Monitor {
+                        addr: t(0),
+                        lo: t(1),
+                        hi: c(0),
+                    });
                     wz(&mut out, rt, op1(Op::Zext32, t(1)));
                     wz(&mut out, rt2, op2(Op::Lsr64, t(1), c(32)));
                 } else {
-                    let pair = op2(Op::Or, op1(Op::Zext32, rz(rt)), op2(Op::Lsl64, rz(rt2), c(32)));
-                    out.push(Stmt::StoreExclusive { size: 8, addr: t(0), lo: pair, hi: c(0), status: rs });
+                    let pair = op2(
+                        Op::Or,
+                        op1(Op::Zext32, rz(rt)),
+                        op2(Op::Lsl64, rz(rt2), c(32)),
+                    );
+                    out.push(Stmt::StoreExclusive {
+                        size: 8,
+                        addr: t(0),
+                        lo: pair,
+                        hi: c(0),
+                        status: rs,
+                    });
                 }
             }
             (0, 1) if size == 3 => {
                 if l == 1 {
                     out.push(Stmt::Let(1, load(8, t(0))));
                     out.push(Stmt::Let(2, load(8, op2(Op::Add, t(0), c(8)))));
-                    out.push(Stmt::Monitor { addr: t(0), lo: t(1), hi: t(2) });
+                    out.push(Stmt::Monitor {
+                        addr: t(0),
+                        lo: t(1),
+                        hi: t(2),
+                    });
                     wz(&mut out, rt, t(1));
                     wz(&mut out, rt2, t(2));
                 } else {
-                    out.push(Stmt::StoreExclusive { size: 16, addr: t(0), lo: rz(rt), hi: rz(rt2), status: rs });
+                    out.push(Stmt::StoreExclusive {
+                        size: 16,
+                        addr: t(0),
+                        lo: rz(rt),
+                        hi: rz(rt2),
+                        status: rs,
+                    });
                 }
             }
             _ => return None,
@@ -442,12 +578,22 @@ fn load_store(pc: u64, w: u32) -> Option<Vec<Stmt>> {
         };
         let offset = sext(field(w, 15, 7) as u64, 7).wrapping_mul(bytes as u64);
         let base = rsp(rn);
-        let addr = if idx == 1 { base.clone() } else { op2(Op::Add, base.clone(), c(offset)) };
+        let addr = if idx == 1 {
+            base.clone()
+        } else {
+            op2(Op::Add, base.clone(), c(offset))
+        };
         let writeback = matches!(idx, 1 | 3).then(|| op2(Op::Add, base, c(offset)));
         let second = op2(Op::Add, t(0), c(bytes as u64));
         let mut out = vec![Stmt::Let(0, addr)];
         if l {
-            let get = |a: Expr| if signed { op1(Op::Sext32, load(4, a)) } else { load(bytes, a) };
+            let get = |a: Expr| {
+                if signed {
+                    op1(Op::Sext32, load(4, a))
+                } else {
+                    load(bytes, a)
+                }
+            };
             out.push(Stmt::Let(1, get(t(0))));
             out.push(Stmt::Let(2, get(second)));
             if let Some(wb) = writeback {
@@ -458,8 +604,16 @@ fn load_store(pc: u64, w: u32) -> Option<Vec<Stmt>> {
         } else {
             out.push(Stmt::Let(1, rz(rt)));
             out.push(Stmt::Let(2, rz(rt2)));
-            out.push(Stmt::Store { size: bytes, addr: t(0), value: t(1) });
-            out.push(Stmt::Store { size: bytes, addr: second, value: t(2) });
+            out.push(Stmt::Store {
+                size: bytes,
+                addr: t(0),
+                value: t(1),
+            });
+            out.push(Stmt::Store {
+                size: bytes,
+                addr: second,
+                value: t(2),
+            });
             if let Some(wb) = writeback {
                 wsp(&mut out, rn, wb);
             }
@@ -472,7 +626,14 @@ fn load_store(pc: u64, w: u32) -> Option<Vec<Stmt>> {
     if field(w, 24, 6) == 0b111001 {
         let kind = access(size, opc)?;
         let offset = (field(w, 10, 12) as u64) << size;
-        return Some(single(kind, bytes, rt, rn, op2(Op::Add, rsp(rn), c(offset)), None));
+        return Some(single(
+            kind,
+            bytes,
+            rt,
+            rn,
+            op2(Op::Add, rsp(rn), c(offset)),
+            None,
+        ));
     }
 
     if field(w, 24, 6) == 0b111000 {
@@ -495,7 +656,14 @@ fn load_store(pc: u64, w: u32) -> Option<Vec<Stmt>> {
             }
             let shift = if field(w, 12, 1) == 1 { size } else { 0 };
             let offset = extended(rz(field(w, 16, 5)), option, shift);
-            return Some(single(kind, bytes, rt, rn, op2(Op::Add, rsp(rn), offset), None));
+            return Some(single(
+                kind,
+                bytes,
+                rt,
+                rn,
+                op2(Op::Add, rsp(rn), offset),
+                None,
+            ));
         }
         return None;
     }
@@ -504,20 +672,48 @@ fn load_store(pc: u64, w: u32) -> Option<Vec<Stmt>> {
 
 fn load_v(out: &mut Vec<Stmt>, rt: u32, bytes: u8, addr: Expr) {
     if bytes == 16 {
-        out.push(Stmt::SetV { reg: rt as u8, hi: false, value: load(8, addr.clone()) });
-        out.push(Stmt::SetV { reg: rt as u8, hi: true, value: load(8, op2(Op::Add, addr, c(8))) });
+        out.push(Stmt::SetV {
+            reg: rt as u8,
+            hi: false,
+            value: load(8, addr.clone()),
+        });
+        out.push(Stmt::SetV {
+            reg: rt as u8,
+            hi: true,
+            value: load(8, op2(Op::Add, addr, c(8))),
+        });
     } else {
-        out.push(Stmt::SetV { reg: rt as u8, hi: false, value: load(bytes, addr) });
-        out.push(Stmt::SetV { reg: rt as u8, hi: true, value: c(0) });
+        out.push(Stmt::SetV {
+            reg: rt as u8,
+            hi: false,
+            value: load(bytes, addr),
+        });
+        out.push(Stmt::SetV {
+            reg: rt as u8,
+            hi: true,
+            value: c(0),
+        });
     }
 }
 
 fn store_v(out: &mut Vec<Stmt>, rt: u32, bytes: u8, addr: Expr) {
     if bytes == 16 {
-        out.push(Stmt::Store { size: 8, addr: addr.clone(), value: vlo(rt) });
-        out.push(Stmt::Store { size: 8, addr: op2(Op::Add, addr, c(8)), value: vhi(rt) });
+        out.push(Stmt::Store {
+            size: 8,
+            addr: addr.clone(),
+            value: vlo(rt),
+        });
+        out.push(Stmt::Store {
+            size: 8,
+            addr: op2(Op::Add, addr, c(8)),
+            value: vhi(rt),
+        });
     } else {
-        out.push(Stmt::Store { size: bytes, addr, value: vlo(rt) });
+        out.push(Stmt::Store {
+            size: bytes,
+            addr,
+            value: vlo(rt),
+        });
     }
 }
 
@@ -548,7 +744,11 @@ fn load_store_simd(pc: u64, w: u32) -> Option<Vec<Stmt>> {
         let rt2 = field(w, 10, 5);
         let offset = sext(field(w, 15, 7) as u64, 7).wrapping_mul(bytes as u64);
         let base = rsp(rn);
-        let addr = if idx == 1 { base.clone() } else { op2(Op::Add, base.clone(), c(offset)) };
+        let addr = if idx == 1 {
+            base.clone()
+        } else {
+            op2(Op::Add, base.clone(), c(offset))
+        };
         let writeback = matches!(idx, 1 | 3).then(|| op2(Op::Add, base, c(offset)));
         let second = op2(Op::Add, t(0), c(bytes as u64));
         let mut out = vec![Stmt::Let(0, addr)];
@@ -574,7 +774,10 @@ fn load_store_simd(pc: u64, w: u32) -> Option<Vec<Stmt>> {
     };
     let shift = bytes.trailing_zeros();
     let (addr, writeback) = if field(w, 24, 6) == 0b111101 {
-        (op2(Op::Add, rsp(rn), c((field(w, 10, 12) as u64) << shift)), None)
+        (
+            op2(Op::Add, rsp(rn), c((field(w, 10, 12) as u64) << shift)),
+            None,
+        )
     } else if field(w, 24, 6) == 0b111100 && field(w, 21, 1) == 0 {
         let imm = sext(field(w, 12, 9) as u64, 9);
         let base = rsp(rn);
@@ -591,7 +794,10 @@ fn load_store_simd(pc: u64, w: u32) -> Option<Vec<Stmt>> {
             return None;
         }
         let s = if field(w, 12, 1) == 1 { shift } else { 0 };
-        (op2(Op::Add, rsp(rn), extended(rz(field(w, 16, 5)), option, s)), None)
+        (
+            op2(Op::Add, rsp(rn), extended(rz(field(w, 16, 5)), option, s)),
+            None,
+        )
     } else {
         return None;
     };
@@ -642,7 +848,15 @@ fn dp_reg(w: u32) -> Option<Vec<Stmt>> {
                 if kind == 3 || (!sf && imm6 >= 32) {
                     return None;
                 }
-                return Some(addsub(sf, sub, s, rz(rn), shifted(rz(rm), kind, imm6, sf), rd, false));
+                return Some(addsub(
+                    sf,
+                    sub,
+                    s,
+                    rz(rn),
+                    shifted(rz(rm), kind, imm6, sf),
+                    rd,
+                    false,
+                ));
             }
             let imm3 = field(w, 10, 3);
             if field(w, 22, 2) != 0 || imm3 > 4 {
@@ -689,12 +903,19 @@ fn dp_reg(w: u32) -> Option<Vec<Stmt>> {
             let sub = field(w, 30, 1) == 1;
             let s = field(w, 29, 1) == 1;
             out.push(Stmt::Let(0, rz(rn)));
-            out.push(Stmt::Let(1, if sub { op1(Op::Not, rz(rm)) } else { rz(rm) }));
+            out.push(Stmt::Let(
+                1,
+                if sub { op1(Op::Not, rz(rm)) } else { rz(rm) },
+            ));
             out.push(Stmt::Let(2, op1(Op::Carry, Expr::Nzcv)));
             if s {
                 out.push(Stmt::SetNzcv(add_flags(sf, t(0), t(1), t(2))));
             }
-            wz(&mut out, rd, width(op2(Op::Add, op2(Op::Add, t(0), t(1)), t(2)), sf));
+            wz(
+                &mut out,
+                rd,
+                width(op2(Op::Add, op2(Op::Add, t(0), t(1)), t(2)), sf),
+            );
             Some(out)
         }
         0b1101_0010 => {
@@ -702,12 +923,25 @@ fn dp_reg(w: u32) -> Option<Vec<Stmt>> {
                 return None;
             }
             let sub = field(w, 30, 1) == 1;
-            let b = if field(w, 11, 1) == 1 { c(rm as u64) } else { rz(rm) };
-            let (b, carry) = if sub { (op1(Op::Not, b), c(1)) } else { (b, c(0)) };
+            let b = if field(w, 11, 1) == 1 {
+                c(rm as u64)
+            } else {
+                rz(rm)
+            };
+            let (b, carry) = if sub {
+                (op1(Op::Not, b), c(1))
+            } else {
+                (b, c(0))
+            };
             let cc = field(w, 12, 4) as u64;
             let fallback = c((field(w, 0, 4) as u64) << 28);
             let flags = add_flags(sf, rz(rn), b, carry);
-            out.push(Stmt::SetNzcv(op3(Op::Select, op2(Op::Cond, Expr::Nzcv, c(cc)), flags, fallback)));
+            out.push(Stmt::SetNzcv(op3(
+                Op::Select,
+                op2(Op::Cond, Expr::Nzcv, c(cc)),
+                flags,
+                fallback,
+            )));
             Some(out)
         }
         0b1101_0100 => {
@@ -723,7 +957,14 @@ fn dp_reg(w: u32) -> Option<Vec<Stmt>> {
                 _ => op2(Op::Sub, c(0), b),
             };
             let cc = c(field(w, 12, 4) as u64);
-            wz(&mut out, rd, width(op3(Op::Select, op2(Op::Cond, Expr::Nzcv, cc), rz(rn), b), sf));
+            wz(
+                &mut out,
+                rd,
+                width(
+                    op3(Op::Select, op2(Op::Cond, Expr::Nzcv, cc), rz(rn), b),
+                    sf,
+                ),
+            );
             Some(out)
         }
         0b1101_0110 => {
@@ -739,7 +980,11 @@ fn dp_reg(w: u32) -> Option<Vec<Stmt>> {
                     (3, false) => Op::Sdiv32,
                     (8..=11, _) => shift_op(opcode - 8, sf),
                     (0x10..=0x17, _) if (opcode & 3 == 3) == sf => {
-                        let o = if opcode & 4 == 0 { Op::Crc32 } else { Op::Crc32c };
+                        let o = if opcode & 4 == 0 {
+                            Op::Crc32
+                        } else {
+                            Op::Crc32c
+                        };
                         wz(&mut out, rd, op3(o, rz(rn), rz(rm), c((opcode & 3) as u64)));
                         return Some(out);
                     }
@@ -788,39 +1033,11 @@ mod tests {
     #[test]
     fn known_words_decode() {
         for w in [
-            0x9acc4d0c,
-            0x1ac24020,
-            0x1ac25820,
-            0xd503201f,
-            0x91000400,
-            0xa9bf7bfd,
-            0xa8c17bfd,
-            0x910003fd,
-            0xaa0103e0,
-            0xf1000421,
-            0x9ac20820,
-            0x9b028c20,
-            0x381ffc45,
-            0x90000000,
-            0x9a820020,
-            0xd37df020,
-            0xf9400420,
-            0xb860792a,
-            0x92401c20,
-            0x320003e0,
-            0xd2800000,
-            0xd53bd060,
-            0xc85f7c20,
-            0xc8027c20,
-            0xd5033bbf,
-            0x93407c00,
-            0xdac01000,
-            0x1a9f17e0,
-            0xadbf1fe6,
-            0xacc11fe6,
-            0x3dc00420,
-            0xfd000fe8,
-            0xbc404420,
+            0x9acc4d0c, 0x1ac24020, 0x1ac25820, 0xd503201f, 0x91000400, 0xa9bf7bfd, 0xa8c17bfd,
+            0x910003fd, 0xaa0103e0, 0xf1000421, 0x9ac20820, 0x9b028c20, 0x381ffc45, 0x90000000,
+            0x9a820020, 0xd37df020, 0xf9400420, 0xb860792a, 0x92401c20, 0x320003e0, 0xd2800000,
+            0xd53bd060, 0xc85f7c20, 0xc8027c20, 0xd5033bbf, 0x93407c00, 0xdac01000, 0x1a9f17e0,
+            0xadbf1fe6, 0xacc11fe6, 0x3dc00420, 0xfd000fe8, 0xbc404420,
         ] {
             assert!(defined(w), "{w:#010x} should decode");
         }
@@ -841,17 +1058,65 @@ mod tests {
     #[test]
     fn exclusives_and_barriers() {
         let stmts = |w| lift(0, w).stmts;
-        assert!(matches!(stmts(0xc85f7c20)[..], [Stmt::Let(0, _), Stmt::Let(1, _), Stmt::Monitor { .. }, Stmt::SetReg(0, _)]));
-        assert!(matches!(stmts(0xc8027c20)[..], [Stmt::Let(0, _), Stmt::StoreExclusive { size: 8, status: 2, .. }]));
-        assert!(matches!(stmts(0x880afe93)[..], [_, Stmt::StoreExclusive { size: 4, status: 10, .. }]));
-        assert!(matches!(stmts(0x889ffc20)[..], [_, Stmt::Store { size: 4, .. }, Stmt::Fence]));
-        assert!(matches!(stmts(0xc8220c20)[..], [_, Stmt::StoreExclusive { size: 16, status: 2, .. }]));
+        assert!(matches!(
+            stmts(0xc85f7c20)[..],
+            [
+                Stmt::Let(0, _),
+                Stmt::Let(1, _),
+                Stmt::Monitor { .. },
+                Stmt::SetReg(0, _)
+            ]
+        ));
+        assert!(matches!(
+            stmts(0xc8027c20)[..],
+            [
+                Stmt::Let(0, _),
+                Stmt::StoreExclusive {
+                    size: 8,
+                    status: 2,
+                    ..
+                }
+            ]
+        ));
+        assert!(matches!(
+            stmts(0x880afe93)[..],
+            [
+                _,
+                Stmt::StoreExclusive {
+                    size: 4,
+                    status: 10,
+                    ..
+                }
+            ]
+        ));
+        assert!(matches!(
+            stmts(0x889ffc20)[..],
+            [_, Stmt::Store { size: 4, .. }, Stmt::Fence]
+        ));
+        assert!(matches!(
+            stmts(0xc8220c20)[..],
+            [
+                _,
+                Stmt::StoreExclusive {
+                    size: 16,
+                    status: 2,
+                    ..
+                }
+            ]
+        ));
         assert_eq!(stmts(0xd5033bbf), vec![Stmt::Fence]);
         assert_eq!(stmts(0xd5033f9f), vec![Stmt::Fence]);
         assert_eq!(stmts(0xd50339bf), vec![]);
         assert_eq!(stmts(0xd5033abf), vec![]);
         assert_eq!(stmts(0xd5033fdf), vec![]);
-        assert_eq!(stmts(0xd503305f), vec![Stmt::Monitor { addr: c(u64::MAX), lo: c(0), hi: c(0) }]);
+        assert_eq!(
+            stmts(0xd503305f),
+            vec![Stmt::Monitor {
+                addr: c(u64::MAX),
+                lo: c(0),
+                hi: c(0)
+            }]
+        );
     }
 
     #[test]

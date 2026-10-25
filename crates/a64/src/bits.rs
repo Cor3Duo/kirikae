@@ -25,7 +25,13 @@ fn replicate(x: u64, esize: u32, datasize: u32) -> u64 {
     out
 }
 
-pub fn decode_bit_masks(n: u32, imms: u32, immr: u32, immediate: bool, datasize: u32) -> Option<(u64, u64)> {
+pub fn decode_bit_masks(
+    n: u32,
+    imms: u32,
+    immr: u32,
+    immediate: bool,
+    datasize: u32,
+) -> Option<(u64, u64)> {
     let combined = (n << 6) | (!imms & 0x3f);
     if combined == 0 {
         return None;
@@ -57,8 +63,14 @@ mod tests {
     fn logical_immediates() {
         assert_eq!(decode_bit_masks(1, 7, 0, true, 64).unwrap().0, 0xff);
         assert_eq!(decode_bit_masks(0, 0, 0, true, 32).unwrap().0, 1);
-        assert_eq!(decode_bit_masks(0, 0b111100, 0, true, 64).unwrap().0, 0x5555_5555_5555_5555);
-        assert_eq!(decode_bit_masks(0, 0b001111, 16, true, 64).unwrap().0, 0xffff_0000_ffff_0000);
+        assert_eq!(
+            decode_bit_masks(0, 0b111100, 0, true, 64).unwrap().0,
+            0x5555_5555_5555_5555
+        );
+        assert_eq!(
+            decode_bit_masks(0, 0b001111, 16, true, 64).unwrap().0,
+            0xffff_0000_ffff_0000
+        );
         assert!(decode_bit_masks(1, 0b111111, 0, true, 64).is_none());
     }
 

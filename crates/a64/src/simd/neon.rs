@@ -1,7 +1,7 @@
 #![allow(clippy::too_many_arguments)]
 
-use super::fp::{f32b, f64b, Fpcr, Round};
-use super::{bits, fp_expand_imm8, lane, mask, sat_s, sat_u, set_lane, set_qc, sized, sx, Env};
+use super::fp::{Fpcr, Round, f32b, f64b};
+use super::{Env, bits, fp_expand_imm8, lane, mask, sat_s, sat_u, set_lane, set_qc, sized, sx};
 
 macro_rules! by_esize {
     ($es:expr, $m:ident => $body:expr) => {
@@ -35,21 +35,47 @@ impl Shape {
     }
 }
 
-fn map3(e: &mut dyn Env, rd: u32, rn: u32, rm: u32, s: Shape, mut f: impl FnMut(u64, u64, u64) -> Option<u64>) -> bool {
+fn map3(
+    e: &mut dyn Env,
+    rd: u32,
+    rn: u32,
+    rm: u32,
+    s: Shape,
+    mut f: impl FnMut(u64, u64, u64) -> Option<u64>,
+) -> bool {
     let (vn, vm, vd) = (e.v(rn), e.v(rm), e.v(rd));
     let mut out = 0u128;
     for i in 0..s.elems() {
-        let Some(r) = f(lane(vn, s.esize, i), lane(vm, s.esize, i), lane(vd, s.esize, i)) else { return false };
+        let Some(r) = f(
+            lane(vn, s.esize, i),
+            lane(vm, s.esize, i),
+            lane(vd, s.esize, i),
+        ) else {
+            return false;
+        };
         set_lane(&mut out, s.esize, i, r);
     }
     e.set_v(rd, sized(out, s.datasize));
     true
 }
 
-fn pairwise(e: &mut dyn Env, rd: u32, rn: u32, rm: u32, s: Shape, f: impl Fn(u64, u64) -> u64) -> bool {
+fn pairwise(
+    e: &mut dyn Env,
+    rd: u32,
+    rn: u32,
+    rm: u32,
+    s: Shape,
+    f: impl Fn(u64, u64) -> u64,
+) -> bool {
     let (vn, vm) = (e.v(rn), e.v(rm));
     let n = s.elems();
-    let get = |k: u32| if k < n { lane(vn, s.esize, k) } else { lane(vm, s.esize, k - n) };
+    let get = |k: u32| {
+        if k < n {
+            lane(vn, s.esize, k)
+        } else {
+            lane(vm, s.esize, k - n)
+        }
+    };
     let mut out = 0u128;
     for i in 0..n {
         set_lane(&mut out, s.esize, i, f(get(2 * i), get(2 * i + 1)));
@@ -60,7 +86,11 @@ fn pairwise(e: &mut dyn Env, rd: u32, rn: u32, rm: u32, s: Shape, f: impl Fn(u64
 
 fn shift_reg(a: u64, shift_byte: u64, esize: u32, signed: bool, round: bool) -> u64 {
     let shift = sx(shift_byte & 0xff, 8);
-    let v: i128 = if signed { sx(a, esize) as i128 } else { a as i128 };
+    let v: i128 = if signed {
+        sx(a, esize) as i128
+    } else {
+        a as i128
+    };
     let r = if shift >= 0 {
         if shift >= 128 { 0 } else { v << shift }
     } else {
@@ -71,7 +101,16 @@ fn shift_reg(a: u64, shift_byte: u64, esize: u32, signed: bool, round: bool) -> 
     r as u64 & mask(esize)
 }
 
-fn int3(u: u32, opcode: u32, size: u32, es: u32, a: u64, b: u64, d: u64, sat: &mut bool) -> Option<u64> {
+fn int3(
+    u: u32,
+    opcode: u32,
+    size: u32,
+    es: u32,
+    a: u64,
+    b: u64,
+    d: u64,
+    sat: &mut bool,
+) -> Option<u64> {
     let m = mask(es);
     let (sa, sb) = (sx(a, es) as i128, sx(b, es) as i128);
     let (ua, ub) = (a as i128, b as i128);
@@ -96,13 +135,25 @@ fn int3(u: u32, opcode: u32, size: u32, es: u32, a: u64, b: u64, d: u64, sat: &m
             let shift = sx(b & 0xff, 8);
             let v = if uns == 0 { sa } else { ua };
             let r = if shift >= 0 {
-                if shift >= 64 { v.signum() << 100 } else { v << shift }
+                if shift >= 64 {
+                    v.signum() << 100
+                } else {
+                    v << shift
+                }
             } else {
                 let s = (-shift).min(127);
-                let round = if opcode == 0b01011 { 1i128 << (s - 1) } else { 0 };
+                let round = if opcode == 0b01011 {
+                    1i128 << (s - 1)
+                } else {
+                    0
+                };
                 (v + round) >> s
             };
-            if uns == 0 { sat_s(r, es, sat) } else { sat_u(r, es, sat) }
+            if uns == 0 {
+                sat_s(r, es, sat)
+            } else {
+                sat_u(r, es, sat)
+            }
         }
         (0b01010, 0) => shift_reg(a, b, es, true, true),
         (0b01010, _) => shift_reg(a, b, es, false, true),
@@ -131,7 +182,9 @@ fn int3(u: u32, opcode: u32, size: u32, es: u32, a: u64, b: u64, d: u64, sat: &m
             r & 0xff
         }
         (0b10110, 0) if es == 16 || es == 32 => sat_s((2 * sa * sb) >> es, es, sat),
-        (0b10110, _) if es == 16 || es == 32 => sat_s((2 * sa * sb + (1 << (es - 1))) >> es, es, sat),
+        (0b10110, _) if es == 16 || es == 32 => {
+            sat_s((2 * sa * sb + (1 << (es - 1))) >> es, es, sat)
+        }
         _ => return None,
     })
 }
@@ -153,8 +206,14 @@ fn fp3(u: u32, a_bit: u32, opcode: u32, es: u32, x: u64, y: u64, d: u64, c: Fpcr
         (1, 0, 0b11011) => by_esize!(es, m => m::mul(x as _, y as _, c)),
         (1, 0, 0b11100) => ones(by_esize!(es, m => m::cmp_ge(x as _, y as _, c)) != 0, es),
         (1, 1, 0b11100) => ones(by_esize!(es, m => m::cmp_gt(x as _, y as _, c)) != 0, es),
-        (1, 0, 0b11101) => ones(by_esize!(es, m => m::cmp_ge(m::abs(x as _), m::abs(y as _), c)) != 0, es),
-        (1, 1, 0b11101) => ones(by_esize!(es, m => m::cmp_gt(m::abs(x as _), m::abs(y as _), c)) != 0, es),
+        (1, 0, 0b11101) => ones(
+            by_esize!(es, m => m::cmp_ge(m::abs(x as _), m::abs(y as _), c)) != 0,
+            es,
+        ),
+        (1, 1, 0b11101) => ones(
+            by_esize!(es, m => m::cmp_gt(m::abs(x as _), m::abs(y as _), c)) != 0,
+            es,
+        ),
         (1, 1, 0b11010) => by_esize!(es, m => m::abs(m::sub(x as _, y as _, c))),
         (1, 0, 0b11111) => by_esize!(es, m => m::div(x as _, y as _, c)),
         _ => return None,
@@ -208,35 +267,56 @@ fn three_same(e: &mut dyn Env, w: u32) -> bool {
         let es = 32 << sz;
         let a_bit = bits(w, 23, 1);
         let c = fpcr(e);
-        let s = Shape { esize: es, datasize };
+        let s = Shape {
+            esize: es,
+            datasize,
+        };
         if u == 1
             && let Some(f) = fp_pair_op(a_bit, opcode, es, c)
         {
             return pairwise(e, rd, rn, rm, s, f);
         }
-        return map3(e, rd, rn, rm, s, |x, y, d| fp3(u, a_bit, opcode, es, x, y, d, c));
+        return map3(e, rd, rn, rm, s, |x, y, d| {
+            fp3(u, a_bit, opcode, es, x, y, d, c)
+        });
     }
     let es = 8 << size;
-    if size == 3 && (q == 0 || !matches!(opcode, 0b00001 | 0b00101 | 0b00110 | 0b00111 | 0b01000..=0b01011 | 0b10000 | 0b10001 | 0b10111)) {
+    if size == 3
+        && (q == 0
+            || !matches!(
+                opcode,
+                0b00001 | 0b00101 | 0b00110 | 0b00111 | 0b01000
+                    ..=0b01011 | 0b10000 | 0b10001 | 0b10111
+            ))
+    {
         return false;
     }
     if size == 3 && opcode == 0b10111 && u == 1 {
         return false;
     }
-    let s = Shape { esize: es, datasize };
+    let s = Shape {
+        esize: es,
+        datasize,
+    };
     match (opcode, u) {
         (0b10111, 0) => return pairwise(e, rd, rn, rm, s, |x, y| x.wrapping_add(y) & mask(es)),
         (0b10100, _) | (0b10101, _) => {
             let max = opcode == 0b10100;
             return pairwise(e, rd, rn, rm, s, |x, y| {
-                let (p, q) = if u == 0 { (sx(x, es) as i128, sx(y, es) as i128) } else { (x as i128, y as i128) };
+                let (p, q) = if u == 0 {
+                    (sx(x, es) as i128, sx(y, es) as i128)
+                } else {
+                    (x as i128, y as i128)
+                };
                 (if max { p.max(q) } else { p.min(q) }) as u64 & mask(es)
             });
         }
         _ => {}
     }
     let mut sat = false;
-    let ok = map3(e, rd, rn, rm, s, |x, y, d| int3(u, opcode, size, es, x, y, d, &mut sat));
+    let ok = map3(e, rd, rn, rm, s, |x, y, d| {
+        int3(u, opcode, size, es, x, y, d, &mut sat)
+    });
     if sat {
         set_qc(e);
     }
@@ -254,7 +334,11 @@ fn narrow(x: u64, es: u32, kind: u32, sat: &mut bool) -> u64 {
 }
 
 fn write_narrow(e: &mut dyn Env, rd: u32, q: u32, es: u32, vals: &[u64]) {
-    let mut out = if q == 1 { e.v(rd) & u64::MAX as u128 } else { 0 };
+    let mut out = if q == 1 {
+        e.v(rd) & u64::MAX as u128
+    } else {
+        0
+    };
     let base = if q == 1 { 64 / es } else { 0 };
     for (i, v) in vals.iter().enumerate() {
         set_lane(&mut out, es, base + i as u32, *v);
@@ -287,7 +371,9 @@ fn misc(e: &mut dyn Env, w: u32, scalar: bool) -> bool {
         }
         let n = if scalar { 1 } else { 64 / es };
         let mut sat = false;
-        let vals: Vec<u64> = (0..n).map(|i| narrow(lane(vn, 2 * es, i), es, kind, &mut sat)).collect();
+        let vals: Vec<u64> = (0..n)
+            .map(|i| narrow(lane(vn, 2 * es, i), es, kind, &mut sat))
+            .collect();
         if scalar {
             e.set_v(rd, vals[0] as u128);
         } else {
@@ -305,23 +391,41 @@ fn misc(e: &mut dyn Env, w: u32, scalar: bool) -> bool {
         }
         let sz = bits(w, 22, 1);
         if opcode == 0b10111 {
-            let base = if q == 1 { if sz == 0 { 4 } else { 2 } } else { 0 };
+            let base = if q == 1 {
+                if sz == 0 { 4 } else { 2 }
+            } else {
+                0
+            };
             let mut out = 0u128;
             if sz == 0 {
                 for i in 0..4 {
-                    set_lane(&mut out, 32, i, super::fp::f16_to_f32(lane(vn, 16, base + i) as u16, c) as u64);
+                    set_lane(
+                        &mut out,
+                        32,
+                        i,
+                        super::fp::f16_to_f32(lane(vn, 16, base + i) as u16, c) as u64,
+                    );
                 }
             } else {
                 for i in 0..2 {
-                    set_lane(&mut out, 64, i, super::fp::f32_to_f64(lane(vn, 32, base + i) as u32, c));
+                    set_lane(
+                        &mut out,
+                        64,
+                        i,
+                        super::fp::f32_to_f64(lane(vn, 32, base + i) as u32, c),
+                    );
                 }
             }
             e.set_v(rd, out);
         } else {
             let vals: Vec<u64> = if sz == 0 {
-                (0..4).map(|i| super::fp::f32_to_f16(lane(vn, 32, i) as u32, c) as u64).collect()
+                (0..4)
+                    .map(|i| super::fp::f32_to_f16(lane(vn, 32, i) as u32, c) as u64)
+                    .collect()
             } else {
-                (0..2).map(|i| super::fp::f64_to_f32(lane(vn, 64, i), c) as u64).collect()
+                (0..2)
+                    .map(|i| super::fp::f64_to_f32(lane(vn, 64, i), c) as u64)
+                    .collect()
             };
             write_narrow(e, rd, q, if sz == 0 { 16 } else { 32 }, &vals);
         }
@@ -336,7 +440,10 @@ fn misc(e: &mut dyn Env, w: u32, scalar: bool) -> bool {
         }
         let es = 32 << sz;
         let datasize = if scalar { es } else { 64 << q };
-        let s = Shape { esize: es, datasize };
+        let s = Shape {
+            esize: es,
+            datasize,
+        };
         let rounding = |op: u32, a: u32| match (op & 1, a, u) {
             (0, 0, 0) => Round::Nearest,
             (0, 1, _) => Round::PlusInf,
@@ -354,16 +461,30 @@ fn misc(e: &mut dyn Env, w: u32, scalar: bool) -> bool {
                 (0b01111, 0, 1) if !scalar => by_esize!(es, m => m::abs(x as _)),
                 (0b01111, 1, 1) if !scalar => by_esize!(es, m => m::neg(x as _)),
                 (0b11111, 1, 1) if !scalar => by_esize!(es, m => m::sqrt(x as _, c)),
-                (0b11000, 0, a) if !scalar => by_esize!(es, m => m::round_int(x as _, if a == 0 { Round::Nearest } else { Round::PlusInf }, c)),
-                (0b11001, 0, a) if !scalar => by_esize!(es, m => m::round_int(x as _, if a == 0 { Round::MinusInf } else { Round::Zero }, c)),
-                (0b11000, 1, 0) if !scalar => by_esize!(es, m => m::round_int(x as _, Round::Away, c)),
-                (0b11001, 1, _) if !scalar => by_esize!(es, m => m::round_int(x as _, Round::from_rmode(c.rmode), c)),
+                (0b11000, 0, a) if !scalar => {
+                    by_esize!(es, m => m::round_int(x as _, if a == 0 { Round::Nearest } else { Round::PlusInf }, c))
+                }
+                (0b11001, 0, a) if !scalar => {
+                    by_esize!(es, m => m::round_int(x as _, if a == 0 { Round::MinusInf } else { Round::Zero }, c))
+                }
+                (0b11000, 1, 0) if !scalar => {
+                    by_esize!(es, m => m::round_int(x as _, Round::Away, c))
+                }
+                (0b11001, 1, _) if !scalar => {
+                    by_esize!(es, m => m::round_int(x as _, Round::from_rmode(c.rmode), c))
+                }
                 (0b11010 | 0b11011, _, a) => {
                     let mode = rounding(opcode, a);
-                    let mode = if opcode == 0b11010 && a == 0 { Round::Nearest } else { mode };
+                    let mode = if opcode == 0b11010 && a == 0 {
+                        Round::Nearest
+                    } else {
+                        mode
+                    };
                     by_esize!(es, m => m::to_int(x as _, mode, u == 0, es, 0, c))
                 }
-                (0b11100, _, 0) => by_esize!(es, m => m::to_int(x as _, Round::Away, u == 0, es, 0, c)),
+                (0b11100, _, 0) => {
+                    by_esize!(es, m => m::to_int(x as _, Round::Away, u == 0, es, 0, c))
+                }
                 (0b11101, _, 0) => by_esize!(es, m => m::from_int(x, u == 0, es, 0, c)),
                 (0b11101, 0, 1) => by_esize!(es, m => m::recip_estimate(x as _, c)),
                 (0b11101, 1, 1) => by_esize!(es, m => m::rsqrt_estimate(x as _, c)),
@@ -385,7 +506,9 @@ fn misc(e: &mut dyn Env, w: u32, scalar: bool) -> bool {
         };
         let mut out = 0u128;
         for i in 0..s.elems() {
-            let Some(r) = op(lane(vn, es, i)) else { return false };
+            let Some(r) = op(lane(vn, es, i)) else {
+                return false;
+            };
             set_lane(&mut out, es, i, r);
         }
         e.set_v(rd, sized(out, datasize));
@@ -395,13 +518,21 @@ fn misc(e: &mut dyn Env, w: u32, scalar: bool) -> bool {
     if !scalar && size == 3 && (q == 0 || matches!(opcode, 0b00100)) && !matches!(opcode, 0b00101) {
         return false;
     }
-    if scalar && !matches!(opcode, 0b00011 | 0b00111 | 0b01000 | 0b01001 | 0b01010 | 0b01011) {
+    if scalar
+        && !matches!(
+            opcode,
+            0b00011 | 0b00111 | 0b01000 | 0b01001 | 0b01010 | 0b01011
+        )
+    {
         return false;
     }
     if scalar && size != 3 && !matches!(opcode, 0b00011 | 0b00111) {
         return false;
     }
-    let s = Shape { esize: es, datasize };
+    let s = Shape {
+        esize: es,
+        datasize,
+    };
     match (opcode, u) {
         (0b00000, _) | (0b00001, 0) => {
             let container = match (opcode, u) {
@@ -430,8 +561,16 @@ fn misc(e: &mut dyn Env, w: u32, scalar: bool) -> bool {
             let mut out = 0u128;
             for i in 0..datasize / wide {
                 let (x, y) = (lane(vn, es, 2 * i), lane(vn, es, 2 * i + 1));
-                let sum = if u == 0 { (sx(x, es) + sx(y, es)) as u64 } else { x + y };
-                let acc = if opcode == 0b00110 { lane(vd, wide, i) } else { 0 };
+                let sum = if u == 0 {
+                    (sx(x, es) + sx(y, es)) as u64
+                } else {
+                    x + y
+                };
+                let acc = if opcode == 0b00110 {
+                    lane(vd, wide, i)
+                } else {
+                    0
+                };
                 set_lane(&mut out, wide, i, sum.wrapping_add(acc));
             }
             e.set_v(rd, sized(out, datasize));
@@ -481,7 +620,9 @@ fn misc(e: &mut dyn Env, w: u32, scalar: bool) -> bool {
     let mut out = 0u128;
     for i in 0..s.elems() {
         current.set(i as usize);
-        let Some(r) = f(lane(vn, es, i), &mut sat) else { return false };
+        let Some(r) = f(lane(vn, es, i), &mut sat) else {
+            return false;
+        };
         set_lane(&mut out, es, i, r);
     }
     e.set_v(rd, sized(out, datasize));
@@ -588,7 +729,11 @@ fn shift_imm(e: &mut dyn Env, w: u32, scalar: bool) -> bool {
         let vals: Vec<u64> = (0..n)
             .map(|i| {
                 let x = lane(vn, wide, i);
-                let v: i128 = if kind == 2 || (kind == 0 && u == 1) { x as i128 } else { sx(x, wide) as i128 };
+                let v: i128 = if kind == 2 || (kind == 0 && u == 1) {
+                    x as i128
+                } else {
+                    sx(x, wide) as i128
+                };
                 let rb = if round { 1i128 << (shift - 1) } else { 0 };
                 let r = (v + rb) >> shift;
                 match kind {
@@ -629,7 +774,10 @@ fn shift_imm(e: &mut dyn Env, w: u32, scalar: bool) -> bool {
         return false;
     }
     let datasize = if scalar { es } else { 64 << q };
-    let s = Shape { esize: es, datasize };
+    let s = Shape {
+        esize: es,
+        datasize,
+    };
     let right = 2 * es - immhb;
     let left = immhb - es;
     if scalar && es != 64 && !matches!(opcode, 0b01100 | 0b01110 | 0b11100 | 0b11111) {
@@ -665,13 +813,17 @@ fn shift_imm(e: &mut dyn Env, w: u32, scalar: bool) -> bool {
             (0b01110, 0) => sat_s(sv << left, es, sat),
             (0b01110, _) => sat_u((x as i128) << left, es, sat),
             (0b11100, _) if es >= 32 => by_esize!(es, m => m::from_int(x, u == 0, es, right, c)),
-            (0b11111, _) if es >= 32 => by_esize!(es, m => m::to_int(x as _, Round::Zero, u == 0, es, right, c)),
+            (0b11111, _) if es >= 32 => {
+                by_esize!(es, m => m::to_int(x as _, Round::Zero, u == 0, es, right, c))
+            }
             _ => return None,
         })
     };
     let mut out = 0u128;
     for i in 0..s.elems() {
-        let Some(r) = op(lane(vn, es, i), lane(vd, es, i), &mut sat) else { return false };
+        let Some(r) = op(lane(vn, es, i), lane(vd, es, i), &mut sat) else {
+            return false;
+        };
         set_lane(&mut out, es, i, r);
     }
     e.set_v(rd, sized(out, datasize));
@@ -695,7 +847,8 @@ fn three_diff(e: &mut dyn Env, w: u32, scalar: bool) -> bool {
     if size == 3 {
         return false;
     }
-    if scalar && !(u == 0 && matches!(opcode, 0b1001 | 0b1011 | 0b1101) && (size == 1 || size == 2)) {
+    if scalar && !(u == 0 && matches!(opcode, 0b1001 | 0b1011 | 0b1101) && (size == 1 || size == 2))
+    {
         return false;
     }
     let es = 8 << size;
@@ -703,13 +856,23 @@ fn three_diff(e: &mut dyn Env, w: u32, scalar: bool) -> bool {
     let n = if scalar { 1 } else { 64 / es };
     let base = if q == 1 && !scalar { n } else { 0 };
     let ext = |x: u64| -> i128 { if u == 0 { sx(x, es) as i128 } else { x as i128 } };
-    let ext_w = |x: u64| -> i128 { if u == 0 { sx(x, wide) as i128 } else { x as i128 } };
+    let ext_w = |x: u64| -> i128 {
+        if u == 0 {
+            sx(x, wide) as i128
+        } else {
+            x as i128
+        }
+    };
 
     if opcode == 0b0100 || opcode == 0b0110 {
         let vals: Vec<u64> = (0..n)
             .map(|i| {
                 let (a, b) = (lane(vn, wide, i), lane(vm, wide, i));
-                let mut r = if opcode == 0b0100 { a.wrapping_add(b) } else { a.wrapping_sub(b) } & mask(wide);
+                let mut r = if opcode == 0b0100 {
+                    a.wrapping_add(b)
+                } else {
+                    a.wrapping_sub(b)
+                } & mask(wide);
                 if u == 1 {
                     r = r.wrapping_add(1 << (es - 1)) & mask(wide);
                 }
@@ -723,7 +886,11 @@ fn three_diff(e: &mut dyn Env, w: u32, scalar: bool) -> bool {
     let mut sat = false;
     let mut out = 0u128;
     for i in 0..n {
-        let a = if wide_first { lane(vn, wide, i) } else { lane(vn, es, base + i) };
+        let a = if wide_first {
+            lane(vn, wide, i)
+        } else {
+            lane(vn, es, base + i)
+        };
         let b = lane(vm, es, base + i);
         let d = lane(vd, wide, i);
         let r: u64 = match opcode {
@@ -781,8 +948,12 @@ fn indexed(e: &mut dyn Env, w: u32, scalar: bool) -> bool {
     let (l, mbit, h) = (bits(w, 21, 1), bits(w, 20, 1), bits(w, 11, 1));
     let opcode = bits(w, 12, 4);
     let (rn, rd) = (bits(w, 5, 5), bits(w, 0, 5));
-    let fp_op = matches!((opcode, u), (0b0001, 0) | (0b0101, 0) | (0b1001, 0) | (0b1001, 1));
-    if scalar && !fp_op && !(u == 0 && matches!(opcode, 0b0011 | 0b0111 | 0b1011 | 0b1100 | 0b1101)) {
+    let fp_op = matches!(
+        (opcode, u),
+        (0b0001, 0) | (0b0101, 0) | (0b1001, 0) | (0b1001, 1)
+    );
+    if scalar && !fp_op && !(u == 0 && matches!(opcode, 0b0011 | 0b0111 | 0b1011 | 0b1100 | 0b1101))
+    {
         return false;
     }
     let c = fpcr(e);
@@ -796,7 +967,10 @@ fn indexed(e: &mut dyn Env, w: u32, scalar: bool) -> bool {
         let rm = mbit << 4 | bits(w, 16, 4);
         let elem = lane(e.v(rm), es, index);
         let datasize = if scalar { es } else { 64 << q };
-        let s = Shape { esize: es, datasize };
+        let s = Shape {
+            esize: es,
+            datasize,
+        };
         return map3(e, rd, rn, rn, s, |x, _, d| {
             Some(match (opcode, u) {
                 (0b0001, _) => by_esize!(es, m => m::mul_add(d as _, x as _, elem as _, c)),
@@ -847,7 +1021,10 @@ fn indexed(e: &mut dyn Env, w: u32, scalar: bool) -> bool {
         return true;
     }
     let datasize = if scalar { es } else { 64 << q };
-    let s = Shape { esize: es, datasize };
+    let s = Shape {
+        esize: es,
+        datasize,
+    };
     let mut sat = false;
     let ok = map3(e, rd, rn, rn, s, |x, _, d| {
         let (sa, sb) = (sx(x, es) as i128, sx(elem, es) as i128);
@@ -883,15 +1060,27 @@ fn permute(e: &mut dyn Env, w: u32) -> bool {
         let r = match opcode & 3 {
             1 => {
                 let k = 2 * i + part;
-                if k < n { lane(vn, es, k) } else { lane(vm, es, k - n) }
+                if k < n {
+                    lane(vn, es, k)
+                } else {
+                    lane(vm, es, k - n)
+                }
             }
             2 => {
                 let pair = i / 2;
-                if i % 2 == 0 { lane(vn, es, 2 * pair + part) } else { lane(vm, es, 2 * pair + part) }
+                if i % 2 == 0 {
+                    lane(vn, es, 2 * pair + part)
+                } else {
+                    lane(vm, es, 2 * pair + part)
+                }
             }
             3 => {
                 let base = part * (n / 2);
-                if i % 2 == 0 { lane(vn, es, base + i / 2) } else { lane(vm, es, base + i / 2) }
+                if i % 2 == 0 {
+                    lane(vn, es, base + i / 2)
+                } else {
+                    lane(vm, es, base + i / 2)
+                }
             }
             _ => return false,
         };
@@ -913,7 +1102,11 @@ fn ext(e: &mut dyn Env, w: u32) -> bool {
     let mut out = 0u128;
     for i in 0..bytes {
         let k = i + imm4;
-        let b = if k < bytes { lane(vn, 8, k) } else { lane(vm, 8, k - bytes) };
+        let b = if k < bytes {
+            lane(vn, 8, k)
+        } else {
+            lane(vm, 8, k - bytes)
+        };
         set_lane(&mut out, 8, i, b);
     }
     e.set_v(rd, out);
@@ -925,7 +1118,13 @@ fn tbl(e: &mut dyn Env, w: u32) -> bool {
     if bits(w, 22, 2) != 0 {
         return false;
     }
-    let (rm, len, tbx, rn, rd) = (bits(w, 16, 5), bits(w, 13, 2), bits(w, 12, 1), bits(w, 5, 5), bits(w, 0, 5));
+    let (rm, len, tbx, rn, rd) = (
+        bits(w, 16, 5),
+        bits(w, 13, 2),
+        bits(w, 12, 1),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     let regs = len + 1;
     let table: Vec<u128> = (0..regs).map(|k| e.v((rn + k) % 32)).collect();
     let (idx, vd) = (e.v(rm), e.v(rd));
@@ -933,7 +1132,13 @@ fn tbl(e: &mut dyn Env, w: u32) -> bool {
     let mut out = 0u128;
     for i in 0..bytes {
         let j = lane(idx, 8, i) as u32;
-        let b = if j < 16 * regs { lane(table[(j / 16) as usize], 8, j % 16) } else if tbx == 1 { lane(vd, 8, i) } else { 0 };
+        let b = if j < 16 * regs {
+            lane(table[(j / 16) as usize], 8, j % 16)
+        } else if tbx == 1 {
+            lane(vd, 8, i)
+        } else {
+            0
+        };
         set_lane(&mut out, 8, i, b);
     }
     e.set_v(rd, sized(out, 64 << q));
@@ -951,7 +1156,9 @@ fn copy(e: &mut dyn Env, w: u32) -> bool {
     let imm5 = bits(w, 16, 5);
     let imm4 = bits(w, 11, 4);
     let (rn, rd) = (bits(w, 5, 5), bits(w, 0, 5));
-    let Some((es, index)) = imm5_elem(imm5) else { return false };
+    let Some((es, index)) = imm5_elem(imm5) else {
+        return false;
+    };
     let datasize = 64 << q;
     match (op, imm4) {
         (0, 0b0000) => {
@@ -1055,7 +1262,9 @@ fn scalar_copy(e: &mut dyn Env, w: u32) -> bool {
     if bits(w, 29, 1) != 0 || bits(w, 11, 4) != 0 {
         return false;
     }
-    let Some((es, index)) = imm5_elem(bits(w, 16, 5)) else { return false };
+    let Some((es, index)) = imm5_elem(bits(w, 16, 5)) else {
+        return false;
+    };
     let x = lane(e.v(bits(w, 5, 5)), es, index);
     e.set_v(bits(w, 0, 5), x as u128);
     true
@@ -1082,7 +1291,9 @@ fn scalar_pairwise(e: &mut dyn Env, w: u32) -> bool {
         0b01111 => 0b11110,
         _ => return false,
     };
-    let Some(f) = fp_pair_op(bits(w, 23, 1), opcode, es, c) else { return false };
+    let Some(f) = fp_pair_op(bits(w, 23, 1), opcode, es, c) else {
+        return false;
+    };
     e.set_v(rd, f(lane(vn, es, 0), lane(vn, es, 1)) as u128);
     true
 }
@@ -1095,12 +1306,22 @@ fn scalar_three_same(e: &mut dyn Env, w: u32) -> bool {
     if opcode >= 0b11000 {
         let es = 32 << bits(w, 22, 1);
         let a_bit = bits(w, 23, 1);
-        let allowed = matches!((u, a_bit, opcode), (0, 0, 0b11011) | (0, 0, 0b11100) | (0, _, 0b11111) | (1, _, 0b11100) | (1, _, 0b11101) | (1, 1, 0b11010));
+        let allowed = matches!(
+            (u, a_bit, opcode),
+            (0, 0, 0b11011)
+                | (0, 0, 0b11100)
+                | (0, _, 0b11111)
+                | (1, _, 0b11100)
+                | (1, _, 0b11101)
+                | (1, 1, 0b11010)
+        );
         if !allowed {
             return false;
         }
         let c = fpcr(e);
-        let Some(r) = fp3(u, a_bit, opcode, es, lane(a, es, 0), lane(b, es, 0), 0, c) else { return false };
+        let Some(r) = fp3(u, a_bit, opcode, es, lane(a, es, 0), lane(b, es, 0), 0, c) else {
+            return false;
+        };
         e.set_v(rd, r as u128);
         return true;
     }
@@ -1109,11 +1330,35 @@ fn scalar_three_same(e: &mut dyn Env, w: u32) -> bool {
     if !saturating && size != 3 {
         return false;
     }
-    if !matches!(opcode, 0b00001 | 0b00101 | 0b00110 | 0b00111 | 0b01000 | 0b01001 | 0b01010 | 0b01011 | 0b10000 | 0b10001 | 0b10110) {
+    if !matches!(
+        opcode,
+        0b00001
+            | 0b00101
+            | 0b00110
+            | 0b00111
+            | 0b01000
+            | 0b01001
+            | 0b01010
+            | 0b01011
+            | 0b10000
+            | 0b10001
+            | 0b10110
+    ) {
         return false;
     }
     let mut sat = false;
-    let Some(r) = int3(u, opcode, size, es, lane(a, es, 0), lane(b, es, 0), 0, &mut sat) else { return false };
+    let Some(r) = int3(
+        u,
+        opcode,
+        size,
+        es,
+        lane(a, es, 0),
+        lane(b, es, 0),
+        0,
+        &mut sat,
+    ) else {
+        return false;
+    };
     e.set_v(rd, r as u128);
     if sat {
         set_qc(e);

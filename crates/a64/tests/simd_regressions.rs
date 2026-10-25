@@ -1,8 +1,16 @@
 use kirikae_a64::simd::exec;
-use kirikae_a64::simd::oracle::{mem_pattern, State};
+use kirikae_a64::simd::oracle::{State, mem_pattern};
 
 fn state(fpcr: u64) -> State {
-    State { x: [0; 31], sp: 0, v: [0; 32], nzcv: 0, fpcr, fpsr: 0, mem: mem_pattern() }
+    State {
+        x: [0; 31],
+        sp: 0,
+        v: [0; 32],
+        nzcv: 0,
+        fpcr,
+        fpsr: 0,
+        mem: mem_pattern(),
+    }
 }
 
 const FZ: u64 = 1 << 24;

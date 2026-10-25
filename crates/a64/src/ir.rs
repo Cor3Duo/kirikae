@@ -47,10 +47,28 @@ pub enum Stmt {
     SetSp(Expr),
     SetNzcv(Expr),
     SetSysReg(SysReg, Expr),
-    SetV { reg: u8, hi: bool, value: Expr },
-    Store { size: u8, addr: Expr, value: Expr },
-    Monitor { addr: Expr, lo: Expr, hi: Expr },
-    StoreExclusive { size: u8, addr: Expr, lo: Expr, hi: Expr, status: u8 },
+    SetV {
+        reg: u8,
+        hi: bool,
+        value: Expr,
+    },
+    Store {
+        size: u8,
+        addr: Expr,
+        value: Expr,
+    },
+    Monitor {
+        addr: Expr,
+        lo: Expr,
+        hi: Expr,
+    },
+    StoreExclusive {
+        size: u8,
+        addr: Expr,
+        lo: Expr,
+        hi: Expr,
+        status: u8,
+    },
     Fence,
     Svc(u16),
     Simd(u32),
@@ -134,13 +152,22 @@ pub fn op3(o: Op, a: Expr, b: Expr, cc: Expr) -> Expr {
 }
 
 pub fn vlo(reg: u32) -> Expr {
-    Expr::V { reg: reg as u8, hi: false }
+    Expr::V {
+        reg: reg as u8,
+        hi: false,
+    }
 }
 
 pub fn vhi(reg: u32) -> Expr {
-    Expr::V { reg: reg as u8, hi: true }
+    Expr::V {
+        reg: reg as u8,
+        hi: true,
+    }
 }
 
 pub fn load(size: u8, addr: Expr) -> Expr {
-    Expr::Load { size, addr: Box::new(addr) }
+    Expr::Load {
+        size,
+        addr: Box::new(addr),
+    }
 }

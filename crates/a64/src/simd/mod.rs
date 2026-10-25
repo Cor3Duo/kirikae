@@ -1,3 +1,4 @@
+mod crypto;
 pub mod fp;
 mod fpscalar;
 mod ldst;
@@ -21,6 +22,9 @@ pub trait Env {
 }
 
 pub fn exec(e: &mut dyn Env, w: u32) -> bool {
+    if crypto::supported(w) {
+        return crypto::exec(e, w);
+    }
     if (w >> 25) & 0b111 == 0b111 {
         if w >> 28 & 1 == 1 && w >> 30 & 1 == 0 {
             fpscalar::exec(e, w)
@@ -74,7 +78,11 @@ pub(crate) fn bits(w: u32, lo: u32, n: u32) -> u32 {
 }
 
 pub(crate) fn mask(esize: u32) -> u64 {
-    if esize >= 64 { u64::MAX } else { (1 << esize) - 1 }
+    if esize >= 64 {
+        u64::MAX
+    } else {
+        (1 << esize) - 1
+    }
 }
 
 pub(crate) fn lane(v: u128, esize: u32, i: u32) -> u64 {
@@ -87,7 +95,11 @@ pub(crate) fn set_lane(v: &mut u128, esize: u32, i: u32, x: u64) {
 }
 
 pub(crate) fn sx(x: u64, esize: u32) -> i64 {
-    if esize >= 64 { x as i64 } else { ((x << (64 - esize)) as i64) >> (64 - esize) }
+    if esize >= 64 {
+        x as i64
+    } else {
+        ((x << (64 - esize)) as i64) >> (64 - esize)
+    }
 }
 
 pub(crate) fn set_qc(e: &mut dyn Env) {
@@ -122,7 +134,11 @@ pub(crate) fn sat_u(x: i128, esize: u32, sat: &mut bool) -> u64 {
 }
 
 pub(crate) fn sized(v: u128, datasize: u32) -> u128 {
-    if datasize >= 128 { v } else { v & ((1u128 << datasize) - 1) }
+    if datasize >= 128 {
+        v
+    } else {
+        v & ((1u128 << datasize) - 1)
+    }
 }
 
 pub(crate) fn fp_expand_imm8(imm8: u32, width: u32) -> u64 {
@@ -131,7 +147,12 @@ pub(crate) fn fp_expand_imm8(imm8: u32, width: u32) -> u64 {
     let low = (imm8 & 0x3f) as u64;
     match width {
         16 => (sign << 15) | ((b6 ^ 1) << 14) | (if b6 == 1 { 0b11 } else { 0 } << 12) | (low << 6),
-        32 => (sign << 31) | ((b6 ^ 1) << 30) | (if b6 == 1 { 0b1_1111 } else { 0 } << 25) | (low << 19),
+        32 => {
+            (sign << 31)
+                | ((b6 ^ 1) << 30)
+                | (if b6 == 1 { 0b1_1111 } else { 0 } << 25)
+                | (low << 19)
+        }
         _ => (sign << 63) | ((b6 ^ 1) << 62) | (if b6 == 1 { 0xff } else { 0 } << 54) | (low << 48),
     }
 }

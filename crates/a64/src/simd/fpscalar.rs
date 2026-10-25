@@ -1,5 +1,5 @@
-use super::fp::{self, f32b, f64b, Fpcr, Round};
-use super::{bits, fp_expand_imm8, Env};
+use super::fp::{self, Fpcr, Round, f32b, f64b};
+use super::{Env, bits, fp_expand_imm8};
 
 const SINGLE: u32 = 0;
 const DOUBLE: u32 = 1;
@@ -211,7 +211,11 @@ fn cond_select(e: &mut dyn Env, w: u32) -> bool {
     }
     let (rm, rn, rd_) = (bits(w, 16, 5), bits(w, 5, 5), bits(w, 0, 5));
     let cc = bits(w, 12, 4) as u64;
-    let r = if crate::ops::cond(e.nzcv(), cc) == 1 { rd(e, rn, ty) } else { rd(e, rm, ty) };
+    let r = if crate::ops::cond(e.nzcv(), cc) == 1 {
+        rd(e, rn, ty)
+    } else {
+        rd(e, rm, ty)
+    };
     wr(e, rd_, r);
     true
 }

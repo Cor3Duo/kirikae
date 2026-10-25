@@ -7,7 +7,11 @@ pub struct Fpcr {
 
 impl Fpcr {
     pub fn from_bits(fpcr: u64) -> Fpcr {
-        Fpcr { dn: fpcr >> 25 & 1 == 1, fz: fpcr >> 24 & 1 == 1, rmode: (fpcr >> 22 & 3) as u32 }
+        Fpcr {
+            dn: fpcr >> 25 & 1 == 1,
+            fz: fpcr >> 24 & 1 == 1,
+            rmode: (fpcr >> 22 & 3) as u32,
+        }
     }
 }
 
@@ -82,7 +86,10 @@ macro_rules! fp_format {
             }
 
             pub fn process_nans(ops: &[$u], c: Fpcr) -> Option<$u> {
-                ops.iter().find(|x| is_snan(**x)).or_else(|| ops.iter().find(|x| is_nan(**x))).map(|x| nan_result(*x, c))
+                ops.iter()
+                    .find(|x| is_snan(**x))
+                    .or_else(|| ops.iter().find(|x| is_nan(**x)))
+                    .map(|x| nan_result(*x, c))
             }
 
             fn finish(r: $f, err: f64, c: Fpcr) -> $u {
@@ -94,7 +101,8 @@ macro_rules! fp_format {
                     let min = <$f>::MIN_POSITIVE;
                     let ar = r.abs();
                     let below = ar < min && ar != 0.0;
-                    let rounded_up = ar == min && ((r > 0.0 && err < 0.0) || (r < 0.0 && err > 0.0));
+                    let rounded_up =
+                        ar == min && ((r > 0.0 && err < 0.0) || (r < 0.0 && err > 0.0));
                     if below || rounded_up {
                         return rb & SIGN;
                     }
@@ -125,7 +133,14 @@ macro_rules! fp_format {
             pub fn sub(a: $u, x: $u, c: Fpcr) -> $u {
                 binary(a, x, c, |p, q| {
                     let s = p - q;
-                    (s, if s.is_finite() { sum_err(p, -q, s) } else { 0.0 })
+                    (
+                        s,
+                        if s.is_finite() {
+                            sum_err(p, -q, s)
+                        } else {
+                            0.0
+                        },
+                    )
                 })
             }
             pub fn mul(a: $u, x: $u, c: Fpcr) -> $u {
@@ -137,14 +152,20 @@ macro_rules! fp_format {
             pub fn div(a: $u, x: $u, c: Fpcr) -> $u {
                 binary(a, x, c, |p, q| {
                     let d = p / q;
-                    let rem = if d.is_finite() && q != 0.0 { (-d).mul_add(q, p) } else { 0.0 };
+                    let rem = if d.is_finite() && q != 0.0 {
+                        (-d).mul_add(q, p)
+                    } else {
+                        0.0
+                    };
                     (d, if q < 0.0 { -rem } else { rem })
                 })
             }
 
             pub fn mulx(a: $u, x: $u, c: Fpcr) -> $u {
                 let (fa, fx) = (flush(a, c), flush(x, c));
-                if process_nans(&[fa, fx], c).is_none() && ((is_inf(fa) && is_zero(fx)) || (is_zero(fa) && is_inf(fx))) {
+                if process_nans(&[fa, fx], c).is_none()
+                    && ((is_inf(fa) && is_zero(fx)) || (is_zero(fa) && is_inf(fx)))
+                {
                     return b(2.0) | ((fa ^ fx) & SIGN);
                 }
                 mul(a, x, c)
@@ -168,12 +189,18 @@ macro_rules! fp_format {
                     return n;
                 }
                 let r = f(x).mul_add(f(y), f(a));
-                finish(r, super::fma_err(f(x) as f64, f(y) as f64, f(a) as f64, r as f64), c)
+                finish(
+                    r,
+                    super::fma_err(f(x) as f64, f(y) as f64, f(a) as f64, r as f64),
+                    c,
+                )
             }
 
             pub fn recip_step(a: $u, x: $u, c: Fpcr) -> $u {
                 let (fa, fx) = (flush(a, c), flush(x, c));
-                if process_nans(&[fa, fx], c).is_none() && ((is_inf(fa) && is_zero(fx)) || (is_zero(fa) && is_inf(fx))) {
+                if process_nans(&[fa, fx], c).is_none()
+                    && ((is_inf(fa) && is_zero(fx)) || (is_zero(fa) && is_inf(fx)))
+                {
                     return b(2.0);
                 }
                 mul_add(b(2.0), neg(fa), fx, c)
@@ -266,7 +293,14 @@ macro_rules! fp_format {
                 b(round_float(f(a), mode))
             }
 
-            pub fn to_int(a: $u, mode: Round, signed: bool, width: u32, fbits: u32, c: Fpcr) -> u64 {
+            pub fn to_int(
+                a: $u,
+                mode: Round,
+                signed: bool,
+                width: u32,
+                fbits: u32,
+                c: Fpcr,
+            ) -> u64 {
                 let a = flush(a, c);
                 if is_nan(a) {
                     return 0;
@@ -296,7 +330,10 @@ macro_rules! fp_format {
             }
 
             fn fraction52(x: $u) -> (u64, i64) {
-                (((x & FRAC_MASK) as u64) << (52 - FRAC), ((x & EXP) >> FRAC) as i64)
+                (
+                    ((x & FRAC_MASK) as u64) << (52 - FRAC),
+                    ((x & EXP) >> FRAC) as i64,
+                )
             }
 
             pub fn recip_estimate(a: $u, c: Fpcr) -> $u {
@@ -312,7 +349,11 @@ macro_rules! fp_format {
                     return sign | INF;
                 }
                 let value = (f(abs(a)) as f64).abs();
-                let (tiny, huge) = if BITS == 32 { (2f64.powi(-128), 2f64.powi(126)) } else { (2f64.powi(-1024), 2f64.powi(1022)) };
+                let (tiny, huge) = if BITS == 32 {
+                    (2f64.powi(-128), 2f64.powi(126))
+                } else {
+                    (2f64.powi(-1024), 2f64.powi(1022))
+                };
                 if value < tiny {
                     let overflow_to_inf = match c.rmode {
                         0 => true,
@@ -320,7 +361,11 @@ macro_rules! fp_format {
                         2 => sign != 0,
                         _ => false,
                     };
-                    return if overflow_to_inf { sign | INF } else { max_normal(sign) };
+                    return if overflow_to_inf {
+                        sign | INF
+                    } else {
+                        max_normal(sign)
+                    };
                 }
                 if c.fz && value >= huge {
                     return sign;
@@ -369,8 +414,16 @@ macro_rules! fp_format {
                     }
                     fraction = (fraction << 1) & ((1 << 52) - 1);
                 }
-                let scaled = if exp & 1 == 1 { 0x80 | (fraction >> 45) as u32 } else { 0x100 | (fraction >> 44) as u32 };
-                let result_exp: i64 = if BITS == 32 { (380 - exp).div_euclid(2) } else { (3068 - exp).div_euclid(2) };
+                let scaled = if exp & 1 == 1 {
+                    0x80 | (fraction >> 45) as u32
+                } else {
+                    0x100 | (fraction >> 44) as u32
+                };
+                let result_exp: i64 = if BITS == 32 {
+                    (380 - exp).div_euclid(2)
+                } else {
+                    (3068 - exp).div_euclid(2)
+                };
                 let estimate = super::rsqrt_estimate_int(scaled) as u64;
                 ((result_exp as $u) << FRAC) | ((((estimate & 0xff) << 44) >> (52 - FRAC)) as $u)
             }
@@ -403,7 +456,11 @@ pub fn recip_estimate_int(a: u32) -> u32 {
 }
 
 pub fn rsqrt_estimate_int(a: u32) -> u32 {
-    let a = if a < 256 { a * 2 + 1 } else { (((a >> 1) << 1) + 1) * 2 } as u64;
+    let a = if a < 256 {
+        a * 2 + 1
+    } else {
+        (((a >> 1) << 1) + 1) * 2
+    } as u64;
     let mut b: u64 = 512;
     while a * (b + 1) * (b + 1) < (1 << 28) {
         b += 1;
@@ -425,7 +482,11 @@ pub fn f16_to_f32(h: u16, c: Fpcr) -> u32 {
         31 if frac == 0 => sign | 0x7f80_0000,
         31 => {
             let n = sign | 0x7f80_0000 | (frac << 13);
-            if c.dn { f32b::DEFAULT_NAN } else { n | f32b::QUIET }
+            if c.dn {
+                f32b::DEFAULT_NAN
+            } else {
+                n | f32b::QUIET
+            }
         }
         _ => sign | ((exp + 127 - 15) << 23) | (frac << 13),
     }
@@ -473,7 +534,11 @@ pub fn f64_to_f16(d: u64, c: Fpcr) -> u16 {
 pub fn f32_to_f16(s: u32, c: Fpcr) -> u16 {
     if f32b::is_nan(s) {
         let sign = ((s >> 16) & 0x8000) as u16;
-        return if c.dn { 0x7e00 } else { sign | 0x7e00 | ((s >> 13) & 0x1ff) as u16 };
+        return if c.dn {
+            0x7e00
+        } else {
+            sign | 0x7e00 | ((s >> 13) & 0x1ff) as u16
+        };
     }
     f64_to_f16((f32::from_bits(f32b::flush(s, c)) as f64).to_bits(), c)
 }
@@ -506,14 +571,24 @@ pub fn f64_to_f32(d: u64, c: Fpcr) -> u32 {
 mod tests {
     use super::*;
 
-    const C: Fpcr = Fpcr { dn: false, fz: false, rmode: 0 };
+    const C: Fpcr = Fpcr {
+        dn: false,
+        fz: false,
+        rmode: 0,
+    };
 
     #[test]
     fn nan_rules_match_the_hardware() {
         assert_eq!(f32b::add(0x7fc0_0001, 0x7f80_0002, C), 0x7fc0_0002);
         assert_eq!(f32b::sub(0x7f80_0000, 0x7f80_0000, C), 0x7fc0_0000);
-        assert_eq!(f32b::add(1.5f32.to_bits(), 2.25f32.to_bits(), C), 3.75f32.to_bits());
-        assert_eq!(f32b::to_int(3e9f32.to_bits(), Round::Zero, true, 32, 0, C), 0x7fff_ffff);
+        assert_eq!(
+            f32b::add(1.5f32.to_bits(), 2.25f32.to_bits(), C),
+            3.75f32.to_bits()
+        );
+        assert_eq!(
+            f32b::to_int(3e9f32.to_bits(), Round::Zero, true, 32, 0, C),
+            0x7fff_ffff
+        );
     }
 
     #[test]
@@ -521,7 +596,10 @@ mod tests {
         let (p, n) = (0u32, 0x8000_0000u32);
         assert_eq!(f32b::max(p, n, C), p);
         assert_eq!(f32b::min(p, n, C), n);
-        assert_eq!(f32b::maxnm(0x7fc0_0000, 1.0f32.to_bits(), C), 1.0f32.to_bits());
+        assert_eq!(
+            f32b::maxnm(0x7fc0_0000, 1.0f32.to_bits(), C),
+            1.0f32.to_bits()
+        );
     }
 
     #[test]

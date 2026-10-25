@@ -1,4 +1,4 @@
-use super::{exec, supported, Env};
+use super::{Env, exec, supported};
 
 pub const CODE: u64 = 0x1000;
 pub const MEM_BASE: u64 = 0x10_0000;
@@ -6,7 +6,9 @@ pub const MEM_SIZE: usize = 0x1_0000;
 pub const LDST_BASE: u64 = MEM_BASE + 0x4000;
 
 pub fn mem_pattern() -> Vec<u8> {
-    (0..MEM_SIZE).map(|i| ((i * 167 + 13) & 0xff) as u8).collect()
+    (0..MEM_SIZE)
+        .map(|i| ((i * 167 + 13) & 0xff) as u8)
+        .collect()
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -87,8 +89,22 @@ impl Rng {
 
     fn f32ish(&mut self) -> u64 {
         const SPECIAL: [u32; 16] = [
-            0, 0x8000_0000, 0x3f80_0000, 0xbf80_0000, 0x7f80_0000, 0xff80_0000, 0x7fc0_0000, 0x7f80_0001,
-            0xffc0_1234, 0x0000_0001, 0x8000_0010, 0x0080_0000, 0x7f7f_ffff, 0x4f00_0000, 0x3f00_0000, 0x4b00_0001,
+            0,
+            0x8000_0000,
+            0x3f80_0000,
+            0xbf80_0000,
+            0x7f80_0000,
+            0xff80_0000,
+            0x7fc0_0000,
+            0x7f80_0001,
+            0xffc0_1234,
+            0x0000_0001,
+            0x8000_0010,
+            0x0080_0000,
+            0x7f7f_ffff,
+            0x4f00_0000,
+            0x3f00_0000,
+            0x4b00_0001,
         ];
         let r = self.next();
         match r % 4 {
@@ -100,8 +116,18 @@ impl Rng {
 
     fn f64ish(&mut self) -> u64 {
         const SPECIAL: [u64; 12] = [
-            0, 1 << 63, 0x3ff0_0000_0000_0000, 0x7ff0_0000_0000_0000, 0xfff0_0000_0000_0000, 0x7ff8_0000_0000_0000,
-            0x7ff0_0000_0000_0001, 1, 0x0010_0000_0000_0000, 0x7fef_ffff_ffff_ffff, 0x43e0_0000_0000_0000, 0xc1e0_0000_0020_0000,
+            0,
+            1 << 63,
+            0x3ff0_0000_0000_0000,
+            0x7ff0_0000_0000_0000,
+            0xfff0_0000_0000_0000,
+            0x7ff8_0000_0000_0000,
+            0x7ff0_0000_0000_0001,
+            1,
+            0x0010_0000_0000_0000,
+            0x7fef_ffff_ffff_ffff,
+            0x43e0_0000_0000_0000,
+            0xc1e0_0000_0020_0000,
         ];
         let r = self.next();
         match r % 4 {
@@ -122,12 +148,26 @@ pub fn words(n: usize, seed: u64) -> Vec<u32> {
                 0..=2 => (w & !(1 << 30) & !(1 << 29)) | 0b1111 << 25,
                 3 => {
                     let f = |r: &mut Rng, n: u64| (r.next() % n) as u32;
-                    let (q, l, rn, rt, rm) = (f(&mut r, 2), f(&mut r, 2), f(&mut r, 32), f(&mut r, 32), f(&mut r, 32));
-                    let post = if f(&mut r, 2) == 1 { 1 << 23 | rm << 16 } else { 0 };
+                    let (q, l, rn, rt, rm) = (
+                        f(&mut r, 2),
+                        f(&mut r, 2),
+                        f(&mut r, 32),
+                        f(&mut r, 32),
+                        f(&mut r, 32),
+                    );
+                    let post = if f(&mut r, 2) == 1 {
+                        1 << 23 | rm << 16
+                    } else {
+                        0
+                    };
                     let body = if f(&mut r, 2) == 0 {
                         0x0c00_0000 | f(&mut r, 16) << 12 | f(&mut r, 4) << 10
                     } else {
-                        0x0d00_0000 | f(&mut r, 2) << 21 | f(&mut r, 8) << 13 | f(&mut r, 2) << 12 | f(&mut r, 4) << 10
+                        0x0d00_0000
+                            | f(&mut r, 2) << 21
+                            | f(&mut r, 8) << 13
+                            | f(&mut r, 2) << 12
+                            | f(&mut r, 4) << 10
                     };
                     body | q << 30 | l << 22 | rn << 5 | rt | post
                 }
@@ -167,7 +207,15 @@ pub fn initial(word: u32, seed: u64, index: u64) -> State {
         }
     }
     let fpcr = [0u64, 1 << 25, 1 << 24, 3 << 24][(index % 4) as usize];
-    State { x, sp: MEM_BASE + 0x8000, v, nzcv: (r.next() & 0xf) << 28, fpcr, fpsr: 0, mem: mem_pattern() }
+    State {
+        x,
+        sp: MEM_BASE + 0x8000,
+        v,
+        nzcv: (r.next() & 0xf) << 28,
+        fpcr,
+        fpsr: 0,
+        mem: mem_pattern(),
+    }
 }
 
 fn put_state(out: &mut Vec<u8>, s: &State) {
@@ -204,7 +252,15 @@ fn get_state(b: &[u8], mem: Vec<u8>) -> State {
     for (i, q) in v.iter_mut().enumerate() {
         *q = u(34 + 2 * i) as u128 | (u(35 + 2 * i) as u128) << 64;
     }
-    State { x, sp: u(33), v, nzcv: u(1), fpcr: u(0), fpsr: 0, mem }
+    State {
+        x,
+        sp: u(33),
+        v,
+        nzcv: u(1),
+        fpcr: u(0),
+        fpsr: 0,
+        mem,
+    }
 }
 
 #[derive(Default, Debug)]
@@ -237,18 +293,33 @@ fn first_difference(want: &State, got: &State) -> Option<String> {
     }
     for i in 0..32 {
         if want.v[i] != got.v[i] {
-            return Some(format!("v{i}: want {:#034x} got {:#034x}", want.v[i], got.v[i]));
+            return Some(format!(
+                "v{i}: want {:#034x} got {:#034x}",
+                want.v[i], got.v[i]
+            ));
         }
     }
     if want.nzcv != got.nzcv {
         return Some(format!("nzcv: want {:#x} got {:#x}", want.nzcv, got.nzcv));
     }
     if want.fpsr & (1 << 27) != got.fpsr & (1 << 27) {
-        return Some(format!("fpsr.qc: want {} got {}", want.fpsr >> 27 & 1, got.fpsr >> 27 & 1));
+        return Some(format!(
+            "fpsr.qc: want {} got {}",
+            want.fpsr >> 27 & 1,
+            got.fpsr >> 27 & 1
+        ));
     }
     if want.mem != got.mem {
-        let k = want.mem.iter().zip(&got.mem).position(|(a, b)| a != b).unwrap();
-        return Some(format!("mem+{k:#x}: want {:#04x} got {:#04x}", want.mem[k], got.mem[k]));
+        let k = want
+            .mem
+            .iter()
+            .zip(&got.mem)
+            .position(|(a, b)| a != b)
+            .unwrap();
+        return Some(format!(
+            "mem+{k:#x}: want {:#04x} got {:#04x}",
+            want.mem[k], got.mem[k]
+        ));
     }
     None
 }
@@ -289,15 +360,22 @@ pub fn check(cases: &[u8], results: &[u8]) -> Report {
             _ => {}
         }
         report.compared += 1;
-        let (vn, vm) = (input.v[(word >> 5 & 31) as usize], input.v[(word >> 16 & 31) as usize]);
+        let (vn, vm) = (
+            input.v[(word >> 5 & 31) as usize],
+            input.v[(word >> 16 & 31) as usize],
+        );
         let fpcr = input.fpcr;
         exec(&mut input, word);
         match first_difference(&want, &input) {
             None => report.matched += 1,
-            Some(d) => report.mismatches.push((word, format!("{d} [in: vn={vn:#034x} vm={vm:#034x} fpcr={fpcr:#x}]"))),
+            Some(d) => report.mismatches.push((
+                word,
+                format!("{d} [in: vn={vn:#034x} vm={vm:#034x} fpcr={fpcr:#x}]"),
+            )),
         }
     }
-    let mut m: Vec<(String, usize, u32)> = missing.into_iter().map(|(g, (n, w))| (g, n, w)).collect();
+    let mut m: Vec<(String, usize, u32)> =
+        missing.into_iter().map(|(g, (n, w))| (g, n, w)).collect();
     m.sort_by_key(|g| std::cmp::Reverse(g.1));
     report.missing = m;
     report
