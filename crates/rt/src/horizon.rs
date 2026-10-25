@@ -202,7 +202,6 @@ fn set_heap_size(c: &mut Cpu) {
         }
         *heap = size;
     } else if size < *heap {
-        // Shrinking returns the tail to the address space, as the kernel does.
         if let Err(e) = p.memory.unmap(HEAP_BASE + size, *heap - size) {
             drop(heap);
             fault(c, format!("could not shrink the heap to {size:#x}: {e}"));
