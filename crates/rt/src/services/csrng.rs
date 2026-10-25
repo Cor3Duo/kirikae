@@ -1,31 +1,11 @@
-//! `csrng` — `nn::spl::detail::IRandomInterface`.
-//!
-//! The service exposes one IPC command, `GenerateRandomBytes` (command 0), which
-//! takes a single output type-0xA buffer and fills it with random bytes; there is
-//! no input and no return value (Switchbrew "SPL services"). On hardware the bytes
-//! come from the `GenerateRandomBytes` SMC.
-//!
-//! The runtime reads the host OS CSPRNG on every request: `/dev/urandom` on Unix
-//! and `SystemFunction036` (`RtlGenRandom`, the primitive `BCryptGenRandom` wraps)
-//! on Windows. The Windows entry point is resolved at run time with
-//! `LoadLibraryW`/`GetProcAddress` from `bcryptprimitives.dll` or `advapi32.dll`,
-//! so the crate needs no Windows bindings. No userspace PRNG is kept, so a host
-//! that cannot provide entropy gets an error instead of zeros or a weak stream.
-
 use crate::cpu::Cpu;
 use crate::mem::GuestMemory;
 use crate::services::stub::unimplemented;
 use crate::services::{Buf, Reply, Request, Service};
 
-/// `nn::spl` result module (Switchbrew "Error codes").
 const SPL_MODULE: u32 = 26;
-/// The runtime could not reach a host entropy source. Horizon does not document
-/// a result for a failed `GenerateRandomBytes` SMC, so this is the runtime's own
-/// code in the `spl` module: the guest sees a failure instead of zero bytes.
 const ENTROPY_UNAVAILABLE: u32 = (1 << 9) | SPL_MODULE;
 
-/// Host entropy is read in chunks so a large guest buffer does not need a second
-/// allocation of the same size.
 const CHUNK: usize = 0x1000;
 
 pub struct Csrng;
@@ -37,11 +17,8 @@ impl Service for Csrng {
 
     fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
         match req.cmd {
-            // 0 GenerateRandomBytes: one output type-0xA buffer, no return value.
             0 => {
                 let Some(buf) = req.out_buf(0) else {
-                    // The SDK always sends the buffer; a request without one has
-                    // nowhere to write, and the real service has no error for it.
                     c.process()
                         .warn_once("csrng: GenerateRandomBytes without an output buffer".into());
                     return Reply::ok();
@@ -60,9 +37,6 @@ impl Service for Csrng {
     }
 }
 
-/// Fills `buf` from `source`, chunk by chunk. Returns `false` as soon as the
-/// source fails; the bytes written before that point are not random and the
-/// caller reports the failure.
 fn fill(memory: &GuestMemory, buf: Buf, mut source: impl FnMut(&mut [u8]) -> bool) -> bool {
     let mut chunk = [0u8; CHUNK];
     let mut done = 0u64;
@@ -77,7 +51,6 @@ fn fill(memory: &GuestMemory, buf: Buf, mut source: impl FnMut(&mut [u8]) -> boo
     true
 }
 
-/// Reads `bytes` from the host OS CSPRNG.
 #[cfg(unix)]
 fn os_entropy(bytes: &mut [u8]) -> bool {
     use std::io::Read;
@@ -88,13 +61,6 @@ fn os_entropy(bytes: &mut [u8]) -> bool {
     file.read_exact(bytes).is_ok()
 }
 
-/// Reads `bytes` from `RtlGenRandom`.
-///
-/// `SystemFunction036` is the documented export name of `RtlGenRandom`, a CSPRNG
-/// backed by the kernel's seed material; `BCryptGenRandom` with
-/// `BCRYPT_USE_SYSTEM_PREFERRED_RNG` is the public wrapper around it.
-/// `bcryptprimitives.dll` exports it directly and `advapi32.dll` keeps the
-/// historical export, so both are tried before giving up.
 #[cfg(windows)]
 fn os_entropy(bytes: &mut [u8]) -> bool {
     use std::ffi::{OsStr, c_char, c_void};
