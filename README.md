@@ -158,6 +158,7 @@ cargo build --release -p kirikae -p kirikae-gui
 
 kirikae build game.dnsp -o out                        # recompile a whole game into out/game.exe
 kirikae build game.dnsp -o out --profile run.profile  # also compile what a previous run interpreted
+kirikae build game.dnsp -o out --profile-loop 3       # build, run headless 60 s, rebuild, repeat
 kirikae build game.dnsp -o out --plugin my-crate      # link a crate whose install() runs first
 kirikae build game.dnsp -o out --split 2              # force the code into 2 DLLs (large titles)
 KIRIKAE_STATS=1 out/game.exe                          # fps, GPU work, native calls vs interpreted
@@ -193,7 +194,16 @@ had to take over and writes the list to `<name>.profile` every 10 s and once mor
 (`KIRIKAE_PROFILE=<file>` moves it, `0` turns it off). The next `kirikae build` into the same folder
 reads it (or the one given with `--profile`) and compiles those addresses as functions: one play
 session is usually enough for interpretation to disappear. Only use a profile with the same game and
-version.
+version; a build tags the profile it read with the title id (`<name>.profile.title`) and refuses one
+that belongs to another title.
+
+`kirikae build --profile-loop <runs> --run-seconds <s>` does that cycle unattended: build, run the
+result headless for the bound with a profile, rebuild with what the run interpreted, and repeat until
+the interpreted count stops falling, a run adds no new address, or the runs end. It starts the game,
+so it only runs when the
+flag is given; each iteration reports the addresses compiled, the new ones, the interpreted
+instructions, the build time and the time to the first frame. The bounded run records a profile every
+10 s, so the last ten seconds before the bound may be missing; `--run-seconds` is at least 10.
 
 **Game coverage reports.** The executable logs every IPC command, SVC, `nvdrv` ioctl and shader
 instruction the game uses, with its status (`implemented`, `stub`, `missing`), into

@@ -6,7 +6,7 @@ Status: **proof of concept complete**; full frontend not implemented
 
 ## Question
 
-[`aarch32.md`](aarch32.md) shows
+[`aarch32.md`](aarch32.md) and [`aarch32-confirmation.md`](aarch32-confirmation.md) show
 that Mario Kart 8 Deluxe 1.0 and New Super Mario Bros. U Deluxe ship an AArch32 `main`
 module. WS12 is estimated at 6–8 weeks; before committing to it, does a useful A32
 decoder fit the shape of `crates/a64`, and does a small dedicated IR give the later
@@ -135,10 +135,10 @@ itself is structured, so a lowering pass never re-reads the encoding.
     architecturally unpredictable (SBZ fields, `pc` operands, writeback over the base,
     byte transfers of `pc`).
   The differential script needs Capstone and lives outside the repository, like the
-  scripts described in `aarch32.md`; it is not a test dependency and adds no crates.
+  scripts in `aarch32-confirmation.md`; it is not a test dependency and adds no crates.
 
 These numbers measure the decoder, not the frontend: 99.8 % of the real MK8D `.text`
-decodes as A32 in the sweep described in `aarch32.md`, but how much of that falls
+decodes as A32 in the sweep of `aarch32-confirmation.md`, but how much of that falls
 inside this slice is a question for the full decoder, run over a local dump (step 1 of
 "What remains").
 

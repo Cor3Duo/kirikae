@@ -238,9 +238,10 @@ audio service gap, not discovery.
 * **Ownership is address-based, not CFG-based.** A function whose body is split by an interior
   FDE becomes several native functions. It is correct and each block is lifted once, but locals
   live in the `Cpu` struct on every boundary, so `--fast-regs` benefits less on BD than on SMBW.
-* **Promotion only knows explicit edges.** An unresolved `br` (`jump_table` returned `None`) still
-  goes to the interpreter as before; its targets are found by the profile loop. This change does
-  not widen or narrow that hole.
+* **Promotion only knows explicit edges.** An unresolved `br` (`jump_table` returned `None`)
+  still goes to the interpreter as before, but the detector has since widened (see
+  [`jump-tables.md`](jump-tables.md)): on SMBW 264 more `br` sites resolve, and what remains is
+  measured at 2,344 instructions that the profile loop recovers.
 * **`interior` is measured for reporting only.** It costs one extra bitset of the text size per
   build (1.7 MB for BD), and it is computed for every `kirikae build`, not only for the harness.
 * **The old sampled figure under-counts** jump-table-only duplicates by 2–5%; use the build log

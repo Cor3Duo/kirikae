@@ -78,7 +78,11 @@ place to start.
 One file per service family (`am`, `fs`, `hid`, `vi`, `nvdrv`, `audio`, `time`, `set`, ...), each a
 `match` on the command ID. Anything not handled falls to `stub.rs`, which answers zeros and warns
 once; `usage.rs` records what each game used for the coverage reports, and `tools/progress.py` counts
-the arms against Switchbrew.
+the arms against Switchbrew. `fs` and the system services added with it use
+`stub::unimplemented_named`: the diagnostic names the command and the reply is the CMIF
+unknown-command result, so a guest can tell that nothing ran. Save images live under
+`KIRIKAE_SAVES`; device/cache images are application-scoped, cache storage has bounded indices and
+`OpenSaveDataMetaFile` keeps thumbnails outside the guest-visible `data/` tree.
 
 ### GPU (`gpu/`)
 
@@ -134,8 +138,10 @@ hardware behaves, it goes into a plugin (`kirikae build --plugin`), which can ho
 
 1. `loader::package::read_source` reads the dump; `from_exefs` lays the modules out.
 2. `recomp::discover` finds functions starting from module entries, the unwind header
-   (`.eh_frame_hdr`, with FDE sizes), relocations and symbols, plus the addresses a previous run had
-   to interpret (`<name>.profile`).
+   (`.eh_frame_hdr`, with FDE sizes), relocations and symbols, absolute code pointers in constant
+   data (the `blr` targets no `bl` edge reaches), jump tables (including the byte-offset ones a
+   compiler keeps in `.text` and the ones whose base it hoists before a branch), plus the addresses
+   a previous run had to interpret (`<name>.profile`).
 3. Each function is lifted to IR and compiled by Cranelift into object files, in parallel.
 4. `project.rs` writes a Cargo project that links the objects, depends on `kirikae-rt` and embeds the
    packed dump; `cargo build` produces `game.exe`. A PE image cannot exceed 2 GiB and the Windows
