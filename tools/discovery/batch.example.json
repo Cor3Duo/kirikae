@@ -4,5 +4,8 @@
   "work": "%LOCALAPPDATA%/kirikae-discovery/batch",
   "boot_seconds": 20,
   "build_timeout": 1800,
+  "profile_loop_runs": 3,
+  "profile_loop_seconds": 60,
+  "profile_loop_timeout": 7200,
   "scenarios": [{"name": "boot", "seconds": 20}]
 }

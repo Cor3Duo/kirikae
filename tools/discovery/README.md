@@ -55,7 +55,14 @@ optional boot pass, resuming from `state.jsonl`, and writes `compat.md` / `compa
 python tools/discovery/batch.py --config tools/discovery/batch.example.json
 python tools/discovery/batch.py --config batch.json --limit 10
 python tools/discovery/batch.py --config batch.json --compile-only
+python tools/discovery/batch.py --config batch.json --profile-loop --profile-seconds 60
 ```
+
+`--profile-loop` builds through `kirikae build --profile-loop`, which alternates a build, a
+bounded headless run and a rebuild with what the run interpreted, stopping when the count
+stops falling or a run adds nothing new. It starts each game, so it is opt-in; the per-run bound is
+`--profile-seconds` (default `boot_seconds`, at least 10) and the whole command has its own
+timeout. The iterations land in `compat.json` and in the matrix's Profile column.
 
 Each game gets `<work>/<game>/{out,build.log,run/}`; `work` defaults to
 `%LOCALAPPDATA%/kirikae-discovery/batch`. The matrix is the per-game companion of

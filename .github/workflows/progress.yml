@@ -1,0 +1,77 @@
+name: Progress
+
+# Regenerates docs/progress after every push to main and commits the result.
+#
+# The project keeps generated files out of PRs (CONTRIBUTING.md), so this workflow does
+# not run on pull_request at all: a fork's PR never executes it and never needs a token.
+# The job also refuses to run in a fork's own main branch.
+#
+# Bot identity and permissions
+# ----------------------------
+# * `permissions: contents: write` is the only scope the job needs. actions/checkout
+#   keeps that token, and the commit is made as the default bot identity:
+#     github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>
+#   (tools/progress.py passes it with `git -c user.name=... -c user.email=...`, so no
+#   repository-wide git config is required).
+# * A commit pushed with GITHUB_TOKEN does not start another workflow run. On top of
+#   that, the commit subject ends in `[skip ci]` and the job skips commits that already
+#   carry it, and the concurrency group keeps two runs from racing the same branch.
+# * If `main` is protected, allow GitHub Actions to push to it (or add the
+#   github-actions[bot] app to the bypass list); otherwise the push fails with GH007/GH006.
+#   "Allow GitHub Actions to create and approve pull requests" is NOT needed: this job
+#   only pushes commits, it never opens a PR.
+# * Optional compatibility matrix: tools/discovery/batch.py writes compat.json outside
+#   the repository. Set the repository variable KIRIKAE_COMPAT to that file (or folder)
+#   and the dashboard includes the matrix; when the path does not exist the section is
+#   skipped, exactly like a fresh clone. To feed it from CI, upload the matrix as an
+#   artifact in the batch job and download it here before this step.
+#
+# Local dry run of the entry point this job calls (regenerates docs/progress, never
+# touches git):
+#   python tools/progress.py --ci --dry-run
+# The job itself uses `python tools/progress.py --ci --push`.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: progress
+  cancel-in-progress: false
+
+jobs:
+  dashboard:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.event.repository.fork == false &&
+      github.actor != 'github-actions[bot]' &&
+      (github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip ci]'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Self-test the scanner
+        run: python tools/progress.py --self-test
+
+      - name: Locate the compatibility matrix
+        env:
+          KIRIKAE_COMPAT: ${{ vars.KIRIKAE_COMPAT }}
+        run: |
+          if [ -n "$KIRIKAE_COMPAT" ] && [ -e "$KIRIKAE_COMPAT" ]; then
+            echo "KIRIKAE_COMPAT=$KIRIKAE_COMPAT" >> "$GITHUB_ENV"
+            echo "compatibility matrix: $KIRIKAE_COMPAT"
+          else
+            echo "compatibility matrix: none (set the KIRIKAE_COMPAT repository variable to include it)"
+          fi
+
+      - name: Regenerate and commit the dashboard
+        run: python tools/progress.py --ci --push

@@ -7,7 +7,9 @@ import html
 import json
 import math
 import re
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -17,8 +19,9 @@ REFERENCE = ROOT / "tools/reference/horizon.txt"
 MAXWELL_OPCODES = ROOT / "crates/maxwell/src/opcodes.rs"
 MAXWELL_TRANSLATE = ROOT / "crates/maxwell/src/translate.rs"
 NVN_DIR = ROOT / "crates/rt/src/nvn"
-# The batch matrix lives outside the repository (see tools/discovery/batch.py) and is read only
-# with --compat or KIRIKAE_COMPAT, so a fresh clone and CI regenerate the same dashboard.
+# The batch matrix lives outside the repository (see tools/discovery/batch.py) and is read from
+# --compat, KIRIKAE_COMPAT or the discovery work folder, in that order. It is only included when
+# the file exists, so a fresh clone and a CI run without the artifact regenerate the same dashboard.
 STATUS_MD = ROOT / "docs/plan/STATUS.md"
 
 # NVN host table: `host::proc` takes the call over, `state::setter` feeds the state it records,
@@ -268,17 +271,128 @@ def arms_in(src, regex, constants):
                 d[cid] = d.get(cid, True) and is_trivial(body)
     return found
 
-def command_arms(src, struct, constants):
-    """Arms of an inherent `fn command` used by services whose `call` delegates to it."""
-    for m in re.finditer(r"impl\s+" + re.escape(struct) + r"\s*\{", src):
-        block = src[m.end() - 1 : matching(src, m.end() - 1) + 1]
-        body = fn_body(block, "command")
-        if not body:
+SERVICE_DISPATCH = r"match (?:req\.cmd|\(self\.name, req\.cmd\)|cmd|code)\s*\{"
+# A call in a `call` body: `self.method(`, `module::fn(` or `fn(`. Definitions (`fn call(`) and
+# paths that start at a type (`Self::`, `Arc::new`) are not callees of the service.
+CALLEE = re.compile(r"(?<!fn )(?<![\w.])(?:(self)\.(\w+)|([a-z_]\w*)::(\w+)|([a-z_]\w*))\s*\(")
+
+
+def command_arms(scope, sources, consts_of, struct):
+    """Arms of an inherent `fn command` used by services whose `call` delegates to it.
+
+    `scope` is the module scope of the file that holds the `impl Service`; a split service may
+    keep the inherent impl in a sibling file, so the lookup is not limited to one file.
+    """
+    return struct_method_arms(scope, sources, consts_of, struct, "command")
+
+
+def method_body(scope, sources, struct, method):
+    """`(file, body)` of `impl <struct> { fn <method> }`, wherever the module split put it."""
+    for path in scope:
+        src = sources[path]
+        for m in re.finditer(r"impl\s+" + re.escape(struct) + r"\s*\{", src):
+            block = src[m.end() - 1 : matching(src, m.end() - 1) + 1]
+            body = fn_body(block, method)
+            if body:
+                return path, body
+    return None
+
+
+def struct_method_arms(scope, sources, consts_of, struct, method):
+    """Arms of `impl <struct> { fn <method> }`, wherever the module split put that impl."""
+    found = method_body(scope, sources, struct, method)
+    if not found:
+        return {}
+    path, body = found
+    return arms_in(body, SERVICE_DISPATCH, consts_of[path])
+
+
+def module_scope(path, sources):
+    """Where a service's helpers may live, in resolution order.
+
+    `foo.rs` keeps its submodules in `foo/`, and `foo/mod.rs` keeps them next to itself; a service
+    split from one file into a folder is therefore still one module.
+    """
+    folder = path.parent / path.stem
+    scope = [path]
+    scope += sorted(p for p in sources if p.parent == folder and p != path)
+    scope += sorted(p for p in sources if p.parent == path.parent and p != path and p.parent != folder)
+    return scope
+
+
+def module_source(path, name, sources):
+    """The file of module `name` as seen from `path`: a sibling, or inside its module folder."""
+    for cand in (
+        path.parent / f"{name}.rs",
+        path.parent / name / "mod.rs",
+        path.parent / path.stem / f"{name}.rs",
+        path.parent / path.stem / name / "mod.rs",
+    ):
+        if cand in sources:
+            return cand
+    return None
+
+
+def local_scope(path, sources):
+    """The file and the folder of its submodules: where an unqualified free function lives."""
+    folder = path.parent / path.stem
+    return [path] + sorted(p for p in sources if p.parent == folder and p != path)
+
+
+def free_fn_body(scope, sources, name):
+    """`(file, body)` of `fn <name>` in scope, for a `call` that delegates to a free function."""
+    for path in scope:
+        body = fn_body(sources[path], name)
+        if body:
+            return path, body
+    return None
+
+
+def callee_bodies(block, path, sources, struct):
+    """`(name, file, body)` of every helper the block calls, resolved inside the service's module."""
+    scope = module_scope(path, sources)
+    local = local_scope(path, sources)
+    out = []
+    for m in CALLEE.finditer(block):
+        self_, method, module, qualified, bare = m.groups()
+        if self_:
+            found = method_body(scope, sources, struct, method)
+        elif module:
+            target = module_source(path, module, sources)
+            found = free_fn_body([target], sources, qualified) if target else None
+        else:
+            found = free_fn_body(local, sources, bare)
+        if found:
+            name = method or qualified or bare or ""
+            out.append((name, found[0], found[1]))
+    return out
+
+
+def delegated_arms(block, path, sources, consts_of, struct, depth=3):
+    """Arms of the helpers a `call` delegates to, when the dispatch lives in another function.
+
+    Handles `self.object(req.cmd)`, `module::open(req.cmd, ..)` and `host_command(.., req, ..)`,
+    including a second hop such as `object` falling through to `applet_manager`. Every helper
+    that carries a command table contributes its arms; unrelated helper calls resolve to
+    functions without one and add nothing.
+    """
+    merged = {}
+    if depth <= 0:
+        return merged
+    for name, target, body in callee_bodies(block, path, sources, struct):
+        # A `*_command_name` helper is a diagnostic name table, not a dispatch: counting its
+        # arms as implemented inflates every service that names its unknown commands.
+        if name.endswith("_command_name") or name.endswith("_name"):
             continue
-        arms = arms_in(body, r"match (?:req\.cmd|\(self\.name, req\.cmd\))\s*\{", constants)
-        if arms:
-            return arms
-    return {}
+        merge_arms(merged, arms_in(body, SERVICE_DISPATCH, consts_of[target]))
+        merge_arms(merged, delegated_arms(body, target, sources, consts_of, struct, depth - 1))
+    return merged
+
+
+def merge_arms(dst, src):
+    for iface, ids in src.items():
+        dst.setdefault(iface, {}).update(ids)
+    return dst
 
 
 def fn_body(src, name):
@@ -288,24 +402,57 @@ def fn_body(src, name):
     brace = src.index("{", matching(src, m.end() - 1))
     return src[brace : matching(src, brace) + 1]
 
-def scan_code():
-    found = {}
-    mod = strip_comments((SERVICES / "mod.rs").read_text(encoding="utf-8"))
+def arc_struct(arm):
+    """The service struct of an `Arc::new(path::Type { .. })` arm, ignoring `::new`."""
+    m = re.match(r"\s*Arc::new\(\s*([A-Za-z_][\w:]*)", arm)
+    if not m:
+        return None
+    segments = [s for s in m.group(1).split("::") if s and s[0].isupper()]
+    return segments[-1] if segments else None
+
+
+def service_registry(src):
+    """`Struct -> [service names]` from the registry that `services::open` delegates to.
+
+    The registry function was renamed from `open` to `host_object`; resolving only the old name
+    silently dropped every service whose `name()` returns a field instead of a literal.
+    """
+    body = fn_body(src, "host_object") or fn_body(src, "open")
+    if not body:
+        return {}
+    m = re.search(r"match\s+name\s*\{", body)
+    if not m:
+        return {}
     names_of = {}
-    for line in fn_body(mod, "open").splitlines():
-        if "=>" in line and "Arc::new" in line:
-            pat, expr = line.split("=>", 1)
-            m = re.search(r"Arc::new\((?:\w+::)*(\w+)", expr)
-            if m:
-                names_of.setdefault(m.group(1), []).extend(re.findall(r'"([^"]+)"', pat))
+    for pattern, arm in match_arms(body, m.end() - 1):
+        struct = arc_struct(arm)
+        if not struct:
+            continue
+        for name in re.findall(r'"([^"]+)"', pattern.split(" if ")[0]):
+            names_of.setdefault(struct, []).append(name)
+    return names_of
+
+
+def nvdrv_scope(services, sources):
+    """`nvdrv.rs` and every file of its `nvdrv/` folder: the ioctl arms may move either way."""
+    return [p for p in sorted(sources) if p == services / "nvdrv.rs" or p.parent == services / "nvdrv"]
+
+
+def scan_code(services=None, horizon=None):
+    services = Path(services or SERVICES)
+    horizon = Path(horizon or HORIZON)
+    sources = {p: strip_comments(p.read_text(encoding="utf-8")) for p in sorted(services.rglob("*.rs"))}
+    consts_of = {p: consts(src) for p, src in sources.items()}
+    RUNTIME_ALIASES.clear()
+    found = {}
+    names_of = service_registry(sources.get(services / "mod.rs", ""))
 
     for names in names_of.values():
         for n in names:
             RUNTIME_ALIASES.setdefault(n, names[0])
 
-    for path in sorted(SERVICES.rglob("*.rs")):
-        src = strip_comments(path.read_text(encoding="utf-8"))
-        constants = consts(src)
+    for path in sorted(sources):
+        src = sources[path]
         for m in re.finditer(r"impl Service for (\w+)\s*\{", src):
             struct = m.group(1)
             block = src[m.end() - 1 : matching(src, m.end() - 1) + 1]
@@ -316,28 +463,36 @@ def scan_code():
                 default = names_of[struct][0]
             else:
                 continue
-            arms = arms_in(block, r"match (?:req\.cmd|\(self\.name, req\.cmd\))\s*\{", constants)
-            if not arms:
-                arms = command_arms(src, struct, constants)
+            scope = module_scope(path, sources)
+            arms = arms_in(block, r"match (?:req\.cmd|\(self\.name, req\.cmd\))\s*\{", consts_of[path])
+            merge_arms(arms, command_arms(scope, sources, consts_of, struct))
+            merge_arms(arms, delegated_arms(block, path, sources, consts_of, struct))
             for iface, ids in arms.items():
                 found.setdefault(("services", iface or default), {}).update(ids)
         for stub in re.findall(r'Stub::new\("([^"]+)"\)', src):
             found.setdefault(("services", stub), {})
         if path.name == "vi.rs":
             body = fn_body(src, "transact")
-            for ids in arms_in(body, r"match code\s*\{", constants).values():
-                found.setdefault(("services", "vi/IGraphicBufferProducer"), {}).update(ids)
-        if path.name == "nvdrv.rs":
-            for fn, devs in NV_DEVICES.items():
-                body = fn_body(src, fn)
-                for ids in arms_in(body, r"match nr\s*\{", constants).values():
-                    for dev in [devs] if isinstance(devs, str) else devs:
-                        found.setdefault(("ioctl", dev), {}).update(ids)
+            if body:
+                for ids in arms_in(body, r"match code\s*\{", consts_of[path]).values():
+                    found.setdefault(("services", "vi/IGraphicBufferProducer"), {}).update(ids)
 
-    src = strip_comments(HORIZON.read_text(encoding="utf-8"))
-    body = fn_body(src, "dispatch")
-    for ids in arms_in(body, r"match imm\s*\{", consts(src)).values():
-        found.setdefault(("svc", "SVCs"), {}).update(ids)
+    ioctls = nvdrv_scope(services, sources)
+    for fn, devs in NV_DEVICES.items():
+        for path in ioctls:
+            body = fn_body(sources[path], fn)
+            if not body:
+                continue
+            for ids in arms_in(body, r"match nr\s*\{", consts_of[path]).values():
+                for dev in [devs] if isinstance(devs, str) else devs:
+                    found.setdefault(("ioctl", dev), {}).update(ids)
+
+    if horizon.exists():
+        src = strip_comments(horizon.read_text(encoding="utf-8"))
+        body = fn_body(src, "dispatch")
+        if body:
+            for ids in arms_in(body, r"match imm\s*\{", consts(src)).values():
+                found.setdefault(("svc", "SVCs"), {}).update(ids)
     return {(sec, ALIASES.get(name, name)): ids for (sec, name), ids in found.items()}
 
 def read_reference():
@@ -627,6 +782,32 @@ def load_compat(path):
         "games": rows,
     }
 
+
+def discovery_root():
+    """The artifact folder, with the same default as tools/discovery/loop.py."""
+    env = os.environ.get("KIRIKAE_DISCOVERY_DIR")
+    if env:
+        return Path(env)
+    base = os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share"
+    return Path(base) / "kirikae-discovery"
+
+
+def resolve_compat(explicit=None):
+    """The batch matrix if it exists: --compat, KIRIKAE_COMPAT, then the discovery work folder.
+
+    `tools/discovery/batch.py` writes `compat.json`/`compat.md` under `<work>/`; the CI entry
+    point passes it only when the artifact is there and the section is skipped otherwise.
+    """
+    for candidate in (explicit, os.environ.get("KIRIKAE_COMPAT"), str(discovery_root() / "batch")):
+        if not candidate:
+            continue
+        p = Path(candidate)
+        if p.is_dir() and any((p / n).is_file() for n in ("compat.json", "compat.md")):
+            return p
+        if p.is_file():
+            return p
+    return None
+
 WORKSTREAM_STATUS = {"hecho": "done", "resuelto": "done", "confirmado": "confirmed", "parcial": "partial"}
 
 def workstream_rows():
@@ -770,8 +951,11 @@ def build_report():
                 trivial = [cid for cid in impl if arms[cid]]
                 extra = sorted(c for c in arms if c not in documented)
             else:
-                impl, trivial, extra = dict.fromkeys(arms, ""), [c for c, t in arms.items() if t], []
-            total = documented if documented is not None else dict.fromkeys(arms, "")
+                # No reference list for this group: its arms are handled but cannot be called
+                # implemented against a documented surface, so they are reported separately
+                # instead of counting themselves as 100 %.
+                impl, trivial, extra = {}, [], sorted(arms)
+            total = documented if documented is not None else {}
             silent = key[1].split("/")[0].split(":")[0] in SILENT_STUBS
             if silent:
                 trivial = list(impl)  # handled, but only silence / fixed values
@@ -804,7 +988,22 @@ def build_report():
                 "groups": groups,
             }
         )
-    report = {"generated": datetime.date.today().isoformat(), "sections": sections}
+    # `implemented` counts every handled command; `real` subtracts the silent stubs, which is
+    # what the badges, the treemap and the console count. Both live in progress.json so a reader
+    # never has to guess which of the two a number means.
+    for section in sections:
+        section["real"] = implemented_real(section)
+    counted = [s for s in sections if s["id"] in COUNTED_SECTIONS]
+    report = {
+        "generated": datetime.date.today().isoformat(),
+        "sections": sections,
+        "totals": {
+            "implemented": sum(s["implemented"] for s in counted),
+            "silent": sum(s.get("silent", 0) for s in counted),
+            "real": sum(s["real"] for s in counted),
+            "total": sum(s["total"] for s in counted),
+        },
+    }
     report["shader_stages"], report["shader_families"] = shader_breakdown(shader)
     report["workstreams"] = workstream_rows()
     return report
@@ -1252,12 +1451,16 @@ def render_html(report):
     parts += report_compat(report)
     parts.append(
         "<h2>How it is counted</h2><p>A command counts as implemented when the runtime has its own arm for it in the "
-        "<code>match</code> of the service (<code>crates/rt/src/services</code>), the SVC (<code>horizon.rs</code>) or the device "
-        "ioctl (<code>services/nvdrv.rs</code>); anything that falls to the default arm goes to the stub, which answers with zeros "
-        "and warns. The <em>Constant</em> column sets apart implemented commands whose body only returns success or fixed values. "
+        "<code>match</code> of the service (<code>crates/rt/src/services/**/*.rs</code>), the SVC (<code>horizon.rs</code>) or the "
+        "device ioctl (<code>services/nvdrv.rs</code> and <code>services/nvdrv/*.rs</code>); anything that falls to the default arm "
+        "goes to the stub, which answers with zeros and warns. A service split into a folder counts like a single file: the "
+        "scanner follows the inherent <code>impl</code> and the free function a <code>call</code> delegates to across the module. "
+        "The <em>Constant</em> column sets apart implemented commands whose body only returns success or fixed values. "
         "Ioctls are compared by the low byte of their number, which is how the devices dispatch them. "
         "Services marked as a <em>silent stub</em> (for example <code>hwopus</code> or <code>nfp</code>) answer every command "
-        "but return zeros or fixed values; they are listed as light green and are not counted as implemented.</p>"
+        "but return zeros or fixed values; they are listed as light green and are not counted as implemented. Those commands "
+        "are handled but excluded from the counted total, and <code>progress.json</code> keeps both numbers "
+        "(<code>implemented</code>, <code>silent</code> and <code>real</code>) in every section and in its <code>totals</code>.</p>"
         "<p>The totals are the commands documented on <a href=\"https://switchbrew.org\">Switchbrew</a> "
         "(<code>tools/reference/horizon.txt</code>, IDs and names only) for the interfaces Kirikae exposes or games ask for, "
         "not every system service. A new interface joins the count when it joins the reference.</p>"
@@ -1335,6 +1538,16 @@ def self_test():
         checks += 1
         if not cond:
             failures.append(what)
+
+    def synthetic(services):
+        """Scan a throwaway `crates/rt/src/services` tree; no horizon.rs, so services only."""
+        with tempfile.TemporaryDirectory(prefix="kirikae-progress-") as tmp:
+            root = Path(tmp)
+            for rel, text in services.items():
+                path = root / "services" / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+            return scan_code(root / "services", root / "horizon.rs")
 
     svc = """match req.cmd {
         0 => Reply::ok(),
@@ -1414,6 +1627,92 @@ def self_test():
     check(sum(f["total"] for f in families) == len(names), "family totals")
     check(all(s["total"] == len(names) for s in stages), "stage totals")
 
+    registry = """pub fn host_object(name: &str) -> Option<Arc<dyn Service>> {
+        let service: Arc<dyn Service> = match name {
+            "split" | "split:u" => Arc::new(split::Split),
+            "tabled" => Arc::new(tabled::Tabled { name: "tabled" }),
+            _ => return None,
+        };
+        Some(service)
+    }"""
+    check(service_registry(registry).get("Split") == ["split", "split:u"], "service registry names")
+    check(service_registry(registry).get("Tabled") == ["tabled"], "service registry reads the struct")
+    check(service_registry("pub fn open(name: &str) { }") == {}, "service registry tolerates a missing table")
+
+    split_call = """impl Service for Split {
+    fn name(&self) -> String { "split".into() }
+    fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
+        match req.cmd {
+            0 => Reply::ok(),
+            1 | 2 => self.real(),
+            _ => unimplemented("split", c, req),
+        }
+    }
+}"""
+    tabled_call = """impl Service for Tabled {
+    fn name(&self) -> String { self.name.into() }
+    fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
+        match self.command(req) {
+            Some(r) => r,
+            None => unimplemented(self.name, c, req),
+        }
+    }
+}"""
+    tabled_command = """impl Tabled {
+    fn command(&self, req: &Request) -> Option<Reply> {
+        match req.cmd {
+            5 => Reply::ok(),
+            6 => self.real(),
+            _ => None,
+        }
+    }
+}"""
+    one_file = synthetic({"mod.rs": registry, "split.rs": split_call, "tabled.rs": tabled_call + tabled_command})
+    split_module = synthetic(
+        {
+            "mod.rs": registry,
+            # `foo.rs` keeps its inherent impl in `foo/command.rs` and its dispatch table in
+            # `foo/table.rs`; the module is still one service.
+            "split/mod.rs": split_call.replace("match req.cmd", "match table::dispatch(req.cmd)"),
+            "split/table.rs": "pub(super) fn dispatch(cmd: u32) -> Option<Reply> {\n"
+            "    match cmd {\n"
+            "        0 => Reply::ok(),\n"
+            "        1 | 2 => self.real(),\n"
+            "        _ => None,\n"
+            "    }\n"
+            "}",
+            "tabled.rs": tabled_call,
+            "tabled/command.rs": tabled_command,
+        }
+    )
+    want = {("services", "split"): {0: True, 1: False, 2: False}, ("services", "tabled"): {5: True, 6: False}}
+    check(one_file == want, "single-file service arms")
+    check(split_module == want, "a split service counts like a single file")
+
+    ioctl_tree = {
+        "mod.rs": registry.replace('"split" | "split:u" => Arc::new(split::Split),', '"nvdrv" => Arc::new(nvdrv::Nvdrv),')
+        .replace('"tabled" => Arc::new(tabled::Tabled { name: "tabled" }),', ""),
+        "nvdrv.rs": """impl Service for Nvdrv {
+    fn name(&self) -> String { self.name.into() }
+    fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
+        match req.cmd {
+            0 => Reply::ok(),
+            _ => unimplemented(self.name, c, req),
+        }
+    }
+}""",
+        "nvdrv/ioctls.rs": """fn nvmap(env: &Env, nr: u32, a: &mut Args) -> Outcome {
+    match nr {
+        1 => self.real(),
+        2 | 3 => Outcome::Ok,
+        _ => Outcome::Unimplemented,
+    }
+}""",
+    }
+    ioctls = synthetic(ioctl_tree)
+    check(set(ioctls.get(("ioctl", "/dev/nvmap")) or {}) == {1, 2, 3}, "ioctl arms in a split nvdrv folder")
+    check(ioctls.get(("services", "nvdrv")) == {0: True}, "split nvdrv service arms")
+
     report = build_report()
     nvn = next((s for s in report["sections"] if s["id"] == "nvn"), None)
     check(nvn is not None and nvn["total"] > 0, "nvn section")
@@ -1421,6 +1720,36 @@ def self_test():
         check(nvn["implemented"] + sum(len(g["missing"]) for g in nvn["groups"]) == nvn["total"], "nvn partition")
     check(report.get("shader_stages") and report.get("shader_families"), "shader breakdown in the report")
     check(report.get("workstreams"), "workstreams in the report")
+
+    with tempfile.TemporaryDirectory(prefix="kirikae-progress-") as tmp:
+        stored = json.loads((write_outputs(Path(tmp) / "progress", report) / "progress.json").read_text(encoding="utf-8"))
+    check([s["id"] for s in stored["sections"]] == [s["id"] for s in report["sections"]], "json keeps every section")
+    check(summary_lines(stored) == summary_lines(report), "console summary agrees with progress.json")
+    check(
+        stored["totals"]["real"] == stored["totals"]["implemented"] - stored["totals"]["silent"],
+        "totals subtract the silent stubs",
+    )
+    check(
+        stored["totals"]["real"]
+        == sum(s["real"] for s in stored["sections"] if s["id"] in COUNTED_SECTIONS),
+        "totals add up the counted sections",
+    )
+    for section in stored["sections"]:
+        check(section["real"] == section["implemented"] - section.get("silent", 0), f'{section["id"]} reports both counts')
+    services_line = summary_lines(report)[0]
+    services = report["sections"][0]
+    check(
+        str(services["real"]) in services_line
+        and (services.get("silent", 0) == 0 or "handled" in services_line),
+        "console prints counted services and the handled count when silent stubs exist",
+    )
+
+    with tempfile.TemporaryDirectory(prefix="kirikae-progress-") as tmp:
+        (Path(tmp) / "compat.json").write_text(json.dumps([record]), encoding="utf-8")
+        resolved = resolve_compat(tmp)
+        check(resolved is not None and load_compat(resolved)["counts"]["games"] == 1, "compat artifact is resolved when it exists")
+    check("[skip ci]" in PROGRESS_COMMIT, "ci commit cannot retrigger the workflow")
+
     first = json.dumps(report, sort_keys=True)
     second = json.dumps(build_report(), sort_keys=True)
     check(first == second, "report is deterministic")
@@ -1433,6 +1762,144 @@ def self_test():
         return 1
     print(f"self-test: {checks} checks passed")
     return 0
+
+def summary_lines(report):
+    """The console summary, read from the same fields that progress.json stores.
+
+    A silent stub is handled (the service answers it) but not counted as implemented; the line
+    says both numbers instead of printing one and leaving the other to the JSON reader.
+    """
+    lines = []
+    for section in report["sections"]:
+        done, total = section["real"], section["total"]
+        if section.get("silent"):
+            lines.append(
+                f'{section["title"]}: {done}/{total} counted ({pct(done, total)}), '
+                f'{section["implemented"]} handled, {section["silent"]} silent stubs excluded'
+            )
+        else:
+            lines.append(f'{section["title"]}: {done}/{total} ({pct(done, total)})')
+    for stage in report.get("shader_stages", []):
+        lines.append(f'shaders {stage["name"]}: {stage["implemented"]}/{stage["total"]} ({pct(stage["implemented"], stage["total"])})')
+    if report.get("workstreams"):
+        done = sum(w["done"] for w in report["workstreams"])
+        total = sum(w["items"] for w in report["workstreams"])
+        lines.append(f"workstreams: {done}/{total} tracked items done")
+    compat = report.get("compat")
+    if compat:
+        lines.append(
+            f'compatibility: {compat["counts"]["games"]} titles '
+            f'({compat["counts"]["boots"]} boot, {compat["counts"]["compiled"]} compile)'
+        )
+    totals = report.get("totals")
+    if totals:
+        lines.append(
+            f'total: {totals["real"]}/{totals["total"]} counted ({pct(totals["real"], totals["total"])}), '
+            f'{totals["implemented"]} handled, {totals["silent"]} silent stubs'
+        )
+    if "coverage" in report:
+        cov = report["coverage"]
+        lines.append(f'{", ".join(report["games"])}: {cov["used"]} items used, {len(cov["gaps"])} stub/missing')
+    return lines
+
+
+def write_outputs(out, report):
+    """progress.json, the treemap, the HTML dashboard, the badges and the daily history."""
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "progress.json").write_text(json.dumps(report, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    (out / "progress.svg").write_text(render_svg(report), encoding="utf-8")
+    (out / "index.html").write_text(render_html(report), encoding="utf-8")
+    badges = out / "badges"
+    badges.mkdir(exist_ok=True)
+    labels = {"services": "services", "svc": "SVCs", "ioctl": "nvdrv ioctls", "nvn": "NVN host", "shaders": "shader ops"}
+    for s in report["sections"]:
+        done = implemented_real(s)
+        ratio = done / s["total"] if s["total"] else 0
+        color = "2ea043" if ratio >= 0.5 else "d29922" if ratio >= 0.3 else "db6d28"
+        badge = {"schemaVersion": 1, "label": labels.get(s["id"], s["id"]), "message": f'{done}/{s["total"]} ({pct(done, s["total"])})', "color": color}
+        (badges / f'{s["id"]}.json').write_text(json.dumps(badge) + "\n", encoding="utf-8")
+    history = update_history(out / "history.json", report)
+    (out / "history.html").write_text(render_history(history), encoding="utf-8")
+    return out
+
+
+PROGRESS_COMMIT = "chore(progress): regenerate the dashboard [skip ci]"
+BOT_NAME = "github-actions[bot]"
+BOT_EMAIL = "41898282+github-actions[bot]@users.noreply.github.com"
+
+
+def git(*args):
+    return subprocess.run(["git", *args], cwd=str(ROOT), text=True, capture_output=True)
+
+
+def ci(out, dry_run=False, push=False, compat_path=None):
+    """The entry point of .github/workflows/progress.yml.
+
+    Regenerates the dashboard, commits it when it changed and (with --push) pushes the commit.
+    --dry-run writes the files and reports what would be committed, without touching git.
+    """
+    report = build_report()
+    compat = load_compat(resolve_compat(compat_path))
+    if compat:
+        report["compat"] = compat
+    out = write_outputs(out, report)
+    lines = summary_lines(report)
+    for line in lines:
+        print(line)
+    print(f"wrote {out}")
+    step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if step_summary:
+        try:
+            with open(step_summary, "a", encoding="utf-8") as f:
+                f.write("### Progress dashboard\n\n```\n" + "\n".join(lines) + "\n```\n")
+        except OSError as e:
+            print(f"note: cannot write the step summary: {e}", file=sys.stderr)
+
+    try:
+        rel = out.resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        print(f"ci: {out} is outside the repository; nothing to commit")
+        return 0
+    status = git("status", "--porcelain", "--", rel)
+    if status.returncode != 0:
+        print(f"ci: git status failed: {status.stderr.strip()}", file=sys.stderr)
+        return status.returncode
+    changed = [line for line in status.stdout.splitlines() if line.strip()]
+    if not changed:
+        print(f"ci: {rel} is up to date")
+        return 0
+    for line in changed:
+        print(f"ci: {line}")
+    if dry_run:
+        print(f'ci: dry run, would commit {len(changed)} changed file(s) as "{PROGRESS_COMMIT}"')
+        return 0
+    add = git("add", "--", rel)
+    if add.returncode != 0:
+        print(f"ci: git add failed: {add.stderr.strip()}", file=sys.stderr)
+        return add.returncode
+    # The workflow documents why this identity can write: `permissions: contents: write`.
+    commit = git(
+        "-c", f"user.name={BOT_NAME}", "-c", f"user.email={BOT_EMAIL}",
+        "commit", "-m", PROGRESS_COMMIT, "--", rel,
+    )
+    if commit.returncode != 0:
+        print(f"ci: git commit failed: {commit.stderr.strip()}", file=sys.stderr)
+        return commit.returncode
+    print(f"ci: committed {len(changed)} file(s)")
+    if push:
+        pushed = git("push")
+        if pushed.returncode != 0:
+            # actions/checkout can leave a detached HEAD; push the commit to its branch then.
+            branch = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+            if branch and branch != "HEAD":
+                pushed = git("push", "origin", f"HEAD:{branch}")
+        if pushed.returncode != 0:
+            print(f"ci: git push failed: {pushed.stderr.strip()}", file=sys.stderr)
+            return pushed.returncode
+        print("ci: pushed")
+    return 0
+
 
 def main():
     ap = argparse.ArgumentParser(description="Progress report for kirikae: what the runtime implements of the Switch's system interface, against what is documented.")
@@ -1452,15 +1919,27 @@ def main():
         "defaults to KIRIKAE_COMPAT or the discovery loop's work folder",
     )
     ap.add_argument("--self-test", action="store_true", help="check the parsers against synthetic sources and exit")
+    ap.add_argument(
+        "--ci",
+        action="store_true",
+        help="workflow entry point: regenerate docs/progress and commit it when it changed",
+    )
+    ap.add_argument("--dry-run", action="store_true", help="with --ci: regenerate and report, but do not commit or push")
+    ap.add_argument("--push", action="store_true", help="with --ci: push the commit to the current branch")
     args = ap.parse_args()
     sys.stdout.reconfigure(errors="replace")
     if args.self_test:
         sys.exit(self_test())
+    if args.dry_run or args.push:
+        if not args.ci:
+            ap.error("--dry-run and --push are only valid with --ci")
+    if args.ci and args.coverage:
+        ap.error("--ci regenerates docs/progress; it does not take --coverage")
     out = Path(args.out or ROOT / ("docs/progress-games" if args.coverage else "docs/progress"))
-    out.mkdir(parents=True, exist_ok=True)
+    if args.ci:
+        sys.exit(ci(out, dry_run=args.dry_run, push=args.push, compat_path=args.compat))
     report = build_report()
-    compat_path = args.compat or os.environ.get("KIRIKAE_COMPAT")
-    compat = load_compat(compat_path)
+    compat = load_compat(resolve_compat(args.compat))
     if compat:
         report["compat"] = compat
     if args.coverage:
@@ -1469,35 +1948,9 @@ def main():
             sys.exit("no coverage file found")
         report["games"] = sorted({d["game"] for _, d in files})
         annotate_coverage(report, coverage_items(files))
-    (out / "progress.json").write_text(json.dumps(report, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
-    (out / "progress.svg").write_text(render_svg(report), encoding="utf-8")
-    (out / "index.html").write_text(render_html(report), encoding="utf-8")
-    badges = out / "badges"
-    badges.mkdir(exist_ok=True)
-    labels = {"services": "services", "svc": "SVCs", "ioctl": "nvdrv ioctls", "nvn": "NVN host", "shaders": "shader ops"}
-    for s in report["sections"]:
-        done = implemented_real(s)
-        ratio = done / s["total"] if s["total"] else 0
-        color = "2ea043" if ratio >= 0.5 else "d29922" if ratio >= 0.3 else "db6d28"
-        badge = {"schemaVersion": 1, "label": labels.get(s["id"], s["id"]), "message": f'{done}/{s["total"]} ({pct(done, s["total"])})', "color": color}
-        (badges / f'{s["id"]}.json').write_text(json.dumps(badge) + "\n", encoding="utf-8")
-    history = update_history(out / "history.json", report)
-    (out / "history.html").write_text(render_history(history), encoding="utf-8")
-    for s in report["sections"]:
-        done = implemented_real(s)
-        silent = f'  [{s["silent"]} silent stub commands not counted]' if s.get("silent") else ""
-        print(f'{s["title"]}: {done}/{s["total"]} ({pct(done, s["total"])}){silent}')
-    for stage in report.get("shader_stages", []):
-        print(f'shaders {stage["name"]}: {stage["implemented"]}/{stage["total"]} ({pct(stage["implemented"], stage["total"])})')
-    if report.get("workstreams"):
-        done = sum(w["done"] for w in report["workstreams"])
-        total = sum(w["items"] for w in report["workstreams"])
-        print(f'workstreams: {done}/{total} tracked items done')
-    if compat:
-        print(f'compatibility: {compat["counts"]["games"]} titles ({compat["counts"]["boots"]} boot, {compat["counts"]["compiled"]} compile)')
-    if "coverage" in report:
-        cov = report["coverage"]
-        print(f'{", ".join(report["games"])}: {cov["used"]} items used, {len(cov["gaps"])} stub/missing')
+    write_outputs(out, report)
+    for line in summary_lines(report):
+        print(line)
     if not REFERENCE.exists():
         print(f"note: {REFERENCE.relative_to(ROOT)} is missing; totals only count handled commands")
     print(f"wrote {out}")
