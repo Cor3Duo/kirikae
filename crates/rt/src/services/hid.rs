@@ -316,10 +316,6 @@ impl Npads {
     }
 }
 
-/// AcquireNpadStyleSetUpdateEventHandle: every call gets its own handle for the
-/// same event and the event is signaled before the client sees it (Switchbrew and
-/// Ryujinx generate a handle per call). Sharing one cached handle would let one
-/// client closing it invalidate every other copy.
 fn acquire_style_set_event(
     events: &Mutex<HashMap<u32, Arc<Event>>>,
     handles: &mut crate::kernel::HandleTable,
