@@ -1,4 +1,4 @@
-use crate::{align_up, Error, Image};
+use crate::{Error, Image, align_up};
 
 pub const MAGIC: &[u8; 4] = b"NRO0";
 pub const HEADER_SIZE: usize = 0x80;
@@ -31,7 +31,10 @@ fn u32_at(b: &[u8], off: usize) -> u32 {
 }
 
 fn seg_at(b: &[u8], off: usize) -> Segment {
-    Segment { offset: u32_at(b, off), size: u32_at(b, off + 4) }
+    Segment {
+        offset: u32_at(b, off),
+        size: u32_at(b, off + 4),
+    }
 }
 
 pub fn is_nro(file: &[u8]) -> bool {
@@ -69,7 +72,14 @@ impl Header {
         put(0x14, self.version);
         put(0x18, self.size);
         put(0x1c, self.flags);
-        for (off, s) in [(0x20, self.text), (0x28, self.ro), (0x30, self.data), (0x68, self.api_info), (0x70, self.dynstr), (0x78, self.dynsym)] {
+        for (off, s) in [
+            (0x20, self.text),
+            (0x28, self.ro),
+            (0x30, self.data),
+            (0x68, self.api_info),
+            (0x70, self.dynstr),
+            (0x78, self.dynsym),
+        ] {
             put(off, s.offset);
             put(off + 4, s.size);
         }

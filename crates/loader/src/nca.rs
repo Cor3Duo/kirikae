@@ -90,7 +90,8 @@ pub fn parse<R: Read + Seek>(r: &mut R, base: u64) -> Result<Nca, Error> {
             }
             _ => (0, end - start),
         };
-        let compression = (&fs[0x188..0x18c] == b"BKTR").then(|| (u64_at(fs, 0x178), u64_at(fs, 0x180)));
+        let compression =
+            (&fs[0x188..0x18c] == b"BKTR").then(|| (u64_at(fs, 0x178), u64_at(fs, 0x180)));
         sections.push(Section {
             index: i,
             fs_type,
@@ -120,7 +121,9 @@ impl Nca {
             return Ok(());
         }
         match s.crypto {
-            CRYPTO_BKTR | CRYPTO_BKTR_SKIP_HASH => Err(Error::Unsupported("this section is an update patch (BKTR); updates are not supported yet")),
+            CRYPTO_BKTR | CRYPTO_BKTR_SKIP_HASH => Err(Error::Unsupported(
+                "this section is an update patch (BKTR); updates are not supported yet",
+            )),
             _ => Err(Error::Encrypted),
         }
     }

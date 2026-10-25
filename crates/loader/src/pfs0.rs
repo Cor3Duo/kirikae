@@ -35,10 +35,16 @@ pub fn parse<R: Read + Seek>(r: &mut R, base: u64) -> Result<Vec<Entry>, Error> 
             let offset = u64::from_le_bytes(e[0..8].try_into().unwrap());
             let size = u64::from_le_bytes(e[8..16].try_into().unwrap());
             let name_at = u32::from_le_bytes(e[16..20].try_into().unwrap()) as usize;
-            let tail = strings.get(name_at..).ok_or(Error::Malformed("PFS0 name offset"))?;
+            let tail = strings
+                .get(name_at..)
+                .ok_or(Error::Malformed("PFS0 name offset"))?;
             let len = tail.iter().position(|&b| b == 0).unwrap_or(tail.len());
             let name = String::from_utf8_lossy(&tail[..len]).into_owned();
-            Ok(Entry { name, offset: data_start + offset, size })
+            Ok(Entry {
+                name,
+                offset: data_start + offset,
+                size,
+            })
         })
         .collect()
 }

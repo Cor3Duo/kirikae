@@ -1,4 +1,4 @@
-use crate::{align_up, lz4, Error, Image};
+use crate::{Error, Image, align_up, lz4};
 
 pub const MAGIC: &[u8; 4] = b"NSO0";
 
@@ -59,9 +59,15 @@ pub fn load(file: &[u8], base: u64) -> Result<Image, Error> {
     let total = align_up(data_end + h.bss_size as u64, 0x1000);
     let mut memory = vec![0u8; total as usize];
     for s in h.segments {
-        let stored = if s.compressed { s.compressed_size } else { s.size } as usize;
+        let stored = if s.compressed {
+            s.compressed_size
+        } else {
+            s.size
+        } as usize;
         let start = s.file_offset as usize;
-        let raw = file.get(start..start + stored).ok_or(Error::Malformed("segment runs past the end of the file"))?;
+        let raw = file
+            .get(start..start + stored)
+            .ok_or(Error::Malformed("segment runs past the end of the file"))?;
         let dst = memory
             .get_mut(s.mem_offset as usize..s.mem_offset as usize + s.size as usize)
             .ok_or(Error::Malformed("segment outside the module"))?;

@@ -7,7 +7,7 @@ pub mod package;
 pub mod pfs0;
 pub mod romfs;
 
-pub use package::{open, Executable, Module, RomFs, Source};
+pub use package::{Executable, Module, RomFs, Source, open};
 
 use std::fmt;
 use std::ops::Range;
@@ -36,7 +36,10 @@ impl fmt::Display for Error {
             Error::TooSmall => write!(f, "file is too small"),
             Error::BadMagic => write!(f, "not a recognised Switch executable"),
             Error::Malformed(what) => write!(f, "malformed executable: {what}"),
-            Error::Encrypted => write!(f, "this file is encrypted; only decrypted dumps are supported (.dnsp, an extracted ExeFS folder, NSO or NRO)"),
+            Error::Encrypted => write!(
+                f,
+                "this file is encrypted; only decrypted dumps are supported (.dnsp, an extracted ExeFS folder, NSO or NRO)"
+            ),
             Error::Unsupported(what) => write!(f, "not supported: {what}"),
             Error::Io(e) => write!(f, "{e}"),
         }

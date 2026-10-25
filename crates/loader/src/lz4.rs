@@ -26,7 +26,9 @@ pub fn decompress(src: &[u8], out_len: usize) -> Result<Vec<u8>, Error> {
     while i < src.len() {
         let token = byte(src, &mut i)?;
         let literals = length(src, &mut i, token >> 4)?;
-        let lit = src.get(i..i + literals).ok_or(Error::Malformed("truncated LZ4 literals"))?;
+        let lit = src
+            .get(i..i + literals)
+            .ok_or(Error::Malformed("truncated LZ4 literals"))?;
         out.extend_from_slice(lit);
         i += literals;
         if i == src.len() {
