@@ -7,7 +7,7 @@ pub mod package;
 pub mod pfs0;
 pub mod romfs;
 
-pub use package::{Executable, Module, RomFs, Source, open};
+pub use package::{Arch, Executable, Module, RomFs, Source, open};
 
 use std::fmt;
 use std::ops::Range;

@@ -8,16 +8,13 @@ use kirikae_a64::Insn;
 use kirikae_loader::{Executable, LOAD_BASE, Module};
 
 use crate::cpu::Cpu;
-use crate::horizon::{
-    MAIN_THREAD_HANDLE, MAIN_THREAD_ID, MAIN_THREAD_PRIORITY, STACK_REGION_BASE, TICK_HZ,
-};
+use crate::horizon::{Layout, MAIN_THREAD_HANDLE, MAIN_THREAD_ID, MAIN_THREAD_PRIORITY, TICK_HZ};
 use crate::kernel::{KObject, KThread};
 use crate::mem::{GuestMemory, PAGE, perm, state};
 
 pub use crate::abi::{Entry, GuestFn};
 
 pub const DEFAULT_STACK_SIZE: u64 = 0x10_0000;
-pub const TLS_BASE: u64 = STACK_REGION_BASE + 0x8000_0000;
 pub const TLS_SIZE: u64 = 0x200;
 const LOOKUP_SLOTS: usize = 1 << 16;
 
@@ -83,6 +80,10 @@ enum Sink {
 
 pub struct Process {
     pub memory: GuestMemory,
+    /// Instruction set of every code module in this process.
+    pub arch: kirikae_loader::Arch,
+    /// Guest regions the kernel reports for this architecture.
+    pub layout: Layout,
     modules: Vec<(String, std::ops::Range<u64>)>,
     symbols: Vec<(u64, String)>,
     pub title_id: u64,
@@ -91,6 +92,7 @@ pub struct Process {
     entries: &'static [Entry],
     lookup_cache: Box<[AtomicU32]>,
     pub(crate) interp_cache: std::sync::RwLock<HashMap<u64, Arc<Insn>>>,
+    pub(crate) interp_cache32: std::sync::RwLock<HashMap<u64, Arc<kirikae_a64::a32::Insn>>>,
     pub(crate) heap: Mutex<u64>,
     pub(crate) physical: AtomicU64,
     pub system_resource_size: u64,
@@ -554,6 +556,7 @@ pub fn run(file: &[u8], entries: &'static [Entry], opts: RunOptions) -> Result<R
             image,
         }],
         entry,
+        arch: kirikae_loader::Arch::A64,
         title_id: None,
         main_stack_size: None,
         system_resource_size: 0,
@@ -611,19 +614,22 @@ pub fn run_executable(
     for m in &exe.modules {
         map_module(&memory, m)?;
     }
+    let layout = crate::horizon::layout(exe.arch);
     let stack_size = exe
         .main_stack_size
         .unwrap_or(DEFAULT_STACK_SIZE)
         .max(PAGE)
         .div_ceil(PAGE)
         * PAGE;
-    let stack_top = STACK_REGION_BASE + stack_size;
+    let stack_top = layout.stack_base + stack_size;
     memory
-        .map_as(STACK_REGION_BASE, stack_size, state::STACK, perm::RW)
+        .map_as(layout.stack_base, stack_size, state::STACK, perm::RW)
         .map_err(|e| e.to_string())?;
 
     let process: &'static Process = Box::leak(Box::new(Process {
         memory,
+        arch: exe.arch,
+        layout,
         modules: exe.modules.iter().map(|m| (m.name.clone(), m.image.base..m.image.end())).collect(),
         symbols: {
             let mut all: Vec<(u64, String)> = exe.modules.iter().flat_map(|m| kirikae_loader::dynamic::function_symbols(&m.image)).collect();
@@ -636,12 +642,13 @@ pub fn run_executable(
         entries,
         lookup_cache: (0..LOOKUP_SLOTS).map(|_| AtomicU32::new(0)).collect(),
         interp_cache: std::sync::RwLock::new(HashMap::new()),
+        interp_cache32: std::sync::RwLock::new(HashMap::new()),
         heap: Mutex::new(0),
         physical: AtomicU64::new(0),
         system_resource_size: exe.system_resource_size,
         handles: Mutex::new(Default::default()),
         sched: Default::default(),
-        tls_next: Mutex::new(TLS_BASE),
+        tls_next: Mutex::new(layout.tls_base),
         exception_context: std::sync::OnceLock::new(),
         gpu: Default::default(),
         hle: Default::default(),

@@ -175,6 +175,12 @@ fn cmd_build(args: &[String]) -> Result<ExitCode, String> {
 fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
     let a = parse(args)?;
     let exe = kirikae_loader::open(Path::new(a.input()?)).map_err(|e| e.to_string())?;
+    if exe.arch.is_32_bit() {
+        eprintln!(
+            "kirikae: interpreting {} (ARM mode; Thumb, banked modes and VFP/NEON are not implemented)",
+            exe.arch.name()
+        );
+    }
     let r = kirikae_rt::run_executable(
         &exe,
         &[],

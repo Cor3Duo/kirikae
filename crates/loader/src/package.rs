@@ -10,10 +10,37 @@ pub struct Module {
     pub image: Image,
 }
 
+/// Instruction set of the program's code modules.
+///
+/// A Switch program is entirely A32 or entirely A64; `META.Flags0` bit 0
+/// (`Is64BitInstruction`) plus a code sample of `main` decide it in
+/// [`from_exefs`]. The interpreter needs the tag so it can decode the words it
+/// fetches; the recompiler and its backends still only accept A64.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Arch {
+    #[default]
+    A64,
+    A32,
+}
+
+impl Arch {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Arch::A64 => "AArch64",
+            Arch::A32 => "AArch32",
+        }
+    }
+
+    pub const fn is_32_bit(self) -> bool {
+        matches!(self, Arch::A32)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Executable {
     pub modules: Vec<Module>,
     pub entry: u64,
+    pub arch: Arch,
     pub title_id: Option<u64>,
     pub main_stack_size: Option<u64>,
     pub system_resource_size: u64,
@@ -64,21 +91,22 @@ pub fn from_exefs(
         .iter()
         .find(|(n, _)| n == "main.npdm")
         .map(|(_, b)| b.as_slice());
-    let aarch32 = npdm.is_some_and(npdm_is_aarch32)
+    let arch = if npdm.is_some_and(npdm_is_aarch32)
         || modules
             .iter()
             .find(|m| m.name == "main")
-            .is_some_and(|m| looks_aarch32(&m.image));
-    if aarch32 {
-        return Err(Error::Unsupported(
-            "this title's main module is AArch32 (32-bit); kirikae only recompiles AArch64",
-        ));
-    }
+            .is_some_and(|m| looks_aarch32(&m.image))
+    {
+        Arch::A32
+    } else {
+        Arch::A64
+    };
     let main_stack_size = npdm.and_then(|b| npdm_u32(b, 0x1c));
     let system_resource_size = npdm.and_then(|b| npdm_u32(b, 0x14)).unwrap_or(0);
     Ok(Executable {
         modules,
         entry,
+        arch,
         title_id,
         main_stack_size,
         system_resource_size,
@@ -152,6 +180,7 @@ fn single(name: &str, image: Image) -> Executable {
             image,
         }],
         entry,
+        arch: Arch::A64,
         title_id: None,
         main_stack_size: None,
         system_resource_size: 0,
@@ -259,7 +288,22 @@ pub fn read_source(path: &Path) -> Result<Source, Error> {
     Ok(Source::Single(std::fs::read(path)?))
 }
 
+/// Loads a program for recompilation. A32 titles are refused here because the
+/// A64 lifter and both backends cannot see their code; the interpreter path
+/// uses [`open`] and keeps the architecture tag instead.
 pub fn from_source(source: &Source) -> Result<Executable, Error> {
+    let exe = from_source_any(source)?;
+    if exe.arch.is_32_bit() {
+        return Err(Error::Unsupported(
+            "this title's main module is AArch32 (32-bit); kirikae only recompiles AArch64",
+        ));
+    }
+    Ok(exe)
+}
+
+/// [`from_source`] without the architecture check: tools and the interpreter
+/// accept A32 programs and read [`Executable::arch`] to decide how to run them.
+pub fn from_source_any(source: &Source) -> Result<Executable, Error> {
     match source {
         Source::ExeFs(files, title, romfs) => from_exefs(files, *title, romfs.clone()),
         Source::Single(bytes) if nro::is_nro(bytes) => {
@@ -273,7 +317,7 @@ pub fn from_source(source: &Source) -> Result<Executable, Error> {
 }
 
 pub fn open(path: &Path) -> Result<Executable, Error> {
-    from_source(&read_source(path)?)
+    from_source_any(&read_source(path)?)
 }
 
 const PACK_MAGIC: &[u8; 8] = b"KRKPKG02";
@@ -402,6 +446,80 @@ mod tests {
     fn acid_flags_do_not_decide_the_architecture() {
         assert!(!npdm_is_aarch32(&npdm_with_flags(0)));
         assert!(!npdm_is_aarch32(&npdm_with_flags(u32::MAX)));
+    }
+
+    /// A minimal uncompressed NSO whose text is `code` and whose data segment
+    /// holds nothing. Enough for `nso::load` and the architecture tag.
+    fn nso_with(code: &[u32]) -> Vec<u8> {
+        let text_size = (code.len() * 4) as u32;
+        let data_mem = text_size;
+        let data_size = 4u32;
+        let file_text = 0x100u32;
+        let file_data = file_text + text_size;
+        let mut file = vec![0u8; (file_data + data_size) as usize];
+        file[..4].copy_from_slice(b"NSO0");
+        let mut segment = |index: usize, file_offset: u32, mem_offset: u32, size: u32| {
+            let at = 0x10 + index * 0x10;
+            file[at..at + 4].copy_from_slice(&file_offset.to_le_bytes());
+            file[at + 4..at + 8].copy_from_slice(&mem_offset.to_le_bytes());
+            file[at + 8..at + 12].copy_from_slice(&size.to_le_bytes());
+        };
+        segment(0, file_text, 0, text_size);
+        segment(1, file_data, data_mem, 0);
+        segment(2, file_data, data_mem, data_size);
+        for (i, word) in code.iter().enumerate() {
+            let at = file_text as usize + i * 4;
+            file[at..at + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        file
+    }
+
+    /// A minimal META header with only `Flags0` set; enough for the
+    /// architecture tag (`npdm_title` returns `None` without an ACI0).
+    fn npdm_with_meta_flags(flags: u32) -> Vec<u8> {
+        let mut npdm = vec![0u8; 0x80];
+        npdm[..4].copy_from_slice(b"META");
+        npdm[0x0c..0x10].copy_from_slice(&flags.to_le_bytes());
+        npdm[0x78..0x7C].copy_from_slice(&0x80u32.to_le_bytes());
+        npdm
+    }
+
+    #[test]
+    fn tags_aarch32_programs_but_only_runs_them_through_the_interpreter() {
+        let files: Vec<(String, Vec<u8>)> = vec![
+            ("main".into(), nso_with(&[0xE12F_FF1E])),
+            ("main.npdm".into(), npdm_with_meta_flags(0x04)),
+        ];
+        let exe = from_exefs(&files, None, None).expect("A32 loads a tagged program");
+        assert_eq!(exe.arch, Arch::A32);
+        assert!(exe.arch.is_32_bit());
+        assert_eq!(exe.arch.name(), "AArch32");
+        assert_eq!(exe.modules.len(), 1);
+
+        let source = Source::ExeFs(files, None, None);
+        assert!(matches!(
+            from_source(&source),
+            Err(Error::Unsupported(
+                "this title's main module is AArch32 (32-bit); kirikae only recompiles AArch64"
+            ))
+        ));
+        assert_eq!(
+            from_source_any(&source)
+                .expect("the interpreter path loads it")
+                .arch,
+            Arch::A32
+        );
+    }
+
+    #[test]
+    fn tags_aarch64_programs_by_default() {
+        let files: Vec<(String, Vec<u8>)> = vec![
+            ("main".into(), nso_with(&[0xD65F_03C0])),
+            ("main.npdm".into(), npdm_with_meta_flags(0x07)),
+        ];
+        let exe = from_source(&Source::ExeFs(files, None, None)).expect("A64 builds");
+        assert_eq!(exe.arch, Arch::A64);
+        assert_eq!(exe.arch.name(), "AArch64");
     }
 
     #[test]

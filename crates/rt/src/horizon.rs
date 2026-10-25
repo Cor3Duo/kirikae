@@ -38,6 +38,49 @@ pub const ALIAS_SIZE: u64 = 0x10_0000_0000;
 pub const TOTAL_MEMORY: u64 = 0xcd50_0000;
 const HEAP_ALIGN: u64 = 0x20_0000;
 
+/// Guest regions a process asks the kernel about. A 32-bit process cannot see
+/// anything above 4 GiB, so its heap, stack, TLS and alias live in the low half
+/// of the address space; the A64 layout is unchanged.
+#[derive(Clone, Copy, Debug)]
+pub struct Layout {
+    pub aslr_base: u64,
+    pub aslr_size: u64,
+    pub heap_base: u64,
+    pub heap_region_size: u64,
+    pub stack_base: u64,
+    pub stack_region_size: u64,
+    pub alias_base: u64,
+    pub alias_size: u64,
+    pub tls_base: u64,
+}
+
+pub const fn layout(arch: kirikae_loader::Arch) -> Layout {
+    match arch {
+        kirikae_loader::Arch::A64 => Layout {
+            aslr_base: ASLR_BASE,
+            aslr_size: ASLR_SIZE,
+            heap_base: HEAP_BASE,
+            heap_region_size: HEAP_REGION_SIZE,
+            stack_base: STACK_REGION_BASE,
+            stack_region_size: STACK_REGION_SIZE,
+            alias_base: ALIAS_BASE,
+            alias_size: ALIAS_SIZE,
+            tls_base: STACK_REGION_BASE + 0x8000_0000,
+        },
+        kirikae_loader::Arch::A32 => Layout {
+            aslr_base: ASLR_BASE,
+            aslr_size: 0x1800_0000,
+            heap_base: 0x2000_0000,
+            heap_region_size: 0x2000_0000,
+            stack_base: 0x4000_0000,
+            stack_region_size: 0x2000_0000,
+            alias_base: 0x8000_0000,
+            alias_size: 0x8000_0000,
+            tls_base: 0x6000_0000,
+        },
+    }
+}
+
 pub const MAIN_THREAD_HANDLE: u64 = 0x0001_0001;
 pub const CURRENT_PROCESS: u64 = 0xffff_8001;
 
@@ -841,7 +884,8 @@ fn close_handle(c: &mut Cpu) {
 
 fn set_heap_size(c: &mut Cpu) {
     let size = c.x[1];
-    if !size.is_multiple_of(HEAP_ALIGN) || size > HEAP_REGION_SIZE {
+    let layout = c.process().layout;
+    if !size.is_multiple_of(HEAP_ALIGN) || size > layout.heap_region_size {
         c.x[0] = RESULT_INVALID_SIZE;
         return;
     }
@@ -849,7 +893,12 @@ fn set_heap_size(c: &mut Cpu) {
     let mut heap = p.heap.lock().unwrap();
     if size > *heap {
         if p.memory
-            .map_as(HEAP_BASE + *heap, size - *heap, state::HEAP, perm::RW)
+            .map_as(
+                layout.heap_base + *heap,
+                size - *heap,
+                state::HEAP,
+                perm::RW,
+            )
             .is_err()
         {
             drop(heap);
@@ -859,7 +908,7 @@ fn set_heap_size(c: &mut Cpu) {
         *heap = size;
     }
     c.x[0] = RESULT_SUCCESS;
-    c.x[1] = HEAP_BASE;
+    c.x[1] = layout.heap_base;
 }
 
 pub const RESULT_INVALID_MEMORY_STATE: u64 = 0xd401;
@@ -1252,6 +1301,7 @@ fn set_memory_permission(c: &mut Cpu) {
 
 fn physical_range(c: &mut Cpu) -> Option<(u64, u64)> {
     let (addr, size) = (c.x[0], c.x[1]);
+    let layout = c.process().layout;
     let error = if !addr.is_multiple_of(PAGE) {
         RESULT_INVALID_ADDRESS
     } else if size == 0 || !size.is_multiple_of(PAGE) {
@@ -1260,7 +1310,7 @@ fn physical_range(c: &mut Cpu) -> Option<(u64, u64)> {
         RESULT_INVALID_MEMORY_REGION
     } else if c.process().system_resource_size == 0 {
         RESULT_INVALID_STATE
-    } else if addr < ALIAS_BASE || addr + size > ALIAS_BASE + ALIAS_SIZE {
+    } else if addr < layout.alias_base || addr + size > layout.alias_base + layout.alias_size {
         RESULT_INVALID_MEMORY_REGION
     } else {
         return Some((addr, addr + size));
@@ -1401,23 +1451,24 @@ fn query_memory(c: &mut Cpu) {
 fn get_info(c: &mut Cpu) {
     let (id, subid) = (c.x[1], c.x[3]);
     let p = c.process();
+    let layout = p.layout;
     let value = match id {
         0 => 0b1111,
         1 => 0xfc00_0000_0000_0000,
-        2 => ALIAS_BASE,
-        3 => ALIAS_SIZE,
-        4 => HEAP_BASE,
-        5 => HEAP_REGION_SIZE,
+        2 => layout.alias_base,
+        3 => layout.alias_size,
+        4 => layout.heap_base,
+        5 => layout.heap_region_size,
         6 => TOTAL_MEMORY,
         7 => p.used_memory(),
         8 => 0,
         9 => resource_limit_handle(p),
         10 => 0,
         11 => p.entropy(subid),
-        12 => ASLR_BASE,
-        13 => ASLR_SIZE,
-        14 => STACK_REGION_BASE,
-        15 => STACK_REGION_SIZE,
+        12 => layout.aslr_base,
+        13 => layout.aslr_size,
+        14 => layout.stack_base,
+        15 => layout.stack_region_size,
         16 => p.system_resource_size,
         17 => (p.physical.load(std::sync::atomic::Ordering::Relaxed) / 512)
             .next_multiple_of(PAGE)
@@ -1932,6 +1983,7 @@ mod tests {
         let exe = kirikae_loader::Executable {
             modules: Vec::new(),
             entry: entries[0].addr,
+            arch: kirikae_loader::Arch::A64,
             title_id: None,
             main_stack_size: None,
             system_resource_size: 0,

@@ -101,6 +101,14 @@ pub fn exec(c: &mut Cpu, insn: &Insn) {
 }
 
 pub fn step(c: &mut Cpu) {
+    if c.process().arch == kirikae_loader::Arch::A32 {
+        crate::interp_a32::step(c);
+        return;
+    }
+    step_a64(c);
+}
+
+fn step_a64(c: &mut Cpu) {
     let p = c.process();
     p.stats.count_interpreted();
     let pc = c.pc;

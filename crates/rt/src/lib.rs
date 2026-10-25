@@ -19,6 +19,7 @@ pub mod horizon;
 pub mod host1x;
 pub mod input;
 pub mod interp;
+pub mod interp_a32;
 pub mod ipc;
 pub mod kernel;
 pub mod mem;
