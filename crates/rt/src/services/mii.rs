@@ -1,20 +1,9 @@
-//! `mii:u` / `mii:e` — Mii database queries.
-//!
-//! The runtime has no Mii database, which is a valid offline console state: no
-//! user Miis, no special Miis and no full database. `OpenDatabase` creates the
-//! SDK object, and its queries answer zero counts / "not updated" / "not full".
-//! `BuildRandom` still returns a zeroed `MiiCharInfo` of the documented 0x58
-//! bytes so a caller that needs a placeholder gets a well-formed buffer.
-//!
-//! Command numbers follow libnx's `mii.c` (the SDK wrapper for this service).
-
 use std::sync::Arc;
 
 use crate::cpu::Cpu;
 use crate::services::stub::unimplemented_named;
 use crate::services::{Reply, Request, Service};
 
-/// `MiiCharInfo` is 0x58 bytes.
 const MII_CHAR_INFO_SIZE: usize = 0x58;
 
 pub struct Mii {
@@ -36,14 +25,12 @@ impl Service for Mii {
 
     fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
         match req.cmd {
-            // OpenDatabase(MiiSpecialKeyCode)
             0 => Reply::ok().object(Arc::new(MiiDatabase)),
             _ => unimplemented_named(&self.name, mii_command_name(req.cmd), c, req),
         }
     }
 }
 
-/// `nn::mii::detail::IDatabase`.
 struct MiiDatabase;
 
 impl Service for MiiDatabase {
@@ -53,15 +40,10 @@ impl Service for MiiDatabase {
 
     fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
         match req.cmd {
-            // IsUpdated(source flag): an empty database never changes.
             0 => Reply::ok().u8(0),
-            // IsFull
             1 => Reply::ok().u8(0),
-            // GetCount(source flag)
             2 => Reply::ok().u32(0),
-            // Get1(source flag, output MiiCharInfo array): no entries.
             4 => Reply::ok().u32(0),
-            // BuildRandom(age, gender, face color): a placeholder Mii.
             6 => Reply::ok().bytes(&[0; MII_CHAR_INFO_SIZE]),
             _ => unimplemented_named("mii/IDatabase", mii_database_command_name(req.cmd), c, req),
         }
