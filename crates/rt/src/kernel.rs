@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use crate::mem::GuestMemory;
 use crate::services::Service;
@@ -364,22 +364,131 @@ impl GuestSession {
     }
 }
 
-/// A server port (`svcCreateSession`'s server handle). Kernel ports are
+/// `svcCreatePort`: the largest number of sessions a port accepts at once.
+/// Horizon's `KPort` stores the ceiling in an `s32`, so `-1` means unlimited.
+pub const MAX_PORT_SESSIONS: i32 = 0x3f;
+
+/// Why a port refused a connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectError {
+    /// The port already holds `max_sessions` connections.
+    Limit,
+    /// The port was closed, so nobody can accept the connection.
+    Closed,
+}
+
+/// A server port: `svcCreateSession`'s server handle, `svcCreatePort`'s server
+/// end, or a port registered with `svcManageNamedPort`. Kernel ports are
 /// signalable while a client connection waits to be accepted, which is what
 /// `svcWaitSynchronization` and the port entries of `svcReplyAndReceive` use.
 pub struct Port {
+    /// The numeric tag `svcCreatePort` was given. A named port keeps zero here;
+    /// its string name lives in the registry.
     pub name: u64,
     pub is_light: bool,
+    /// Connections the port accepts at once; `-1` is unlimited. A port made by
+    /// `svcCreateSession` carries exactly the pair it was made with, so its
+    /// ceiling is one.
+    max_sessions: i32,
     queue: Mutex<VecDeque<Arc<GuestSession>>>,
+    /// Every pair connected through this port, so the ceiling counts the
+    /// sessions the guest already accepted. Weak references: a port does not
+    /// keep a session alive.
+    connected: Mutex<Vec<Weak<GuestSession>>>,
+    closed: AtomicBool,
+    /// Wakes the process scheduler when a connection arrives or the port
+    /// closes. Kept here (instead of taking it from a `Process`) so a pair made
+    /// by `svcConnectToPort`/`svcConnectToNamedPort` blocks its client the same
+    /// way `svcCreateSession`'s pair does.
+    wake: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl Port {
+    /// The server end of a `svcCreateSession` pair: the queue starts with the
+    /// pair and the port accepts nothing else.
     pub fn new(name: u64, is_light: bool, first: Arc<GuestSession>) -> Arc<Port> {
         Arc::new(Port {
             name,
             is_light,
-            queue: Mutex::new(VecDeque::from([first])),
+            max_sessions: 1,
+            queue: Mutex::new(VecDeque::from([first.clone()])),
+            connected: Mutex::new(vec![Arc::downgrade(&first)]),
+            closed: AtomicBool::new(false),
+            wake: Arc::new(|| {}),
         })
+    }
+
+    /// An empty port `svcCreatePort` or `svcManageNamedPort` made; connections
+    /// arrive through [`Port::connect`].
+    pub fn with_wake(
+        name: u64,
+        is_light: bool,
+        max_sessions: i32,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Arc<Port> {
+        Arc::new(Port {
+            name,
+            is_light,
+            max_sessions,
+            queue: Mutex::new(VecDeque::new()),
+            connected: Mutex::new(Vec::new()),
+            closed: AtomicBool::new(false),
+            wake: Arc::new(wake),
+        })
+    }
+
+    /// One connection over the client end of this port. The pair is queued for
+    /// `svcAcceptSession` and the server is woken.
+    pub fn connect(&self) -> Result<Arc<GuestSession>, ConnectError> {
+        if self.closed() {
+            return Err(ConnectError::Closed);
+        }
+        let link = {
+            let mut connected = self.connected.lock().unwrap();
+            // A session stops counting when its server end is closed.
+            connected.retain(|w| w.upgrade().is_some_and(|l| l.server_open()));
+            if self.max_sessions >= 0 && connected.len() >= self.max_sessions as usize {
+                return Err(ConnectError::Limit);
+            }
+            let wake = self.wake.clone();
+            let link = GuestSession::with_wake(move || wake());
+            connected.push(Arc::downgrade(&link));
+            link
+        };
+        // Not while holding the connection lock or the queue lock: the wake
+        // takes the scheduler lock, and a thread blocked on this port looks at
+        // the queue while it holds that lock.
+        let queued = {
+            let mut queue = self.queue.lock().unwrap();
+            // A close that started after the check above would otherwise drain
+            // the queue without this pair and leave its client waiting forever.
+            if self.closed() {
+                false
+            } else {
+                queue.push_back(link.clone());
+                true
+            }
+        };
+        if !queued {
+            link.close_server();
+            return Err(ConnectError::Closed);
+        }
+        (self.wake)();
+        Ok(link)
+    }
+
+    /// Whether a new connection would be accepted, which is when a client port
+    /// is signalled.
+    pub fn can_connect(&self) -> bool {
+        if self.closed() {
+            return false;
+        }
+        if self.max_sessions < 0 {
+            return true;
+        }
+        let mut connected = self.connected.lock().unwrap();
+        connected.retain(|w| w.upgrade().is_some_and(|l| l.server_open()));
+        (connected.len() as i32) < self.max_sessions
     }
 
     /// Pops the next queued client. `None` means no connection is waiting, the
@@ -392,11 +501,17 @@ impl Port {
         self.queue.lock().unwrap().len()
     }
 
+    pub fn closed(&self) -> bool {
+        self.closed.load(Ordering::Relaxed)
+    }
+
     /// Closing the port drops the queued pairs, so a client blocked on one
-    /// learns that no server can ever reply. The queue lock is released first:
-    /// closing a pair wakes the scheduler, and a thread blocked on this port
-    /// holds the scheduler lock while it looks at the queue.
+    /// learns that no server can ever reply, and wakes a server waiting for a
+    /// connection. The locks are released first: closing a pair wakes the
+    /// scheduler, and a thread blocked on this port holds the scheduler lock
+    /// while it looks at the queue.
     pub fn close(&self) {
+        self.closed.store(true, Ordering::Relaxed);
         let queued: Vec<Arc<GuestSession>> = {
             let mut queue = self.queue.lock().unwrap();
             queue.drain(..).collect()
@@ -404,7 +519,99 @@ impl Port {
         for link in queued {
             link.close_server();
         }
+        (self.wake)();
     }
+}
+
+/// `svcCreatePort`'s client end. A client port is not a session: it can be given
+/// to another process (or kept) and `svcConnectToPort` turns it into a client
+/// session on the server port. It only then counts against
+/// `LimitableResource_Sessions`.
+pub struct ClientPort {
+    port: Arc<Port>,
+}
+
+impl ClientPort {
+    pub fn new(port: Arc<Port>) -> Arc<ClientPort> {
+        Arc::new(ClientPort { port })
+    }
+
+    pub fn port(&self) -> &Arc<Port> {
+        &self.port
+    }
+
+    /// Signalled while the server port can accept another connection.
+    pub fn can_connect(&self) -> bool {
+        self.port.can_connect()
+    }
+}
+
+/// `svcManageNamedPort` refused a registration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamedPortError {
+    /// Another live port already owns the name.
+    Taken,
+    /// The runtime's named-port table is full.
+    Full,
+}
+
+/// The live names the guest registered with `svcManageNamedPort`, which is the
+/// guest-visible half of the `svcConnectToNamedPort` registry. `sm:` is
+/// host-served and never enters this table.
+///
+/// The kernel keeps a name reserved while the server port exists, so the table
+/// holds weak references: closing the port handle frees the name, exactly as
+/// dropping the last `KPort` reference does on hardware.
+static NAMED_PORTS: std::sync::OnceLock<Mutex<BTreeMap<String, Weak<Port>>>> =
+    std::sync::OnceLock::new();
+
+/// The runtime caps the guest named-port table at 0x40 live names. Horizon's
+/// named-port table is a fixed list too; refusing past a bound keeps a guest
+/// from growing an unbounded registry. `sm:` is host-served and never occupies
+/// a slot here.
+pub const MAX_NAMED_PORTS: usize = 0x40;
+
+fn named_ports() -> &'static Mutex<BTreeMap<String, Weak<Port>>> {
+    NAMED_PORTS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Drops the names whose port is gone and returns how many live ones remain.
+fn live_named_ports(ports: &mut BTreeMap<String, Weak<Port>>) -> usize {
+    ports.retain(|_, weak| weak.strong_count() > 0);
+    ports.len()
+}
+
+/// Reserves `name` for `port`. `Err(Taken)` when a live port already owns it,
+/// `Err(Full)` when the table has no free slot.
+pub fn register_named_port(name: &str, port: &Arc<Port>) -> Result<(), NamedPortError> {
+    let mut ports = named_ports().lock().unwrap();
+    live_named_ports(&mut ports);
+    if ports.contains_key(name) {
+        return Err(NamedPortError::Taken);
+    }
+    if ports.len() >= MAX_NAMED_PORTS {
+        return Err(NamedPortError::Full);
+    }
+    ports.insert(name.to_string(), Arc::downgrade(port));
+    Ok(())
+}
+
+/// The live port registered under `name`, if any. A registration whose port is
+/// gone is reaped on the way.
+pub fn find_named_port(name: &str) -> Option<Arc<Port>> {
+    let mut ports = named_ports().lock().unwrap();
+    let weak = ports.get(name)?.clone();
+    let port = weak.upgrade();
+    if port.is_none() {
+        ports.remove(name);
+    }
+    port
+}
+
+/// How many guest named ports are live (diagnostics and tests).
+pub fn named_port_count() -> usize {
+    let mut ports = named_ports().lock().unwrap();
+    live_named_ports(&mut ports)
 }
 
 /// A block of transfer memory (`svcCreateTransferMemory`). The kernel keeps the
@@ -558,8 +765,50 @@ impl CodeMemory {
     }
 }
 
+/// `MemoryPermission_DontCare`: `svcCreateSharedMemory` accepts it for the
+/// remote side, and it lets the borrower map the block with any valid
+/// permission.
+pub const MEMORY_PERMISSION_DONT_CARE: u32 = 0x1000_0000;
+
+/// Which side of a shared memory block a handle belongs to. Horizon keys the
+/// mapping permission on the process: the creator maps with the block's
+/// `owner_perm` and every other process maps with `remote_perm`. The runtime
+/// runs one process, so the handle carries the role instead: the handle
+/// `svcCreateSharedMemory` inserts is the creator's, and a handle the guest
+/// received from another process (a host service, or a handle copy) is a
+/// borrower's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharedMemoryRole {
+    Owner,
+    Borrower,
+}
+
+/// Why `svcMapSharedMemory`/`svcUnmapSharedMemory` refused a range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharedMapError {
+    /// The size is not the block's size.
+    Size,
+    /// The address is not page aligned or the range overflows.
+    Address,
+    /// The mapping permission is not the one the caller's side was created
+    /// with, or is not a permission shared memory can have (no execute).
+    Permission,
+    /// The block is already mapped, the destination is taken, or the range was
+    /// not mapped by this block.
+    State,
+}
+
+/// A shared memory block (`svcCreateSharedMemory`, and the blocks the runtime's
+/// own services share with the guest). The kernel object owns the pages; a
+/// mapping commits guest pages and copies the block into them, and unmapping
+/// copies them back, so the contents follow the object between mappings.
 pub struct SharedMemory {
     pub size: u64,
+    /// The permission the creating side maps with.
+    owner_perm: u32,
+    /// The permission the borrower maps with; `MemoryPermission_DontCare`
+    /// accepts any valid one.
+    remote_perm: u32,
     state: Mutex<SharedState>,
 }
 
@@ -569,14 +818,50 @@ struct SharedState {
 }
 
 impl SharedMemory {
+    /// A block a host service shares with the guest: the service writes it with
+    /// `RW` and the guest may map it with any valid permission, which is what
+    /// `MemoryPermission_DontCare` means to the kernel.
     pub fn new(size: u64) -> SharedMemory {
+        SharedMemory::with_permissions(size, crate::mem::perm::RW, MEMORY_PERMISSION_DONT_CARE)
+    }
+
+    pub fn with_permissions(size: u64, owner_perm: u32, remote_perm: u32) -> SharedMemory {
         SharedMemory {
             size,
+            owner_perm,
+            remote_perm,
             state: Mutex::new(SharedState {
                 shadow: vec![0; size as usize],
                 mapped_at: None,
             }),
         }
+    }
+
+    /// `svcCreateSharedMemory`: the shadow is a host allocation sized by the
+    /// guest, so it is reserved explicitly instead of letting `vec![0; size]`
+    /// abort the process when the host refuses it.
+    pub fn try_new(size: u64, owner_perm: u32, remote_perm: u32) -> Option<SharedMemory> {
+        let len = usize::try_from(size).ok()?;
+        let mut shadow = Vec::new();
+        shadow.try_reserve_exact(len).ok()?;
+        shadow.resize(len, 0);
+        Some(SharedMemory {
+            size,
+            owner_perm,
+            remote_perm,
+            state: Mutex::new(SharedState {
+                shadow,
+                mapped_at: None,
+            }),
+        })
+    }
+
+    pub fn owner_perm(&self) -> u32 {
+        self.owner_perm
+    }
+
+    pub fn mapped_at(&self) -> Option<u64> {
+        self.state.lock().unwrap().mapped_at
     }
 
     pub fn write(&self, memory: &crate::mem::GuestMemory, offset: u64, bytes: &[u8]) {
@@ -599,30 +884,85 @@ impl SharedMemory {
         }
     }
 
-    pub fn map(&self, memory: &crate::mem::GuestMemory, addr: u64, perm: u32) -> bool {
+    /// `svcMapSharedMemory`. The size must be the block's size and the address
+    /// page aligned and free; the permission must be the one the caller's side
+    /// of the block was created with. The runtime keeps one mapping per block: a
+    /// second mapping is refused until the first is unmapped.
+    pub fn map(
+        &self,
+        memory: &crate::mem::GuestMemory,
+        addr: u64,
+        size: u64,
+        perm: u32,
+        role: SharedMemoryRole,
+    ) -> Result<(), SharedMapError> {
+        if size != self.size {
+            return Err(SharedMapError::Size);
+        }
+        if !addr.is_multiple_of(crate::mem::PAGE)
+            || addr
+                .checked_add(size)
+                .is_none_or(|end| end > crate::mem::ADDR_MASK + 1)
+        {
+            return Err(SharedMapError::Address);
+        }
+        // Shared memory is data; the kernel has no executable mapping for it.
+        if !matches!(
+            perm,
+            crate::mem::perm::NONE | crate::mem::perm::R | crate::mem::perm::RW
+        ) {
+            return Err(SharedMapError::Permission);
+        }
+        let expected = match role {
+            SharedMemoryRole::Owner => self.owner_perm,
+            SharedMemoryRole::Borrower => self.remote_perm,
+        };
+        if expected != MEMORY_PERMISSION_DONT_CARE && perm != expected {
+            return Err(SharedMapError::Permission);
+        }
         let mut st = self.state.lock().unwrap();
         if st.mapped_at.is_some()
             || memory
-                .map_as(addr, self.size, crate::mem::state::SHARED, perm)
+                .map_as(addr, size, crate::mem::state::SHARED, perm)
                 .is_err()
         {
-            return false;
+            return Err(SharedMapError::State);
         }
-        memory.write(addr, &st.shadow);
+        if !memory.write(addr, &st.shadow) {
+            let _ = memory.unmap(addr, size);
+            return Err(SharedMapError::State);
+        }
         st.mapped_at = Some(addr);
-        true
+        Ok(())
     }
 
-    pub fn unmap(&self, memory: &crate::mem::GuestMemory, addr: u64) -> bool {
+    /// `svcUnmapSharedMemory`: copies the mapping back into the block and
+    /// releases the guest pages.
+    pub fn unmap(
+        &self,
+        memory: &crate::mem::GuestMemory,
+        addr: u64,
+        size: u64,
+    ) -> Result<(), SharedMapError> {
+        if size != self.size {
+            return Err(SharedMapError::Size);
+        }
+        if !addr.is_multiple_of(crate::mem::PAGE) {
+            return Err(SharedMapError::Address);
+        }
         let mut st = self.state.lock().unwrap();
         if st.mapped_at != Some(addr) {
-            return false;
+            return Err(SharedMapError::State);
         }
-        st.shadow = memory
-            .read(addr, self.size)
-            .unwrap_or_else(|| vec![0; self.size as usize]);
+        let Some(bytes) = memory.read(addr, size) else {
+            return Err(SharedMapError::State);
+        };
+        if memory.unmap(addr, size).is_err() {
+            return Err(SharedMapError::State);
+        }
+        st.shadow = bytes;
         st.mapped_at = None;
-        memory.unmap(addr, self.size).is_ok()
+        Ok(())
     }
 }
 
@@ -751,8 +1091,12 @@ impl ThreadContext {
 #[derive(Clone)]
 pub enum KObject {
     Session(Arc<Session>),
-    /// A server port from `svcCreateSession`.
+    /// A server port from `svcCreateSession`, `svcCreatePort` or
+    /// `svcManageNamedPort`.
     Port(Arc<Port>),
+    /// The client end of a `svcCreatePort` port, which `svcConnectToPort` turns
+    /// into a client session.
+    ClientPort(Arc<ClientPort>),
     Event(Arc<Event>),
     Thread(Arc<KThread>),
     TransferMemory(Arc<TransferMemory>),
@@ -763,6 +1107,8 @@ pub enum KObject {
 
 pub struct HandleTable {
     objects: HashMap<u32, KObject>,
+    /// Role of each shared memory handle (see [`SharedMemoryRole`]).
+    shared_roles: HashMap<u32, SharedMemoryRole>,
     next: u32,
     resource_limit: Option<u32>,
 }
@@ -771,6 +1117,7 @@ impl Default for HandleTable {
     fn default() -> Self {
         HandleTable {
             objects: HashMap::new(),
+            shared_roles: HashMap::new(),
             next: 0x0002_0001,
             resource_limit: None,
         }
@@ -781,8 +1128,41 @@ impl HandleTable {
     pub fn insert(&mut self, object: KObject) -> u32 {
         let h = self.next;
         self.next += 1;
+        // A shared memory handle the kernel did not insert from
+        // `svcCreateSharedMemory` is a borrower's: the runtime's own services
+        // create blocks for the guest, and a block copied from another process
+        // arrives that way too. `insert_shared_memory` marks the creator's.
+        if matches!(object, KObject::SharedMemory(_)) {
+            self.shared_roles.insert(h, SharedMemoryRole::Borrower);
+        }
         self.objects.insert(h, object);
         h
+    }
+
+    /// Inserts a shared memory handle with an explicit role.
+    pub fn insert_shared_memory(
+        &mut self,
+        memory: Arc<SharedMemory>,
+        role: SharedMemoryRole,
+    ) -> u32 {
+        let h = self.insert(KObject::SharedMemory(memory));
+        self.shared_roles.insert(h, role);
+        h
+    }
+
+    /// The block a shared memory handle refers to, with the role the handle
+    /// plays in its ownership.
+    pub fn shared_memory(&self, handle: u32) -> Option<(Arc<SharedMemory>, SharedMemoryRole)> {
+        let Some(KObject::SharedMemory(m)) = self.objects.get(&handle) else {
+            return None;
+        };
+        Some((
+            m.clone(),
+            self.shared_roles
+                .get(&handle)
+                .copied()
+                .unwrap_or(SharedMemoryRole::Borrower),
+        ))
     }
 
     /// Handle of the process resource limit, created once and recreated if the
@@ -818,6 +1198,7 @@ impl HandleTable {
     }
 
     pub fn close(&mut self, handle: u32) -> bool {
+        self.shared_roles.remove(&handle);
         self.objects.remove(&handle).is_some()
     }
 
@@ -856,6 +1237,13 @@ impl HandleTable {
         }
     }
 
+    pub fn client_port(&self, handle: u32) -> Option<Arc<ClientPort>> {
+        match self.objects.get(&handle) {
+            Some(KObject::ClientPort(p)) => Some(p.clone()),
+            _ => None,
+        }
+    }
+
     pub fn transfer_memory(&self, handle: u32) -> Option<Arc<TransferMemory>> {
         match self.objects.get(&handle) {
             Some(KObject::TransferMemory(t)) => Some(t.clone()),
@@ -890,6 +1278,7 @@ impl HandleTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn thread_context_layout() {
@@ -1111,5 +1500,201 @@ mod tests {
         assert!(!memory.is_mapped(0x3_0000_1000, 1));
         assert!(code.map_owner(&memory, 0x3_0000_2000, crate::mem::perm::R));
         assert_eq!(&memory.read(0x3_0000_2000, 4).unwrap(), b"code");
+    }
+
+    #[test]
+    fn a_port_wakes_on_connect_and_stops_at_its_ceiling() {
+        let woken = Arc::new(AtomicUsize::new(0));
+        let counter = woken.clone();
+        let port = Port::with_wake(7, false, 2, move || {
+            counter.fetch_add(1, Ordering::Relaxed);
+        });
+        assert!(port.can_connect());
+        let first = port.connect().expect("the first connection fits");
+        assert_eq!(
+            woken.load(Ordering::Relaxed),
+            1,
+            "a connection wakes the waiting server"
+        );
+        let second = port.connect().expect("the second connection fits");
+        assert_eq!(port.pending(), 2);
+        assert_eq!(port.connect().err(), Some(ConnectError::Limit));
+        assert!(!port.can_connect(), "the ceiling is reached");
+        assert!(port.accept().is_some_and(|l| Arc::ptr_eq(&l, &first)));
+        assert_eq!(
+            port.connect().err(),
+            Some(ConnectError::Limit),
+            "an accepted session still counts against max_sessions"
+        );
+        first.close_server();
+        let third = port
+            .connect()
+            .expect("closing the server end frees the slot");
+        assert_eq!(port.pending(), 2);
+
+        let before_close = woken.load(Ordering::Relaxed);
+        port.close();
+        assert!(port.closed());
+        assert!(!second.server_open(), "a queued client loses its server");
+        assert!(!third.server_open());
+        assert!(port.accept().is_none());
+        assert_eq!(port.connect().err(), Some(ConnectError::Closed));
+        assert!(!port.can_connect());
+        assert!(
+            woken.load(Ordering::Relaxed) > before_close,
+            "closing a port with waiters wakes the scheduler"
+        );
+    }
+
+    #[test]
+    fn named_ports_reserve_the_name_until_the_port_closes() {
+        let one = Port::with_wake(0, false, 1, || {});
+        let two = Port::with_wake(0, false, 1, || {});
+        assert_eq!(register_named_port("ws9:kernel-one", &one), Ok(()));
+        assert!(Arc::ptr_eq(
+            &find_named_port("ws9:kernel-one").expect("the name resolves"),
+            &one
+        ));
+        assert_eq!(
+            register_named_port("ws9:kernel-one", &two),
+            Err(NamedPortError::Taken)
+        );
+        assert_eq!(register_named_port("ws9:kernel-two", &two), Ok(()));
+        assert!(named_port_count() >= 2, "both names are live");
+        drop(one);
+        assert!(
+            find_named_port("ws9:kernel-one").is_none(),
+            "the name dies with the port"
+        );
+        assert_eq!(
+            register_named_port("ws9:kernel-one", &two),
+            Ok(()),
+            "the freed name can be taken again"
+        );
+        drop(two);
+        assert!(find_named_port("ws9:kernel-one").is_none());
+        assert!(find_named_port("ws9:kernel-two").is_none());
+        assert!(find_named_port("ws9:nonexistent").is_none());
+    }
+
+    #[test]
+    fn shared_memory_maps_by_role_and_keeps_its_contents() {
+        let memory = GuestMemory::new().unwrap();
+        let base = 0x2_0000_0000;
+        let block =
+            SharedMemory::with_permissions(0x2000, crate::mem::perm::RW, crate::mem::perm::R);
+        assert_eq!(
+            block.map(
+                &memory,
+                base,
+                0x1000,
+                crate::mem::perm::RW,
+                SharedMemoryRole::Owner
+            ),
+            Err(SharedMapError::Size)
+        );
+        assert_eq!(
+            block.map(
+                &memory,
+                base,
+                0x2000,
+                crate::mem::perm::R,
+                SharedMemoryRole::Owner
+            ),
+            Err(SharedMapError::Permission),
+            "the creator maps with its own permission"
+        );
+        assert_eq!(
+            block.map(
+                &memory,
+                base,
+                0x2000,
+                crate::mem::perm::RW,
+                SharedMemoryRole::Borrower
+            ),
+            Err(SharedMapError::Permission),
+            "the borrower maps with the remote permission"
+        );
+        assert_eq!(
+            block.map(
+                &memory,
+                base + 1,
+                0x2000,
+                crate::mem::perm::RW,
+                SharedMemoryRole::Owner
+            ),
+            Err(SharedMapError::Address)
+        );
+        assert_eq!(
+            block.map(
+                &memory,
+                base,
+                0x2000,
+                crate::mem::perm::RX,
+                SharedMemoryRole::Owner
+            ),
+            Err(SharedMapError::Permission),
+            "shared memory cannot be executable"
+        );
+        assert_eq!(
+            block.map(
+                &memory,
+                base,
+                0x2000,
+                crate::mem::perm::RW,
+                SharedMemoryRole::Owner
+            ),
+            Ok(())
+        );
+        assert_eq!(block.mapped_at(), Some(base));
+        assert!(memory.write(base, b"shared"));
+        assert_eq!(
+            block.map(
+                &memory,
+                base + 0x2000,
+                0x2000,
+                crate::mem::perm::RW,
+                SharedMemoryRole::Owner
+            ),
+            Err(SharedMapError::State),
+            "one mapping at a time"
+        );
+        assert_eq!(
+            block.unmap(&memory, base, 0x1000),
+            Err(SharedMapError::Size)
+        );
+        assert_eq!(
+            block.unmap(&memory, base + 0x2000, 0x2000),
+            Err(SharedMapError::State)
+        );
+        assert_eq!(block.unmap(&memory, base, 0x2000), Ok(()));
+        assert_eq!(&block.read(&memory, 0, 6)[..], b"shared");
+        assert_eq!(
+            block.map(
+                &memory,
+                base,
+                0x2000,
+                crate::mem::perm::R,
+                SharedMemoryRole::Borrower
+            ),
+            Ok(())
+        );
+        assert_eq!(&memory.read(base, 6).unwrap()[..], b"shared");
+        assert_eq!(block.unmap(&memory, base, 0x2000), Ok(()));
+
+        // MemoryPermission_DontCare lets the borrower choose.
+        let block = SharedMemory::new(0x1000);
+        assert_eq!(block.owner_perm(), crate::mem::perm::RW);
+        assert_eq!(
+            block.map(
+                &memory,
+                base,
+                0x1000,
+                crate::mem::perm::NONE,
+                SharedMemoryRole::Borrower
+            ),
+            Ok(())
+        );
+        assert_eq!(block.unmap(&memory, base, 0x1000), Ok(()));
     }
 }

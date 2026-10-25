@@ -4,7 +4,8 @@ use std::sync::Arc;
 use crate::arbiter;
 use crate::cpu::Cpu;
 use crate::kernel::{
-    CodeMemory, Event, GuestSession, KObject, Port, ResourceLimit, Session, TransferMemory,
+    ClientPort, CodeMemory, ConnectError, Event, GuestSession, KObject, NamedPortError, Port,
+    ResourceLimit, Session, SharedMapError, SharedMemory, SharedMemoryRole, TransferMemory,
 };
 use crate::mem::{ADDR_MASK, MirrorError, PAGE, PhysicalError, perm, state};
 use crate::process::Process;
@@ -102,24 +103,8 @@ fn dispatch(c: &mut Cpu, imm: u16) {
         0x11 => event_signal(c, true),
         0x12 | 0x17 => event_signal(c, false),
         0x15 => create_transfer_memory(c),
-        0x13 | 0x14 => {
-            let (h, addr, perm) = (c.x[0] as u32, c.x[1], c.x[3] as u32);
-            let p = c.process();
-            let obj = p.handles.lock().unwrap().get(h);
-            let done = match obj {
-                Some(KObject::SharedMemory(s)) if imm == 0x13 => s.map(&p.memory, addr, perm & 3),
-                Some(KObject::SharedMemory(s)) => s.unmap(&p.memory, addr),
-                _ => {
-                    c.x[0] = RESULT_INVALID_HANDLE;
-                    return;
-                }
-            };
-            c.x[0] = if done {
-                RESULT_SUCCESS
-            } else {
-                RESULT_INVALID_MEMORY_STATE
-            };
-        }
+        0x13 => map_shared_memory(c),
+        0x14 => unmap_shared_memory(c),
         0x16 => close_handle(c),
         0x18 => threads::wait_synchronization(c),
         0x19 => threads::cancel_synchronization(c),
@@ -145,10 +130,18 @@ fn dispatch(c: &mut Cpu, imm: u16) {
         0x45 => threads::create_event(c),
         0x4b => create_code_memory(c),
         0x4c => control_code_memory(c),
+        0x4e => read_write_register(c),
+        0x50 => create_shared_memory(c),
         0x51 => map_transfer_memory(c),
         0x52 => unmap_transfer_memory(c),
         0x53 => create_interrupt_event(c),
+        0x54 => query_physical_address(c),
         0x5d..=0x5f => process_data_cache(c, imm),
+        0x6f => get_system_info(c),
+        0x70 => create_port(c),
+        0x71 => manage_named_port(c),
+        0x72 => connect_to_port(c),
+        0x7c => get_process_info(c),
         0x7d => create_resource_limit(c),
         0x7e => set_resource_limit_limit_value(c),
         0x1f => connect_to_named_port(c),
@@ -174,10 +167,20 @@ fn dispatch(c: &mut Cpu, imm: u16) {
         // gpu/host1x. An IoRegion over the PCIe aperture (0x12000000-0x1FFFFFFF)
         // would therefore fabricate RAM instead of mapping device memory.
         //
+        // For the same reason the unsafe pool-0 physical calls stay missing:
+        // 0x48 MapPhysicalMemoryUnsafe and 0x49 UnmapPhysicalMemoryUnsafe would
+        // hand the guest device pages that only exist as fabricated RAM, and 0x4A
+        // SetUnsafeLimit grants nothing without them (the regular pool ceiling is
+        // already LimitableResource_PhysicalMemoryMax).
+        //
         // The device address space calls (0x55 QueryMemoryMapping, 0x56
         // CreateDeviceAddressSpace .. 0x5C UnmapDeviceAddressSpace) depend on
         // the same missing physical map and on an IOMMU, so they keep reporting
         // 0x4201 rather than handing out synthetic physical addresses.
+        //
+        // The debug (0x60-0x6D) and multi-process calls (0x4F, 0x73-0x7B, and
+        // the 0x7F secure monitor) need debugger objects and a kernel process
+        // table; the runtime has one process and no attached debugger.
         _ => {
             c.process().warn_once(format!(
                 "svc {imm:#04x} is not implemented (first call from {})",
@@ -203,19 +206,189 @@ pub fn ok1(c: &mut Cpu, value: u64) {
 
 pub const RESULT_NOT_FOUND: u64 = 0xf201;
 
+/// The kernel's port names are NUL-terminated strings of at most 0xb bytes
+/// (`svcConnectToNamedPort` copies 12 bytes, `svcManageNamedPort` reads one).
+const PORT_NAME_LEN: u64 = 12;
+
+/// The name a port SVC takes from guest memory at `addr`. `None` means the
+/// bytes are not readable or no NUL appears within the kernel's 12-byte limit.
+fn port_name(p: &Process, addr: u64) -> Option<String> {
+    let raw = p.memory.read(addr, PORT_NAME_LEN)?;
+    let end = raw.iter().position(|&b| b == 0)?;
+    Some(String::from_utf8_lossy(&raw[..end]).into_owned())
+}
+
+/// `svcConnectToNamedPort` (0x1F): a client session to the port registered
+/// under the 12-byte name at X1. `sm:` is host-served and answers through the
+/// runtime's own `Sm` service; every other name is a guest port registered with
+/// `svcManageNamedPort`. A name nobody owns is the documented `0xf201`, and a
+/// port at its `max_sessions` ceiling (or a process at its
+/// `LimitableResource_Sessions` ceiling) reports `0x10801`.
 fn connect_to_named_port(c: &mut Cpu) {
     let p = c.process();
-    let raw = p.memory.read(c.x[1], 12).unwrap_or_default();
-    let name = String::from_utf8_lossy(raw.split(|&b| b == 0).next().unwrap_or(&[])).into_owned();
+    let Some(name) = port_name(p, c.x[1]) else {
+        c.x[0] = RESULT_INVALID_POINTER;
+        return;
+    };
     p.log_ipc(format!("ConnectToNamedPort({name:?})"));
-    if name != "sm:" {
-        p.warn_once(format!("svcConnectToNamedPort({name:?}): unknown port"));
-        c.x[0] = RESULT_NOT_FOUND;
+    if name == "sm:" {
+        let session = Session::new(Arc::new(Sm));
+        let handle = p.handles.lock().unwrap().insert(KObject::Session(session));
+        ok1(c, handle as u64);
         return;
     }
-    let session = Session::new(Arc::new(Sm));
-    let handle = p.handles.lock().unwrap().insert(KObject::Session(session));
-    ok1(c, handle as u64);
+    let Some(port) = crate::kernel::find_named_port(&name) else {
+        p.warn_once(format!(
+            "svcConnectToNamedPort({name:?}): no guest port is registered under that name"
+        ));
+        c.x[0] = RESULT_NOT_FOUND;
+        return;
+    };
+    // A connection is a client session plus the server end queued on the port,
+    // so it charges the limit the same way svcCreateSession does.
+    let (used, ceiling) = session_usage(p);
+    if used + 2 > ceiling {
+        c.x[0] = RESULT_LIMIT_REACHED;
+        return;
+    }
+    match port.connect() {
+        Ok(link) => {
+            let handle = p
+                .handles
+                .lock()
+                .unwrap()
+                .insert(KObject::Session(Session::guest_client(link)));
+            p.log_ipc(format!("ConnectToNamedPort({name:?}) -> {handle:#x}"));
+            ok1(c, handle as u64);
+        }
+        Err(ConnectError::Limit) => c.x[0] = RESULT_LIMIT_REACHED,
+        Err(ConnectError::Closed) => c.x[0] = RESULT_NOT_FOUND,
+    }
+}
+
+/// `svcCreatePort` (0x70): a server port with `max_sessions` connections
+/// (`-1` unlimited) plus, in W2, its client end. W3 is `is_light` and X4 is the
+/// port's numeric tag (not a string; `svcManageNamedPort` is what publishes a
+/// name). The client end is a port, not a session, so it costs no
+/// `LimitableResource_Sessions` until `svcConnectToPort` uses it.
+fn create_port(c: &mut Cpu) {
+    let (max_sessions, is_light, name) = (c.x[2] as i32, c.x[3], c.x[4]);
+    if is_light > 1 {
+        c.x[0] = RESULT_INVALID_ENUM;
+        return;
+    }
+    if !(-1..=crate::kernel::MAX_PORT_SESSIONS).contains(&max_sessions) {
+        c.x[0] = RESULT_INVALID_ENUM;
+        return;
+    }
+    let p = c.process();
+    let port = Port::with_wake(name, is_light == 1, max_sessions, move || {
+        crate::sched::wake(p)
+    });
+    let client = ClientPort::new(port.clone());
+    let (server, client) = {
+        let mut table = p.handles.lock().unwrap();
+        (
+            table.insert(KObject::Port(port)),
+            table.insert(KObject::ClientPort(client)),
+        )
+    };
+    p.log_ipc(format!(
+        "CreatePort(name={name:#x}, max_sessions={max_sessions}, light={is_light}) -> {server:#x}, {client:#x}"
+    ));
+    ok1(c, server as u64);
+    c.x[2] = client as u64;
+}
+
+/// `svcManageNamedPort` (0x71): registers a new server port under the name at
+/// X1 so `svcConnectToNamedPort` can find it, and returns it in W1. The name is
+/// free again when the port handle is closed. `sm:` is host-served, so the
+/// guest cannot take it; a name already registered is refused (the kernel does
+/// not publish a result for it, the runtime reports `0xfa01`), and a full
+/// named-port table reports `0x10801`.
+fn manage_named_port(c: &mut Cpu) {
+    let (name_ptr, max_sessions) = (c.x[1], c.x[2] as i32);
+    if !(-1..=crate::kernel::MAX_PORT_SESSIONS).contains(&max_sessions) {
+        c.x[0] = RESULT_INVALID_ENUM;
+        return;
+    }
+    let p = c.process();
+    let Some(name) = port_name(p, name_ptr) else {
+        c.x[0] = RESULT_INVALID_POINTER;
+        return;
+    };
+    if name.is_empty() {
+        c.x[0] = RESULT_INVALID_ENUM;
+        return;
+    }
+    if name == "sm:" {
+        p.warn_once(
+            "svcManageNamedPort(\"sm:\"): the runtime serves sm: itself, the name is taken".into(),
+        );
+        c.x[0] = RESULT_INVALID_STATE;
+        return;
+    }
+    let port = Port::with_wake(0, false, max_sessions, move || crate::sched::wake(p));
+    let handle = p
+        .handles
+        .lock()
+        .unwrap()
+        .insert(KObject::Port(port.clone()));
+    match crate::kernel::register_named_port(&name, &port) {
+        Ok(()) => {
+            p.log_ipc(format!(
+                "ManageNamedPort({name:?}, max_sessions={max_sessions}) -> {handle:#x}"
+            ));
+            ok1(c, handle as u64);
+        }
+        Err(error) => {
+            // The registration is taken from the caller: drop the port it never
+            // received rather than leaving an unnamed handle behind.
+            p.handles.lock().unwrap().close(handle);
+            let message = match error {
+                NamedPortError::Taken => {
+                    format!("svcManageNamedPort({name:?}): the name is already registered")
+                }
+                NamedPortError::Full => "svcManageNamedPort: the named-port table is full".into(),
+            };
+            p.warn_once(message);
+            c.x[0] = match error {
+                NamedPortError::Taken => RESULT_INVALID_STATE,
+                NamedPortError::Full => RESULT_LIMIT_REACHED,
+            };
+        }
+    }
+}
+
+/// `svcConnectToPort` (0x72): the client session for the client end of a port
+/// (`svcCreatePort`'s W2). A closed port has nothing to accept the connection,
+/// so it reports `0xf201`; the port's `max_sessions` ceiling and the process
+/// session ceiling report `0x10801`.
+fn connect_to_port(c: &mut Cpu) {
+    let handle = c.x[1] as u32;
+    let p = c.process();
+    let Some(client) = p.handles.lock().unwrap().client_port(handle) else {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    };
+    let (used, ceiling) = session_usage(p);
+    if used + 2 > ceiling {
+        c.x[0] = RESULT_LIMIT_REACHED;
+        return;
+    }
+    match client.port().connect() {
+        Ok(link) => {
+            let session = p
+                .handles
+                .lock()
+                .unwrap()
+                .insert(KObject::Session(Session::guest_client(link)));
+            p.log_ipc(format!("ConnectToPort(client {handle:#x}) -> {session:#x}"));
+            ok1(c, session as u64);
+        }
+        Err(ConnectError::Limit) => c.x[0] = RESULT_LIMIT_REACHED,
+        Err(ConnectError::Closed) => c.x[0] = RESULT_NOT_FOUND,
+    }
 }
 
 pub const RESULT_TIMED_OUT: u64 = 0xea01;
@@ -570,6 +743,11 @@ fn receive_request(
                     if port.pending() > 0 {
                         return Some(Ok((i, None)));
                     }
+                    // A closed port cannot produce a connection, so a server
+                    // waiting on it is released instead of parking forever.
+                    if port.closed() {
+                        return Some(Err((RESULT_REMOTE_DEAD, i)));
+                    }
                 }
                 Waitable::Host => {}
             }
@@ -732,6 +910,90 @@ const LENDABLE: [u32; 4] = [state::NORMAL, state::HEAP, state::STACK, state::SHA
 /// it) and no write-only.
 fn transfer_perm(perm: u32) -> bool {
     matches!(perm, perm::NONE | perm::R | perm::RW)
+}
+
+/// The permissions a shared memory block may have: data only, so no execute.
+fn shared_perm(permission: u32) -> bool {
+    matches!(permission, perm::NONE | perm::R | perm::RW)
+}
+
+/// `svcCreateSharedMemory` (0x50): a block of `size` zeroed bytes whose creator
+/// maps it with `owner_perm` and whose borrower maps it with `remote_perm`
+/// (`0x10000000` accepts any permission). The runtime runs one process, so the
+/// role lives on the handle; the block itself keeps both permissions.
+fn create_shared_memory(c: &mut Cpu) {
+    let (size, owner_perm, remote_perm) = (c.x[1], c.x[2] as u32, c.x[3] as u32);
+    if size == 0 || !size.is_multiple_of(PAGE) {
+        c.x[0] = RESULT_INVALID_SIZE;
+        return;
+    }
+    if !shared_perm(owner_perm) {
+        c.x[0] = RESULT_INVALID_NEW_MEMORY_PERMISSION;
+        return;
+    }
+    if remote_perm != crate::kernel::MEMORY_PERMISSION_DONT_CARE && !shared_perm(remote_perm) {
+        c.x[0] = RESULT_INVALID_NEW_MEMORY_PERMISSION;
+        return;
+    }
+    let p = c.process();
+    // The kernel allocates shared memory from the process pool partition, so a
+    // block that does not fit the remaining budget is the memory limit result.
+    if size > TOTAL_MEMORY.saturating_sub(p.used_memory()) {
+        c.x[0] = RESULT_LIMIT_REACHED;
+        return;
+    }
+    let Some(memory) = SharedMemory::try_new(size, owner_perm, remote_perm) else {
+        p.warn_once("svcCreateSharedMemory: the host refused the block's backing store".into());
+        c.x[0] = RESULT_LIMIT_REACHED;
+        return;
+    };
+    let handle = p
+        .handles
+        .lock()
+        .unwrap()
+        .insert_shared_memory(Arc::new(memory), SharedMemoryRole::Owner);
+    p.log_ipc(format!(
+        "CreateSharedMemory(size={size:#x}, owner={owner_perm:#x}, remote={remote_perm:#x}) -> {handle:#x}"
+    ));
+    ok1(c, handle as u64);
+}
+
+/// `svcMapSharedMemory` (0x13): maps the block at `addr` with `perm`. The size
+/// must be the block's size and the permission the one the caller's side was
+/// created with, which is how a creator and a borrower differ.
+fn map_shared_memory(c: &mut Cpu) {
+    let (handle, addr, size, perm) = (c.x[0] as u32, c.x[1], c.x[2], c.x[3] as u32);
+    let p = c.process();
+    let Some((memory, role)) = p.handles.lock().unwrap().shared_memory(handle) else {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    };
+    c.x[0] = match memory.map(&p.memory, addr, size, perm, role) {
+        Ok(()) => RESULT_SUCCESS,
+        Err(SharedMapError::Size) => RESULT_INVALID_SIZE,
+        Err(SharedMapError::Address) => RESULT_INVALID_ADDRESS,
+        Err(SharedMapError::Permission) => RESULT_INVALID_NEW_MEMORY_PERMISSION,
+        Err(SharedMapError::State) => RESULT_INVALID_MEMORY_STATE,
+    };
+}
+
+/// `svcUnmapSharedMemory` (0x14): writes the mapping back into the block and
+/// releases the pages. The size must be the block's size and the address the
+/// one it was mapped at.
+fn unmap_shared_memory(c: &mut Cpu) {
+    let (handle, addr, size) = (c.x[0] as u32, c.x[1], c.x[2]);
+    let p = c.process();
+    let Some((memory, _)) = p.handles.lock().unwrap().shared_memory(handle) else {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    };
+    c.x[0] = match memory.unmap(&p.memory, addr, size) {
+        Ok(()) => RESULT_SUCCESS,
+        Err(SharedMapError::Size) => RESULT_INVALID_SIZE,
+        Err(SharedMapError::Address) => RESULT_INVALID_ADDRESS,
+        Err(SharedMapError::Permission) => RESULT_INVALID_NEW_MEMORY_PERMISSION,
+        Err(SharedMapError::State) => RESULT_INVALID_MEMORY_STATE,
+    };
 }
 
 /// `svcCreateTransferMemory` (0x15): reprotects `addr..addr+size` with `perm`
@@ -1051,6 +1313,73 @@ fn unmap_physical_memory(c: &mut Cpu) {
     });
 }
 
+/// `svcQueryPhysicalAddress` (0x54): the kernel returns the physical address of
+/// the page, the virtual base of the mapping that contains it and the mapping's
+/// size in X1-X3 (the SDK wrapper stores them in a `PhysicalMemoryInfo`).
+///
+/// The runtime keeps one host reservation for all guest RAM and has no second
+/// physical address space, so a guest page's physical address is its virtual
+/// address: the guest RAM the guest sees is the same flat space the runtime's
+/// device models (GPU, host1x) consume. The address must be mapped; there is no
+/// physical page to report for a hole, which is the documented invalid-address
+/// result.
+fn query_physical_address(c: &mut Cpu) {
+    let addr = c.x[1];
+    let p = c.process();
+    let region = p.memory.query(addr);
+    if region.state == state::FREE || addr > ADDR_MASK {
+        c.x[0] = RESULT_INVALID_ADDRESS;
+        return;
+    }
+    c.x[0] = RESULT_SUCCESS;
+    c.x[1] = addr & !(PAGE - 1);
+    c.x[2] = region.range.start;
+    c.x[3] = region.range.end - region.range.start;
+}
+
+/// The MC/MC0/MC1 register offsets `svcReadWriteRegister` accepts. The three
+/// pages share the whitelist (Switchbrew's table, including the 2.0.0+
+/// additions).
+const MC_REGISTERS: &[u16] = &[
+    0x054, 0x090, 0x094, 0x098, 0x09c, 0x0a0, 0x0a4, 0x0a8, 0x0ac, 0x0b0, 0x0b4, 0x0b8, 0x0bc,
+    0x0c0, 0x0c4, 0x0c8, 0x0d0, 0x0d4, 0x0d8, 0x0dc, 0x0e0, 0x100, 0x108, 0x10c, 0x118, 0x11c,
+    0x124, 0x128, 0x12c, 0x130, 0x134, 0x138, 0x13c, 0x158, 0x15c, 0x164, 0x168, 0x16c, 0x170,
+    0x174, 0x178, 0x17c, 0x200, 0x204, 0x2e4, 0x2e8, 0x2ec, 0x2f4, 0x2f8, 0x310, 0x314, 0x320,
+    0x328, 0x344, 0x348, 0x370, 0x374, 0x37c, 0x380, 0x390, 0x394, 0x398, 0x3ac, 0x3b8, 0x3bc,
+    0x3c0, 0x3c4, 0x3d8, 0x3e8, 0x41c, 0x420, 0x424, 0x428, 0x42c, 0x430, 0x44c, 0x47c, 0x480,
+    0x484, 0x4c4, 0x4c8, 0x4cc, 0x50c, 0x554, 0x558, 0x55c, 0x584, 0x588, 0x58c, 0x670, 0x674,
+    0x690, 0x694, 0x698, 0x69c, 0x6a0, 0x6a4, 0x6c0, 0x6c4, 0x6f0, 0x6f4, 0x960, 0x970, 0x974,
+    0xa20, 0xa24, 0xb88, 0xb8c, 0xbc4, 0xbc8, 0xbcc, 0xbd0, 0xbd4, 0xbd8, 0xbdc, 0xbe0, 0xbe4,
+    0xbe8, 0xbec, 0xc00, 0xc5c, 0xcac,
+];
+
+/// `svcReadWriteRegister` (0x4E): the only addresses the kernel accepts are the
+/// Memory Controller pages (0x70019000, 0x7001C000, 0x7001D000) at one of the
+/// documented register offsets, and, since 2.0.0, the PMC block
+/// (0x7000E400..0x7000F000), 4-byte aligned. The runtime has no MC/PMC model:
+/// device registers are modelled per block in gpu/host1x and none of those
+/// blocks exposes the controller state, so a register read or write is refused
+/// rather than answered with a made-up value. An address outside the documented
+/// registers is the kernel's invalid-address result.
+fn read_write_register(c: &mut Cpu) {
+    let addr = c.x[1];
+    let page = addr & !(PAGE - 1);
+    let offset = (addr & (PAGE - 1)) as u16;
+    let memory_controller = matches!(page, 0x7001_9000 | 0x7001_c000 | 0x7001_d000)
+        && MC_REGISTERS.binary_search(&offset).is_ok();
+    // The PMC block skips the whitelist and asks the secure monitor, which the
+    // runtime does not have either.
+    let pmc = (0x7000_e400..0x7000_f000).contains(&addr);
+    if !addr.is_multiple_of(4) || (!memory_controller && !pmc) {
+        c.x[0] = RESULT_INVALID_ADDRESS;
+        return;
+    }
+    c.process().warn_once(format!(
+        "svcReadWriteRegister({addr:#x}): the runtime has no Memory Controller model"
+    ));
+    c.x[0] = RESULT_NOT_IMPLEMENTED;
+}
+
 fn query_memory(c: &mut Cpu) {
     let (out, addr) = (c.x[0], c.x[2]);
     let r = c.process().memory.query(addr);
@@ -1113,6 +1442,46 @@ fn get_info(c: &mut Cpu) {
     };
     c.x[0] = RESULT_SUCCESS;
     c.x[1] = value;
+}
+
+/// `svcGetSystemInfo` (0x6F), the 5.0.0+ system-wide counterpart of
+/// `svcGetInfo`. X1 is the `SystemInfoType`, X2 is unused (the kernel's table
+/// says "Zero") and X3 the subtype. The runtime has one flat application pool,
+/// so every partition reports `TOTAL_MEMORY` and the live usage, and the
+/// initial process id range collapses to the only process.
+fn get_system_info(c: &mut Cpu) {
+    let (id, sub) = (c.x[1], c.x[3]);
+    let max_sub = if id == 2 { 1 } else { 3 };
+    if id > 2 || sub > max_sub {
+        c.process().warn_once(format!(
+            "svcGetSystemInfo type {id} (subtype {sub}) is not implemented"
+        ));
+        c.x[0] = RESULT_INVALID_ENUM;
+        return;
+    }
+    let p = c.process();
+    c.x[0] = RESULT_SUCCESS;
+    c.x[1] = match id {
+        0 => TOTAL_MEMORY,
+        1 => p.used_memory(),
+        _ => threads::PROCESS_ID,
+    };
+}
+
+/// `svcGetProcessInfo` (0x7C): X0 is the output pointer the wrapper keeps, X1
+/// the process handle and W2 the `ProcessInfoType`; the value comes back in W1.
+/// The runtime's only process is the caller, and it is running, so type 0
+/// (`ProcessState`) reports `ProcessState_Running` (2).
+fn get_process_info(c: &mut Cpu) {
+    if c.x[1] as u32 != CURRENT_PROCESS as u32 {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    }
+    if c.x[2] != 0 {
+        c.x[0] = RESULT_INVALID_ENUM;
+        return;
+    }
+    ok1(c, 2);
 }
 
 /// Resource-limit handle reported by `svcGetInfo(9)`.
@@ -3197,5 +3566,734 @@ mod tests {
         assert_eq!(peaks[6], RESULT_INVALID_HANDLE);
         assert_eq!(observed("limit_bad_which"), vec![RESULT_INVALID_ENUM]);
         assert_eq!(observed("limit_bad_handle"), vec![RESULT_INVALID_HANDLE]);
+    }
+
+    const PORT_MAILBOX: u64 = 0x0F10_0000;
+    const PORT_LIST: u64 = 0x0F10_1000;
+    const PORT_STACK: u64 = 0x0F11_0000;
+    const PORT_NAME: u64 = 0x0F10_0040;
+    const PORT_ENTRY: u64 = GUEST_ENTRY + 0x200;
+
+    /// The server of a named port: wait on the port, accept the connection,
+    /// take the request and reply through `ReplyAndReceive`.
+    extern "C" fn named_port_server(c: &mut Cpu) {
+        let p = c.process();
+        let raw = p.memory.read(PORT_MAILBOX, 4).unwrap_or_default();
+        let port = u32::from_le_bytes(raw.try_into().unwrap_or_default());
+        let list = c.sp - 8;
+        p.memory.write(list, &port.to_le_bytes());
+        c.x[1] = list;
+        c.x[2] = 1;
+        c.x[3] = -1i64 as u64;
+        dispatch(c, 0x18);
+        record("named_wait", &[c.x[0], c.x[1]]);
+
+        c.x[1] = port as u64;
+        dispatch(c, 0x41);
+        let server = c.x[1] as u32;
+        record("named_accept", &[c.x[0], server as u64]);
+
+        c.x[0] = server as u64;
+        dispatch(c, 0x42);
+        let tls = c.tpidrro_el0;
+        let request = p.memory.read(tls, IPC_BUFFER_SIZE).unwrap_or_default();
+        let cmd = crate::ipc::parse_hipc(&request)
+            .and_then(|m| crate::ipc::parse_cmif(&m, false))
+            .map_or(u32::MAX, |m| m.cmd);
+        record("named_server", &[c.x[0], cmd as u64]);
+
+        let response = crate::ipc::encode_cmif(0, &(cmd + 100).to_le_bytes(), &[], &[], None);
+        p.memory.write(tls, &response);
+        p.memory.write(PORT_LIST, &server.to_le_bytes());
+        c.x[1] = PORT_LIST;
+        c.x[2] = 1;
+        c.x[3] = server as u64;
+        c.x[4] = 0;
+        dispatch(c, 0x43);
+        record("named_reply", &[c.x[0]]);
+        c.x[0] = server as u64;
+        dispatch(c, 0x16);
+        c.halt();
+    }
+
+    extern "C" fn named_port_client(c: &mut Cpu) {
+        let p = c.process();
+        p.memory
+            .map_as(PORT_MAILBOX, PAGE, state::HEAP, perm::RW)
+            .expect("the port mailbox page maps");
+        p.memory
+            .map_as(PORT_LIST, PAGE, state::HEAP, perm::RW)
+            .expect("the handle list page maps");
+        p.memory
+            .map_as(PORT_STACK, PAGE, state::STACK, perm::RW)
+            .expect("the server stack maps");
+        p.memory.write(PORT_NAME, b"ws9:p1\0");
+
+        c.x[1] = PORT_NAME;
+        c.x[2] = 1;
+        dispatch(c, 0x71);
+        let port = c.x[1] as u32;
+        record("named_create", &[c.x[0], port as u64]);
+        p.memory.write(PORT_MAILBOX, &port.to_le_bytes());
+
+        c.x[1] = PORT_ENTRY;
+        c.x[2] = 0;
+        c.x[3] = PORT_STACK + PAGE;
+        c.x[4] = 44;
+        c.x[5] = 0;
+        dispatch(c, 0x08);
+        let thread = c.x[1] as u32;
+        c.x[0] = thread as u64;
+        dispatch(c, 0x09);
+        record("named_start", &[c.x[0]]);
+
+        c.x[1] = PORT_NAME;
+        dispatch(c, 0x1f);
+        let client = c.x[1] as u32;
+        record("named_connect", &[c.x[0], client as u64]);
+
+        // The port accepts one connection, so the second is refused.
+        c.x[1] = PORT_NAME;
+        dispatch(c, 0x1f);
+        record("named_limit", &[c.x[0]]);
+
+        let request = crate::ipc::client::cmif(crate::ipc::TYPE_REQUEST, 5, &[], None, false, &[]);
+        p.memory.write(c.tpidrro_el0, &request);
+        c.x[0] = client as u64;
+        dispatch(c, 0x21);
+        let response = p
+            .memory
+            .read(c.tpidrro_el0, IPC_BUFFER_SIZE)
+            .unwrap_or_default();
+        let (reply_result, value) = reply_summary(&response);
+        record("named_client", &[c.x[0], reply_result as u64, value as u64]);
+
+        c.x[0] = client as u64;
+        dispatch(c, 0x16);
+        // Closing the port frees the name: `sm:` keeps answering, but the
+        // guest name is gone.
+        c.x[0] = port as u64;
+        dispatch(c, 0x16);
+        record("named_close", &[c.x[0]]);
+        c.x[1] = PORT_NAME;
+        dispatch(c, 0x1f);
+        record("named_gone", &[c.x[0]]);
+        c.halt();
+    }
+
+    #[test]
+    fn a_named_port_connects_accepts_and_limits_connections() {
+        run_entries(
+            vec![
+                Entry {
+                    addr: GUEST_ENTRY,
+                    func: named_port_client,
+                },
+                Entry {
+                    addr: PORT_ENTRY,
+                    func: named_port_server,
+                },
+            ],
+            0,
+        );
+        let create = observed("named_create");
+        assert_eq!(create[0], RESULT_SUCCESS);
+        assert_ne!(
+            create[1], 0,
+            "ManageNamedPort returns the server port in W1"
+        );
+        assert_eq!(observed("named_start"), vec![RESULT_SUCCESS]);
+        assert_eq!(
+            observed("named_wait"),
+            vec![RESULT_SUCCESS, 0],
+            "a connection signals the waiting server port"
+        );
+        let accept = observed("named_accept");
+        assert_eq!(accept[0], RESULT_SUCCESS);
+        assert_ne!(accept[1], 0, "accepting makes a server session handle");
+        assert_eq!(
+            observed("named_server"),
+            vec![RESULT_SUCCESS, 5],
+            "the server receives the client's request"
+        );
+        assert_eq!(observed("named_reply"), vec![RESULT_TIMED_OUT]);
+        let connect = observed("named_connect");
+        assert_eq!(connect[0], RESULT_SUCCESS);
+        assert_ne!(connect[1], 0, "ConnectToNamedPort returns a session in W1");
+        assert_eq!(
+            observed("named_limit"),
+            vec![RESULT_LIMIT_REACHED],
+            "max_sessions is the port's connection ceiling"
+        );
+        assert_eq!(
+            observed("named_client"),
+            vec![RESULT_SUCCESS, RESULT_SUCCESS, 105],
+            "the named client blocks until the server replies"
+        );
+        assert_eq!(observed("named_close"), vec![RESULT_SUCCESS]);
+        assert_eq!(
+            observed("named_gone"),
+            vec![RESULT_NOT_FOUND],
+            "closing the port releases its name"
+        );
+    }
+
+    /// A server that waits on a port which the other thread then closes.
+    extern "C" fn closing_port_server(c: &mut Cpu) {
+        let p = c.process();
+        let raw = p.memory.read(PORT_MAILBOX, 4).unwrap_or_default();
+        let port = u32::from_le_bytes(raw.try_into().unwrap_or_default());
+        let list = c.sp - 8;
+        p.memory.write(list, &port.to_le_bytes());
+        c.x[1] = list;
+        c.x[2] = 1;
+        // A timeout keeps a missing wake from hanging the run: it would report
+        // 0xea01 instead of the closed-port 0xf601.
+        c.x[3] = 2_000_000_000;
+        dispatch(c, 0x18);
+        record("closed_wait", &[c.x[0], c.x[1]]);
+        c.halt();
+    }
+
+    extern "C" fn closing_port_client(c: &mut Cpu) {
+        let p = c.process();
+        p.memory
+            .map_as(PORT_MAILBOX, PAGE, state::HEAP, perm::RW)
+            .expect("the port mailbox page maps");
+        p.memory
+            .map_as(PORT_STACK, PAGE, state::STACK, perm::RW)
+            .expect("the server stack maps");
+        p.memory.write(PORT_NAME, b"ws9:closep\0");
+
+        c.x[1] = PORT_NAME;
+        c.x[2] = 4;
+        dispatch(c, 0x71);
+        let port = c.x[1] as u32;
+        record("closed_create", &[c.x[0], port as u64]);
+        p.memory.write(PORT_MAILBOX, &port.to_le_bytes());
+
+        c.x[1] = PORT_ENTRY;
+        c.x[2] = 0;
+        c.x[3] = PORT_STACK + PAGE;
+        c.x[4] = 44;
+        c.x[5] = 0;
+        dispatch(c, 0x08);
+        let thread = c.x[1] as u32;
+        c.x[0] = thread as u64;
+        dispatch(c, 0x09);
+
+        // Sleep off the CPU so the server reaches the wait, then close the port
+        // it is waiting on.
+        c.x[0] = 20_000_000;
+        dispatch(c, 0x0b);
+        c.x[0] = port as u64;
+        dispatch(c, 0x16);
+        record("closed_close", &[c.x[0]]);
+        c.halt();
+    }
+
+    #[test]
+    fn closing_a_port_releases_its_waiter() {
+        run_entries(
+            vec![
+                Entry {
+                    addr: GUEST_ENTRY,
+                    func: closing_port_client,
+                },
+                Entry {
+                    addr: PORT_ENTRY,
+                    func: closing_port_server,
+                },
+            ],
+            0,
+        );
+        let create = observed("closed_create");
+        assert_eq!(create[0], RESULT_SUCCESS);
+        assert_eq!(observed("closed_close"), vec![RESULT_SUCCESS]);
+        assert_eq!(
+            observed("closed_wait")[0],
+            RESULT_REMOTE_DEAD,
+            "closing the port wakes the waiting server with 0xf601"
+        );
+    }
+
+    extern "C" fn client_port_sessions(c: &mut Cpu) {
+        let p = c.process();
+        let mut errors = Vec::new();
+        for (max, light) in [(-2i64, 0u64), (0x40, 0), (2, 2)] {
+            c.x[2] = max as u64;
+            c.x[3] = light;
+            c.x[4] = 0;
+            dispatch(c, 0x70);
+            errors.push(c.x[0]);
+        }
+        record("cp_create_errors", &errors);
+
+        c.x[2] = 2;
+        c.x[3] = 0;
+        c.x[4] = 0x1234;
+        dispatch(c, 0x70);
+        let server = c.x[1] as u32;
+        let client_port = c.x[2] as u32;
+        record("cp_create", &[c.x[0], server as u64, client_port as u64]);
+
+        c.x[1] = server as u64;
+        dispatch(c, 0x72);
+        record("cp_server_as_client", &[c.x[0]]);
+        c.x[1] = 0xdead;
+        dispatch(c, 0x72);
+        record("cp_unknown", &[c.x[0]]);
+
+        let mut connects = Vec::new();
+        for _ in 0..2 {
+            c.x[1] = client_port as u64;
+            dispatch(c, 0x72);
+            connects.push(c.x[0]);
+            connects.push(c.x[1]);
+        }
+        record("cp_connect", &connects);
+        c.x[1] = client_port as u64;
+        dispatch(c, 0x72);
+        record("cp_limit", &[c.x[0]]);
+
+        let mut accepts = Vec::new();
+        for _ in 0..2 {
+            c.x[1] = server as u64;
+            dispatch(c, 0x41);
+            accepts.push(c.x[0]);
+            accepts.push(c.x[1]);
+        }
+        record("cp_accept", &accepts);
+        c.x[1] = server as u64;
+        dispatch(c, 0x41);
+        record("cp_accept_empty", &[c.x[0]]);
+
+        // Both ends of a connection live on one rendezvous.
+        let paired = {
+            let table = p.handles.lock().unwrap();
+            let c = table
+                .session(connects[1] as u32)
+                .and_then(|s| s.guest_client_link());
+            let s = table
+                .session(accepts[1] as u32)
+                .and_then(|s| s.guest_server_link());
+            matches!((c, s), (Some(c), Some(s)) if Arc::ptr_eq(&c, &s))
+        };
+        record("cp_pair", &[paired as u64]);
+
+        c.x[0] = server as u64;
+        dispatch(c, 0x16);
+        c.x[1] = client_port as u64;
+        dispatch(c, 0x72);
+        record("cp_closed", &[c.x[0]]);
+        c.halt();
+    }
+
+    #[test]
+    fn a_client_port_connects_the_documented_number_of_sessions() {
+        run_guest(client_port_sessions);
+        assert_eq!(
+            observed("cp_create_errors"),
+            vec![
+                RESULT_INVALID_ENUM,
+                RESULT_INVALID_ENUM,
+                RESULT_INVALID_ENUM
+            ],
+            "max_sessions is -1 or 0..=0x3f and is_light is a bool"
+        );
+        let create = observed("cp_create");
+        assert_eq!(create[0], RESULT_SUCCESS);
+        assert_ne!(create[1], 0, "the server port is returned in W1");
+        assert_ne!(create[2], 0, "the client port is returned in W2");
+        assert_eq!(observed("cp_server_as_client"), vec![RESULT_INVALID_HANDLE]);
+        assert_eq!(observed("cp_unknown"), vec![RESULT_INVALID_HANDLE]);
+        let connects = observed("cp_connect");
+        assert_eq!(
+            connects,
+            vec![RESULT_SUCCESS, connects[1], RESULT_SUCCESS, connects[3]]
+        );
+        assert_ne!(connects[1], 0);
+        assert_ne!(connects[3], 0);
+        assert_ne!(
+            connects[1], connects[3],
+            "each connection is its own session"
+        );
+        assert_eq!(
+            observed("cp_limit"),
+            vec![RESULT_LIMIT_REACHED],
+            "the port's max_sessions is reached"
+        );
+        let accepts = observed("cp_accept");
+        assert_eq!(accepts[0], RESULT_SUCCESS);
+        assert_eq!(accepts[2], RESULT_SUCCESS);
+        assert_ne!(accepts[1], 0);
+        assert_ne!(accepts[3], 0);
+        assert_eq!(observed("cp_accept_empty"), vec![RESULT_NOT_FOUND]);
+        assert_eq!(
+            observed("cp_pair"),
+            vec![1],
+            "the client and server handles share one session pair"
+        );
+        assert_eq!(
+            observed("cp_closed"),
+            vec![RESULT_NOT_FOUND],
+            "a closed port cannot connect"
+        );
+    }
+
+    const SHM_A: u64 = 0x0F40_0000;
+    const SHM_B: u64 = 0x0F40_1000;
+
+    extern "C" fn shared_memory_blocks(c: &mut Cpu) {
+        let p = c.process();
+        let mut errors = Vec::new();
+        for (size, owner, remote) in [
+            (0u64, perm::RW as u64, perm::RW as u64),
+            (PAGE + 1, perm::RW as u64, perm::RW as u64),
+            (PAGE, perm::RX as u64, perm::R as u64),
+            (PAGE, perm::RW as u64, perm::RX as u64),
+        ] {
+            c.x[1] = size;
+            c.x[2] = owner;
+            c.x[3] = remote;
+            dispatch(c, 0x50);
+            errors.push(c.x[0]);
+        }
+        record("shm_create_errors", &errors);
+
+        c.x[1] = PAGE;
+        c.x[2] = perm::RW as u64;
+        c.x[3] = perm::R as u64;
+        dispatch(c, 0x50);
+        let owner = c.x[1] as u32;
+        record("shm_create", &[c.x[0], owner as u64]);
+
+        // The creator maps with its own permission, the block's size, a page
+        // aligned address, and only once.
+        let mut owner_errors = Vec::new();
+        for (addr, size, map_perm) in [
+            (SHM_A, PAGE, perm::R as u64),
+            (SHM_A, PAGE * 2, perm::RW as u64),
+            (SHM_A + 1, PAGE, perm::RW as u64),
+            (SHM_A, PAGE, perm::RX as u64),
+        ] {
+            c.x[0] = owner as u64;
+            c.x[1] = addr;
+            c.x[2] = size;
+            c.x[3] = map_perm;
+            dispatch(c, 0x13);
+            owner_errors.push(c.x[0]);
+        }
+        record("shm_owner_errors", &owner_errors);
+
+        c.x[0] = owner as u64;
+        c.x[1] = SHM_A;
+        c.x[2] = PAGE;
+        c.x[3] = perm::RW as u64;
+        dispatch(c, 0x13);
+        let mapped = c.x[0];
+        p.memory.write(SHM_A, b"shared");
+        c.x[0] = owner as u64;
+        c.x[1] = SHM_A;
+        c.x[2] = PAGE;
+        c.x[3] = perm::RW as u64;
+        dispatch(c, 0x13);
+        let twice = c.x[0];
+        c.x[0] = owner as u64;
+        c.x[1] = SHM_A;
+        c.x[2] = PAGE * 2;
+        dispatch(c, 0x14);
+        let bad_size = c.x[0];
+        c.x[0] = owner as u64;
+        c.x[1] = SHM_A;
+        c.x[2] = PAGE;
+        dispatch(c, 0x14);
+        let unmapped = c.x[0];
+        let gone = !p.memory.is_mapped(SHM_A, 1);
+
+        // A borrower's handle is what a handle copy from another process
+        // inserts; the same block then maps with the remote permission.
+        let block = p
+            .handles
+            .lock()
+            .unwrap()
+            .shared_memory(owner)
+            .map(|(m, _)| m)
+            .expect("the owner handle is a shared memory block");
+        let borrower = p
+            .handles
+            .lock()
+            .unwrap()
+            .insert_shared_memory(block, SharedMemoryRole::Borrower);
+        c.x[0] = borrower as u64;
+        c.x[1] = SHM_A;
+        c.x[2] = PAGE;
+        c.x[3] = perm::RW as u64;
+        dispatch(c, 0x13);
+        let borrower_rw = c.x[0];
+        c.x[0] = borrower as u64;
+        c.x[1] = SHM_A;
+        c.x[2] = PAGE;
+        c.x[3] = perm::R as u64;
+        dispatch(c, 0x13);
+        let borrower_r = c.x[0];
+        let contents = p.memory.read(SHM_A, 6).unwrap_or_default();
+        c.x[0] = borrower as u64;
+        c.x[1] = SHM_A;
+        c.x[2] = PAGE;
+        dispatch(c, 0x14);
+        let unmapped_borrower = c.x[0];
+
+        // The block keeps the contents for the next mapping.
+        c.x[0] = owner as u64;
+        c.x[1] = SHM_B;
+        c.x[2] = PAGE;
+        c.x[3] = perm::RW as u64;
+        dispatch(c, 0x13);
+        let remapped = c.x[0];
+        let kept = p.memory.read(SHM_B, 6).unwrap_or_default();
+        c.x[0] = owner as u64;
+        c.x[1] = SHM_B;
+        c.x[2] = PAGE;
+        dispatch(c, 0x14);
+
+        // MemoryPermission_DontCare lets the borrower choose.
+        c.x[1] = PAGE;
+        c.x[2] = perm::RW as u64;
+        c.x[3] = crate::kernel::MEMORY_PERMISSION_DONT_CARE as u64;
+        dispatch(c, 0x50);
+        let flexible = c.x[1] as u32;
+        let block = p
+            .handles
+            .lock()
+            .unwrap()
+            .shared_memory(flexible)
+            .map(|(m, _)| m)
+            .expect("the second block is a shared memory object");
+        let flexible_borrower = p
+            .handles
+            .lock()
+            .unwrap()
+            .insert_shared_memory(block, SharedMemoryRole::Borrower);
+        c.x[0] = flexible_borrower as u64;
+        c.x[1] = SHM_B;
+        c.x[2] = PAGE;
+        c.x[3] = perm::NONE as u64;
+        dispatch(c, 0x13);
+        let dont_care = c.x[0];
+        c.x[0] = flexible_borrower as u64;
+        c.x[1] = SHM_B;
+        c.x[2] = PAGE;
+        dispatch(c, 0x14);
+
+        c.x[0] = 0xdead;
+        c.x[1] = SHM_B;
+        c.x[2] = PAGE;
+        c.x[3] = perm::R as u64;
+        dispatch(c, 0x13);
+        let bad_handle = c.x[0];
+
+        record(
+            "shm",
+            &[
+                mapped,
+                twice,
+                bad_size,
+                unmapped,
+                gone as u64,
+                borrower_rw,
+                borrower_r,
+                unmapped_borrower,
+                remapped,
+                dont_care,
+                bad_handle,
+            ],
+        );
+        record("shm_contents", &[eight(&contents), eight(&kept)]);
+        c.halt();
+    }
+
+    #[test]
+    fn shared_memory_checks_creator_and_borrower_permissions() {
+        run_guest(shared_memory_blocks);
+        assert_eq!(
+            observed("shm_create_errors"),
+            vec![
+                RESULT_INVALID_SIZE,
+                RESULT_INVALID_SIZE,
+                RESULT_INVALID_NEW_MEMORY_PERMISSION,
+                RESULT_INVALID_NEW_MEMORY_PERMISSION,
+            ]
+        );
+        let create = observed("shm_create");
+        assert_eq!(create[0], RESULT_SUCCESS);
+        assert_ne!(create[1], 0, "the block handle is returned in X1");
+        assert_eq!(
+            observed("shm_owner_errors"),
+            vec![
+                RESULT_INVALID_NEW_MEMORY_PERMISSION,
+                RESULT_INVALID_SIZE,
+                RESULT_INVALID_ADDRESS,
+                RESULT_INVALID_NEW_MEMORY_PERMISSION,
+            ]
+        );
+        let shm = observed("shm");
+        assert_eq!(shm[0], RESULT_SUCCESS);
+        assert_eq!(shm[1], RESULT_INVALID_MEMORY_STATE, "one mapping at a time");
+        assert_eq!(shm[2], RESULT_INVALID_SIZE);
+        assert_eq!(shm[3], RESULT_SUCCESS);
+        assert_eq!(shm[4], 1, "unmapping releases the pages");
+        assert_eq!(
+            shm[5], RESULT_INVALID_NEW_MEMORY_PERMISSION,
+            "a borrower maps with the remote permission"
+        );
+        assert_eq!(shm[6], RESULT_SUCCESS);
+        assert_eq!(shm[7], RESULT_SUCCESS);
+        assert_eq!(
+            shm[8], RESULT_SUCCESS,
+            "the owner can map the block again at another address"
+        );
+        assert_eq!(
+            shm[9], RESULT_SUCCESS,
+            "MemoryPermission_DontCare accepts any valid permission"
+        );
+        assert_eq!(shm[10], RESULT_INVALID_HANDLE);
+        let contents = observed("shm_contents");
+        assert_eq!(contents[0], eight(b"shared"), "the block maps its contents");
+        assert_eq!(
+            contents[1],
+            eight(b"shared"),
+            "and keeps them across mappings"
+        );
+    }
+
+    const INFO_PAGE: u64 = 0x0F50_0000;
+
+    extern "C" fn system_reports(c: &mut Cpu) {
+        let p = c.process();
+        p.memory
+            .map_as(INFO_PAGE, PAGE, state::HEAP, perm::RW)
+            .expect("the info page maps");
+        let used = p.used_memory();
+        let mut info = Vec::new();
+        for (id, sub) in [(0u64, 0u64), (0, 1), (0, 3), (1, 0), (2, 0), (2, 1)] {
+            c.x[1] = id;
+            c.x[2] = 0;
+            c.x[3] = sub;
+            dispatch(c, 0x6f);
+            info.push(c.x[0]);
+            info.push(c.x[1]);
+        }
+        record("sys_info", &info);
+        record("sys_used", &[used]);
+
+        let mut errors = Vec::new();
+        for (id, sub) in [(3u64, 0u64), (0, 4), (2, 2)] {
+            c.x[1] = id;
+            c.x[3] = sub;
+            dispatch(c, 0x6f);
+            errors.push(c.x[0]);
+        }
+        record("sys_info_errors", &errors);
+
+        c.x[0] = 0; // the wrapper's output pointer; the kernel ignores it
+        c.x[1] = CURRENT_PROCESS;
+        c.x[2] = 0;
+        dispatch(c, 0x7c);
+        let (state_result, state) = (c.x[0], c.x[1]);
+        c.x[0] = 0;
+        c.x[1] = CURRENT_PROCESS;
+        c.x[2] = 1;
+        dispatch(c, 0x7c);
+        let bad_type = c.x[0];
+        c.x[0] = 0;
+        c.x[1] = 0xdead;
+        c.x[2] = 0;
+        dispatch(c, 0x7c);
+        record("process_info", &[state_result, state, bad_type, c.x[0]]);
+
+        c.x[1] = INFO_PAGE + 0x34;
+        dispatch(c, 0x54);
+        record("phys_query", &[c.x[0], c.x[1], c.x[2], c.x[3]]);
+        c.x[1] = INFO_PAGE + PAGE;
+        dispatch(c, 0x54);
+        record("phys_unmapped", &[c.x[0]]);
+
+        let mut registers = Vec::new();
+        for addr in [
+            0x7001_9054u64,
+            0x7001_9052,
+            0x7001_9010,
+            0x7000_e400,
+            0x1234_5678,
+        ] {
+            c.x[1] = addr;
+            c.x[2] = 0;
+            c.x[3] = 0;
+            dispatch(c, 0x4e);
+            registers.push(c.x[0]);
+        }
+        record("registers", &registers);
+        c.halt();
+    }
+
+    #[test]
+    fn system_info_process_info_and_physical_queries() {
+        run_guest(system_reports);
+        let info = observed("sys_info");
+        let used = observed("sys_used")[0];
+        assert_eq!(
+            &info[..],
+            &[
+                RESULT_SUCCESS,
+                TOTAL_MEMORY,
+                RESULT_SUCCESS,
+                TOTAL_MEMORY,
+                RESULT_SUCCESS,
+                TOTAL_MEMORY,
+                RESULT_SUCCESS,
+                used,
+                RESULT_SUCCESS,
+                threads::PROCESS_ID,
+                RESULT_SUCCESS,
+                threads::PROCESS_ID,
+            ],
+            "one pool reports its size and usage; the id range collapses"
+        );
+        assert_eq!(
+            observed("sys_info_errors"),
+            vec![
+                RESULT_INVALID_ENUM,
+                RESULT_INVALID_ENUM,
+                RESULT_INVALID_ENUM
+            ]
+        );
+        assert_eq!(
+            observed("process_info"),
+            vec![
+                RESULT_SUCCESS,
+                2,
+                RESULT_INVALID_ENUM,
+                RESULT_INVALID_HANDLE
+            ],
+            "the process is in ProcessState_Running"
+        );
+        assert_eq!(
+            observed("phys_query"),
+            vec![RESULT_SUCCESS, INFO_PAGE, INFO_PAGE, PAGE],
+            "the physical address is the guest address in the flat model"
+        );
+        assert_eq!(observed("phys_unmapped"), vec![RESULT_INVALID_ADDRESS]);
+        assert_eq!(
+            observed("registers"),
+            vec![
+                RESULT_NOT_IMPLEMENTED,
+                RESULT_INVALID_ADDRESS,
+                RESULT_INVALID_ADDRESS,
+                RESULT_NOT_IMPLEMENTED,
+                RESULT_INVALID_ADDRESS,
+            ],
+            "MC/PMC registers are unmodelled; anything else is an invalid address"
+        );
     }
 }

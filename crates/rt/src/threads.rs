@@ -329,23 +329,36 @@ fn wait_for_objects(c: &mut Cpu) {
         if me.cancelled.swap(false, Ordering::Relaxed) {
             return Some(Err(RESULT_CANCELLED));
         }
-        objects
+        let signaled = objects.iter().position(|o| match o {
+            KObject::Event(e) => e.signaled.load(Ordering::Relaxed),
+            KObject::Thread(t) => t.exited.load(Ordering::Relaxed),
+            // A port is signalled while a connection waits to be accepted.
+            KObject::Port(p) => p.pending() > 0,
+            // A client port is signalled while the server port can accept a
+            // connection.
+            KObject::ClientPort(p) => p.can_connect(),
+            // A server session is signalled by a request or a closed peer.
+            KObject::Session(s) => s
+                .guest_server_link()
+                .is_some_and(|l| l.has_request() || !l.client_open()),
+            KObject::TransferMemory(_)
+            | KObject::CodeMemory(_)
+            | KObject::SharedMemory(_)
+            | KObject::ResourceLimit(_) => false,
+        });
+        if signaled.is_some() {
+            return signaled.map(Ok);
+        }
+        // A port that was closed cannot produce another connection, so a
+        // server waiting on it is released instead of parking forever. This is
+        // the `0xf601` of a session whose peer is gone, applied to the port.
+        if objects
             .iter()
-            .position(|o| match o {
-                KObject::Event(e) => e.signaled.load(Ordering::Relaxed),
-                KObject::Thread(t) => t.exited.load(Ordering::Relaxed),
-                // A port is signalled while a connection waits to be accepted.
-                KObject::Port(p) => p.pending() > 0,
-                // A server session is signalled by a request or a closed peer.
-                KObject::Session(s) => s
-                    .guest_server_link()
-                    .is_some_and(|l| l.has_request() || !l.client_open()),
-                KObject::TransferMemory(_)
-                | KObject::CodeMemory(_)
-                | KObject::SharedMemory(_)
-                | KObject::ResourceLimit(_) => false,
-            })
-            .map(Ok)
+            .any(|o| matches!(o, KObject::Port(p) if p.closed()))
+        {
+            return Some(Err(crate::horizon::RESULT_REMOTE_DEAD));
+        }
+        None
     });
     match result {
         Some(Ok(i)) => ok1(c, i as u64),
