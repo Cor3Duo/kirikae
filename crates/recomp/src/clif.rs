@@ -1,13 +1,15 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use cranelift_codegen::Context;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-use cranelift_codegen::ir::{self, types, AbiParam, BlockArg, InstBuilder, MemFlagsData, Signature, UserFuncName, Value};
+use cranelift_codegen::ir::{
+    self, AbiParam, BlockArg, InstBuilder, MemFlagsData, Signature, UserFuncName, Value, types,
+};
 use cranelift_codegen::isa::OwnedTargetIsa;
 use cranelift_codegen::settings::{self, Configurable};
-use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Switch, Variable};
 use cranelift_module::{DataDescription, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
@@ -16,7 +18,18 @@ use kirikae_rt::abi;
 use kirikae_rt::mem::ADDR_MASK;
 
 fn fp_double(op: Op) -> bool {
-    matches!(op, Op::FAdd64 | Op::FSub64 | Op::FMul64 | Op::FDiv64 | Op::FMax64 | Op::FMin64 | Op::FSqrt64 | Op::FMulAdd64 | Op::FCmp64)
+    matches!(
+        op,
+        Op::FAdd64
+            | Op::FSub64
+            | Op::FMul64
+            | Op::FDiv64
+            | Op::FMax64
+            | Op::FMin64
+            | Op::FSqrt64
+            | Op::FMulAdd64
+            | Op::FCmp64
+    )
 }
 
 fn fp_inputs(op: Op) -> usize {
@@ -27,7 +40,13 @@ fn fp_inputs(op: Op) -> usize {
     }
 }
 
-use crate::discover::{build_function, CodeSpace, Function};
+/// Lane widths the vector arithmetic below can fold: they divide the 64-bit halves of a
+/// register, so no lane crosses a half boundary.
+fn lane_width(esize: u64) -> bool {
+    esize != 0 && esize <= 64 && 64 % esize == 0
+}
+
+use crate::discover::{CodeSpace, Function, build_function};
 
 const I64: ir::Type = types::I64;
 const I32: ir::Type = types::I32;
@@ -42,12 +61,26 @@ fn object_isa() -> Result<OwnedTargetIsa, String> {
 
 fn native_isa(pic: bool) -> Result<OwnedTargetIsa, String> {
     let mut flags = settings::builder();
-    let set = |f: &mut settings::Builder, k: &str, v: &str| f.set(k, v).map_err(|e| format!("cranelift setting {k}: {e}"));
+    let set = |f: &mut settings::Builder, k: &str, v: &str| {
+        f.set(k, v)
+            .map_err(|e| format!("cranelift setting {k}: {e}"))
+    };
     set(&mut flags, "opt_level", "speed")?;
-    set(&mut flags, "enable_verifier", if cfg!(debug_assertions) { "true" } else { "false" })?;
+    set(
+        &mut flags,
+        "enable_verifier",
+        if cfg!(debug_assertions) {
+            "true"
+        } else {
+            "false"
+        },
+    )?;
     set(&mut flags, "is_pic", if pic { "true" } else { "false" })?;
-    let builder = cranelift_native::builder().map_err(|e| format!("host not supported by Cranelift: {e}"))?;
-    builder.finish(settings::Flags::new(flags)).map_err(|e| e.to_string())
+    let builder =
+        cranelift_native::builder().map_err(|e| format!("host not supported by Cranelift: {e}"))?;
+    builder
+        .finish(settings::Flags::new(flags))
+        .map_err(|e| e.to_string())
 }
 
 pub fn symbol(addr: u64) -> String {
@@ -106,9 +139,16 @@ impl<M: Module> Compiler<M> {
             s.returns.extend(ret.map(AbiParam::new));
             s
         }
-        fn declare<M: Module>(module: &mut M, name: &str, params: &[ir::Type], ret: Option<ir::Type>) -> Result<FuncId, String> {
+        fn declare<M: Module>(
+            module: &mut M,
+            name: &str,
+            params: &[ir::Type],
+            ret: Option<ir::Type>,
+        ) -> Result<FuncId, String> {
             let s = sig(module, params, ret);
-            module.declare_function(name, Linkage::Import, &s).map_err(|e| e.to_string())
+            module
+                .declare_function(name, Linkage::Import, &s)
+                .map_err(|e| e.to_string())
         }
         let m = &mut module;
         let helpers = HelperIds {
@@ -120,11 +160,24 @@ impl<M: Module> Compiler<M> {
             set_sysreg: declare(m, "kirikae_set_sysreg", &[ptr, I32, I64], None)?,
             op: declare(m, "kirikae_op", &[I32, I64, I64, I64, I64, I64], Some(I64))?,
             simd: declare(m, "kirikae_simd", &[ptr, I32], None)?,
-            store_exclusive: declare(m, "kirikae_store_exclusive", &[ptr, I32, I64, I64, I64], Some(I64))?,
+            store_exclusive: declare(
+                m,
+                "kirikae_store_exclusive",
+                &[ptr, I32, I64, I64, I64],
+                Some(I64),
+            )?,
         };
         let guest_sig = sig(&module, &[ptr], None);
         let ctx = module.make_context();
-        Ok(Compiler { module, helpers, guest_sig, funcs: HashMap::new(), ctx, fctx: FunctionBuilderContext::new(), fast_regs: false })
+        Ok(Compiler {
+            module,
+            helpers,
+            guest_sig,
+            funcs: HashMap::new(),
+            ctx,
+            fctx: FunctionBuilderContext::new(),
+            fast_regs: false,
+        })
     }
 
     pub fn set_fast_regs(&mut self, on: bool) {
@@ -137,12 +190,23 @@ impl<M: Module> Compiler<M> {
         {
             return Ok(*id);
         }
-        let id = self.module.declare_function(&symbol(addr), linkage, &self.guest_sig).map_err(|e| e.to_string())?;
+        let id = self
+            .module
+            .declare_function(&symbol(addr), linkage, &self.guest_sig)
+            .map_err(|e| e.to_string())?;
         self.funcs.insert(addr, id);
         Ok(id)
     }
 
-    pub fn compile(&mut self, f: &Function, entries: &BTreeSet<u64>) -> Result<FuncId, String> {
+    /// Compile one guest function into this object. `in_scope` tells whether a call target
+    /// can be a link-time import: everything in a single-module build, only this object's own
+    /// functions when the objects are linked into separate DLLs (see [`Calls`]).
+    pub fn compile(
+        &mut self,
+        f: &Function,
+        entries: &BTreeSet<u64>,
+        in_scope: &dyn Fn(u64) -> bool,
+    ) -> Result<FuncId, String> {
         let id = self.guest(f.entry, Linkage::Export)?;
         let mut callees = BTreeSet::new();
         for b in &f.blocks {
@@ -155,7 +219,10 @@ impl<M: Module> Compiler<M> {
             }
         }
         let mut callee_ids = Vec::new();
-        for t in callees.into_iter().filter(|t| entries.contains(t) && !f.has_block(*t)) {
+        for t in callees
+            .into_iter()
+            .filter(|t| entries.contains(t) && in_scope(*t) && !f.has_block(*t))
+        {
             callee_ids.push((t, self.guest(t, Linkage::Import)?));
         }
 
@@ -176,12 +243,18 @@ impl<M: Module> Compiler<M> {
                 simd: m.declare_func_in_func(h.simd, b.func),
                 store_exclusive: m.declare_func_in_func(h.store_exclusive, b.func),
             };
-            let callees: HashMap<u64, ir::FuncRef> = callee_ids.iter().map(|(a, id)| (*a, m.declare_func_in_func(*id, b.func))).collect();
+            let callees: HashMap<u64, ir::FuncRef> = callee_ids
+                .iter()
+                .map(|(a, id)| (*a, m.declare_func_in_func(*id, b.func)))
+                .collect();
             Lower::function(&mut b, f, entries, helpers, callees, self.fast_regs);
             b.seal_all_blocks();
             b.finalize(self.module.target_config());
         }
-        let result = self.module.define_function(id, &mut self.ctx).map_err(|e| format!("function {:#x}: {e:?}", f.entry));
+        let result = self
+            .module
+            .define_function(id, &mut self.ctx)
+            .map_err(|e| format!("function {:#x}: {e:?}", f.entry));
         self.module.clear_context(&mut self.ctx);
         result.map(|_| id)
     }
@@ -217,7 +290,11 @@ fn v_slot(reg: u8, hi: bool) -> u32 {
 }
 
 fn slot_offset(s: u32) -> usize {
-    if s == NZCV_SLOT { abi::OFF_NZCV } else { abi::OFF_X + 8 * s as usize }
+    if s == NZCV_SLOT {
+        abi::OFF_NZCV
+    } else {
+        abi::OFF_X + 8 * s as usize
+    }
 }
 
 fn slots(set: Regs) -> impl Iterator<Item = u32> {
@@ -294,7 +371,16 @@ impl kirikae_a64::simd::Env for WriteRecorder {
 
 fn simd_writes(word: u32) -> Regs {
     let mut writes = 0;
-    for seed in [0, u64::MAX, 1, 0x8000_0000_0000_0000, 0x1234_5678_9abc_def0, 0x0f0f_f0f0_3c3c_c3c3, 7, 0xdead_beef] {
+    for seed in [
+        0,
+        u64::MAX,
+        1,
+        0x8000_0000_0000_0000,
+        0x1234_5678_9abc_def0,
+        0x0f0f_f0f0_3c3c_c3c3,
+        7,
+        0xdead_beef,
+    ] {
         let mut r = WriteRecorder { seed, writes: 0 };
         kirikae_a64::simd::exec(&mut r, word);
         writes |= r.writes;
@@ -343,7 +429,13 @@ fn insn_events(insn: &Insn, out: &mut Vec<Event>) {
                 expr_events(lo, out);
                 expr_events(hi, out);
             }
-            Stmt::StoreExclusive { addr, lo, hi, status, .. } => {
+            Stmt::StoreExclusive {
+                addr,
+                lo,
+                hi,
+                status,
+                ..
+            } => {
                 expr_events(addr, out);
                 expr_events(lo, out);
                 expr_events(hi, out);
@@ -380,7 +472,12 @@ fn apply(mut st: RegState, ev: Event) -> RegState {
             st.dirty |= 1 << s;
         }
         Event::Sync => st = RegState::default(),
-        Event::Simd(w) => st = RegState { valid: st.valid & !w, dirty: 0 },
+        Event::Simd(w) => {
+            st = RegState {
+                valid: st.valid & !w,
+                dirty: 0,
+            }
+        }
     }
     st
 }
@@ -400,7 +497,12 @@ fn successors(f: &Function, g: &crate::discover::Block) -> Vec<u64> {
 
 fn plan_registers(f: &Function) -> HashMap<u64, RegState> {
     let n = f.blocks.len();
-    let index: HashMap<u64, usize> = f.blocks.iter().enumerate().map(|(i, g)| (g.start, i)).collect();
+    let index: HashMap<u64, usize> = f
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.start, i))
+        .collect();
     let events: Vec<Vec<Event>> = f
         .blocks
         .iter()
@@ -412,7 +514,11 @@ fn plan_registers(f: &Function) -> HashMap<u64, RegState> {
             ev
         })
         .collect();
-    let succ: Vec<Vec<usize>> = f.blocks.iter().map(|g| successors(f, g).iter().map(|t| index[t]).collect()).collect();
+    let succ: Vec<Vec<usize>> = f
+        .blocks
+        .iter()
+        .map(|g| successors(f, g).iter().map(|t| index[t]).collect())
+        .collect();
     let mut preds = vec![Vec::new(); n];
     for (i, s) in succ.iter().enumerate() {
         for &t in s {
@@ -446,14 +552,29 @@ fn plan_registers(f: &Function) -> HashMap<u64, RegState> {
     const ALL: Regs = (1 << SLOTS) - 1;
     let first = index[&f.entry];
     let mut entry = vec![RegState::default(); n];
-    let mut exit = vec![RegState { valid: ALL, dirty: 0 }; n];
+    let mut exit = vec![
+        RegState {
+            valid: ALL,
+            dirty: 0
+        };
+        n
+    ];
     loop {
         let mut changed = false;
         for i in 0..n {
-            let start = if i == first || preds[i].is_empty() { 0 } else { ALL };
-            let (valid, dirty) = preds[i].iter().fold((start, 0), |(v, d), &p| (v & exit[p].valid, d | exit[p].dirty));
+            let start = if i == first || preds[i].is_empty() {
+                0
+            } else {
+                ALL
+            };
+            let (valid, dirty) = preds[i].iter().fold((start, 0), |(v, d), &p| {
+                (v & exit[p].valid, d | exit[p].dirty)
+            });
             let valid = valid & live[i];
-            let st = RegState { valid, dirty: dirty & valid };
+            let st = RegState {
+                valid,
+                dirty: dirty & valid,
+            };
             let out = events[i].iter().fold(st, |s, ev| apply(s, *ev));
             if st != entry[i] || out != exit[i] {
                 entry[i] = st;
@@ -465,7 +586,11 @@ fn plan_registers(f: &Function) -> HashMap<u64, RegState> {
             break;
         }
     }
-    f.blocks.iter().zip(entry).map(|(g, st)| (g.start, st)).collect()
+    f.blocks
+        .iter()
+        .zip(entry)
+        .map(|(g, st)| (g.start, st))
+        .collect()
 }
 
 struct Cache {
@@ -475,15 +600,31 @@ struct Cache {
 }
 
 impl Lower<'_, '_> {
-    fn function(b: &mut FunctionBuilder, f: &Function, entries: &BTreeSet<u64>, h: HelperRefs, callees: HashMap<u64, ir::FuncRef>, fast_regs: bool) {
+    fn function(
+        b: &mut FunctionBuilder,
+        f: &Function,
+        entries: &BTreeSet<u64>,
+        h: HelperRefs,
+        callees: HashMap<u64, ir::FuncRef>,
+        fast_regs: bool,
+    ) {
         let entry = b.create_block();
         b.append_block_params_for_function_params(entry);
         b.switch_to_block(entry);
         let cpu = b.block_params(entry)[0];
-        let mem = b.ins().load(I64, cpu_flags().with_readonly(), cpu, abi::OFF_MEM as i32);
-        let blocks: HashMap<u64, ir::Block> = f.blocks.iter().map(|g| (g.start, b.create_block())).collect();
+        let mem = b
+            .ins()
+            .load(I64, cpu_flags().with_readonly(), cpu, abi::OFF_MEM as i32);
+        let blocks: HashMap<u64, ir::Block> = f
+            .blocks
+            .iter()
+            .map(|g| (g.start, b.create_block()))
+            .collect();
         let ret = b.create_block();
-        let has_indirect = f.blocks.iter().any(|g| matches!(g.last().stmts.last(), Some(Stmt::JumpIndirect(_))));
+        let has_indirect = f
+            .blocks
+            .iter()
+            .any(|g| matches!(g.last().stmts.last(), Some(Stmt::JumpIndirect(_))));
         let dispatch = has_indirect.then(|| {
             let d = b.create_block();
             b.append_block_param(d, I64);
@@ -494,7 +635,18 @@ impl Lower<'_, '_> {
             state: RegState::default(),
             entry: plan_registers(f),
         });
-        let mut l = Lower { b, cpu, mem, h, blocks, callees, ret, dispatch, block_start: f.entry, cache };
+        let mut l = Lower {
+            b,
+            cpu,
+            mem,
+            h,
+            blocks,
+            callees,
+            ret,
+            dispatch,
+            block_start: f.entry,
+            cache,
+        };
         l.edge(f.entry);
         l.b.ins().jump(l.blocks[&f.entry], &[]);
         let _ = entries;
@@ -518,7 +670,8 @@ impl Lower<'_, '_> {
         l.b.ins().return_(&[]);
 
         if let Some(d) = dispatch {
-            let mut targets: Vec<(u64, ir::Block)> = l.blocks.iter().map(|(a, b)| (*a, *b)).collect();
+            let mut targets: Vec<(u64, ir::Block)> =
+                l.blocks.iter().map(|(a, b)| (*a, *b)).collect();
             for (addr, blk) in &mut targets {
                 let load = l.cache.as_ref().map_or(0, |c| c.entry[addr].valid);
                 if load != 0 {
@@ -556,7 +709,9 @@ impl Lower<'_, '_> {
     }
 
     fn read(&mut self, s: u32) -> Value {
-        let Some(c) = &mut self.cache else { return self.load_cpu(slot_offset(s)) };
+        let Some(c) = &mut self.cache else {
+            return self.load_cpu(slot_offset(s));
+        };
         let var = c.vars[s as usize];
         if c.state.valid & (1 << s) != 0 {
             return self.b.use_var(var);
@@ -568,7 +723,9 @@ impl Lower<'_, '_> {
     }
 
     fn write(&mut self, s: u32, v: Value) {
-        let Some(c) = &mut self.cache else { return self.store_cpu(slot_offset(s), v) };
+        let Some(c) = &mut self.cache else {
+            return self.store_cpu(slot_offset(s), v);
+        };
         c.state.valid |= 1 << s;
         c.state.dirty |= 1 << s;
         let var = c.vars[s as usize];
@@ -609,7 +766,10 @@ impl Lower<'_, '_> {
     fn edge(&mut self, target: u64) {
         let Some(c) = &mut self.cache else { return };
         let (cur, to) = (c.state, c.entry[&target]);
-        c.state = RegState { valid: cur.valid | to.valid, dirty: cur.dirty & to.dirty };
+        c.state = RegState {
+            valid: cur.valid | to.valid,
+            dirty: cur.dirty & to.dirty,
+        };
         self.store_vars(cur.dirty & !to.dirty);
         self.load_vars(to.valid & !cur.valid);
     }
@@ -662,6 +822,7 @@ impl Lower<'_, '_> {
                 }
             }
             Expr::SysReg(SysReg::Fpcr) => self.load_cpu(abi::OFF_FPCR),
+            Expr::SysReg(SysReg::Fpsr) => self.load_cpu(abi::OFF_FPSR),
             Expr::SysReg(r) => {
                 let id = self.b.ins().iconst(I32, *r as i64);
                 let call = self.b.ins().call(self.h.sysreg, &[self.cpu, id]);
@@ -689,7 +850,15 @@ impl Lower<'_, '_> {
             _ => None,
         };
         match op {
-            Op::Ubfm64 | Op::Ubfm32 | Op::Sbfm64 | Op::Sbfm32 | Op::Bfm64 | Op::Bfm32 | Op::Extr64 | Op::Extr32 | Op::Cond => {
+            Op::Ubfm64
+            | Op::Ubfm32
+            | Op::Sbfm64
+            | Op::Sbfm32
+            | Op::Bfm64
+            | Op::Bfm32
+            | Op::Extr64
+            | Op::Extr32
+            | Op::Cond => {
                 if let Some(v) = self.op_with_immediates(op, args, t, &k) {
                     return v;
                 }
@@ -765,7 +934,11 @@ impl Lower<'_, '_> {
             }
             Op::Select => self.b.ins().select(v[0], v[1], v[2]),
             Op::Eq | Op::Ne => {
-                let cc = if op == Op::Eq { IntCC::Equal } else { IntCC::NotEqual };
+                let cc = if op == Op::Eq {
+                    IntCC::Equal
+                } else {
+                    IntCC::NotEqual
+                };
                 let c = self.b.ins().icmp(cc, v[0], v[1]);
                 self.bool64(c)
             }
@@ -773,6 +946,15 @@ impl Lower<'_, '_> {
                 let s = self.b.ins().ushr(v[0], v[1]);
                 self.b.ins().band_imm_u(s, 1)
             }
+            Op::Vshl | Op::Vushr | Op::Vsshr => self.vec_shift(op, args, t, &k),
+            Op::Splat => self.vec_splat(args, t, &k),
+            Op::Vmul => self.vec_mul(args, t, &k),
+            Op::Vmax | Op::Vmin => self.vec_minmax(op, args, t, &k),
+            Op::Vabs => self.vec_abs(args, t, &k),
+            Op::Vneg => self.vec_neg(args, t, &k),
+            Op::Vsat | Op::VsatFlag => self.vec_sat(op, args, t, &k),
+            Op::Vmla | Op::Vmls => self.vec_mla(op, args, t, &k),
+            Op::Vpmax | Op::Vpmin => self.vec_pair(op, args, t, &k),
             Op::FAdd32
             | Op::FSub32
             | Op::FMul32
@@ -807,7 +989,8 @@ impl Lower<'_, '_> {
             }
             Op::FAdd32x2 | Op::FSub32x2 | Op::FMul32x2 | Op::FMulAdd32x2 => {
                 let fpcr = *v.last().unwrap();
-                let lanes: Vec<(Value, Value)> = v[..v.len() - 1].iter().map(|&x| self.lanes32(x)).collect();
+                let lanes: Vec<(Value, Value)> =
+                    v[..v.len() - 1].iter().map(|&x| self.lanes32(x)).collect();
                 let one = match op {
                     Op::FAdd32x2 => Op::FAdd32,
                     Op::FSub32x2 => Op::FSub32,
@@ -825,14 +1008,21 @@ impl Lower<'_, '_> {
                 let no_fz = self.no_flush(fpcr);
                 let fz_ok = self.b.ins().band(fz_lo, fz_hi);
                 let fz_ok = self.b.ins().bor(no_fz, fz_ok);
-                let ok = self.b.ins().band(ok_lo.expect("arithmetic"), ok_hi.expect("arithmetic"));
+                let ok = self
+                    .b
+                    .ins()
+                    .band(ok_lo.expect("arithmetic"), ok_hi.expect("arithmetic"));
                 let ok = self.b.ins().band(ok, fz_ok);
                 self.fp_or_call(op, &v, r, ok)
             }
             Op::FCvtSD | Op::FCvtDS => {
                 let widen = op == Op::FCvtSD;
                 let f = self.bits_as_float(v[0], !widen);
-                let r = if widen { self.b.ins().fpromote(types::F64, f) } else { self.b.ins().fdemote(types::F32, f) };
+                let r = if widen {
+                    self.b.ins().fpromote(types::F64, f)
+                } else {
+                    self.b.ins().fdemote(types::F32, f)
+                };
                 let ordered = self.b.ins().fcmp(FloatCC::Ordered, r, r);
                 let bits = self.float_as_bits(r, widen);
                 let input_ok = self.flush_free(&[v[0]], None, !widen);
@@ -856,6 +1046,512 @@ impl Lower<'_, '_> {
             },
             _ => self.call_op(op, &v),
         }
+    }
+
+    /// A lane shift on one 64-bit half. Lane widths divide 64, so this is a plain word
+    /// shift plus a keep mask that clears the bits each lane must not receive from its
+    /// neighbour; both are constants because the lifter always passes `esize` and
+    /// `shift` literal. Falls back to the shared semantics for anything else.
+    fn vec_shift(
+        &mut self,
+        op: Op,
+        args: &[Expr],
+        t: &Temps,
+        k: &impl Fn(usize) -> Option<u64>,
+    ) -> Value {
+        let (Some(esize), Some(shift)) = (k(1), k(2)) else {
+            let v: Vec<Value> = args.iter().map(|a| self.expr(a, t)).collect();
+            return self.call_op(op, &v);
+        };
+        let keep = if op == Op::Vshl {
+            kirikae_a64::ops::lane_keep_left(esize, shift)
+        } else {
+            kirikae_a64::ops::lane_keep(esize, shift)
+        };
+        let a = self.expr(&args[0], t);
+        if op == Op::Vsshr {
+            return self.vec_sshr(a, esize, shift);
+        }
+        if keep == 0 {
+            return self.iconst(0);
+        }
+        let s = shift as i64;
+        let r = match op {
+            Op::Vshl => self.b.ins().ishl_imm_u(a, s),
+            _ => self.b.ins().ushr_imm_u(a, s),
+        };
+        self.b.ins().band_imm_u(r, keep as i64)
+    }
+
+    /// Same formula as `kirikae_a64::ops::vsshr`, with every constant folded.
+    fn vec_sshr(&mut self, a: Value, esize: u64, shift: u64) -> Value {
+        if esize == 0 || esize > 64 {
+            return self.iconst(0);
+        }
+        let keep = kirikae_a64::ops::lane_keep(esize, shift);
+        let shifted = if keep == 0 {
+            self.iconst(0)
+        } else {
+            let r = self.b.ins().ushr_imm_u(a, shift as i64);
+            self.b.ins().band_imm_u(r, keep as i64)
+        };
+        let unit = if shift == 0 {
+            0
+        } else if shift >= esize {
+            kirikae_a64::ops::lane_mask(esize)
+        } else {
+            (kirikae_a64::ops::lane_mask(shift) << (esize - shift))
+                & kirikae_a64::ops::lane_mask(esize)
+        };
+        if unit == 0 {
+            return shifted;
+        }
+        let signmask = self.iconst(kirikae_a64::ops::splat(1 << (esize - 1), esize));
+        let signs = self.b.ins().band(a, signmask);
+        let signs = self.b.ins().ushr_imm_u(signs, esize as i64 - 1);
+        let unit = self.iconst(unit);
+        let fill = self.b.ins().imul(signs, unit);
+        self.b.ins().bor(shifted, fill)
+    }
+
+    /// Broadcasts the low `esize` bits of a value to every lane. Every lane width that
+    /// divides 64 is a mask plus a multiply by a repeated-ones constant.
+    fn vec_splat(&mut self, args: &[Expr], t: &Temps, k: &impl Fn(usize) -> Option<u64>) -> Value {
+        let Some(esize) = k(1) else {
+            let v: Vec<Value> = args.iter().map(|a| self.expr(a, t)).collect();
+            return self.call_op(Op::Splat, &v);
+        };
+        let a = self.expr(&args[0], t);
+        if esize >= 64 {
+            return a;
+        }
+        let lane = self
+            .b
+            .ins()
+            .band_imm_u(a, kirikae_a64::ops::lane_mask(esize) as i64);
+        let rep = self.iconst(kirikae_a64::ops::lane_repeat_ones(esize));
+        self.b.ins().imul(lane, rep)
+    }
+
+    /// Lane-wise wrapping multiply. A whole-half `imul` would mix lanes (the high half
+    /// of one lane's product lands in the next), so every lane is isolated, multiplied
+    /// and put back. `esize` is always a literal here.
+    fn vec_mul(&mut self, args: &[Expr], t: &Temps, k: &impl Fn(usize) -> Option<u64>) -> Value {
+        let Some(esize) = k(2) else {
+            let v: Vec<Value> = args.iter().map(|a| self.expr(a, t)).collect();
+            return self.call_op(Op::Vmul, &v);
+        };
+        if !lane_width(esize) {
+            return self.iconst(0);
+        }
+        let (a, b) = (self.expr(&args[0], t), self.expr(&args[1], t));
+        if esize >= 64 {
+            return self.b.ins().imul(a, b);
+        }
+        let m = kirikae_a64::ops::lane_mask(esize) as i64;
+        let mut out = self.iconst(0);
+        let mut i = 0i64;
+        while i < 64 {
+            let (ea, eb) = if i == 0 {
+                (a, b)
+            } else {
+                (self.b.ins().ushr_imm_u(a, i), self.b.ins().ushr_imm_u(b, i))
+            };
+            let ea = self.b.ins().band_imm_u(ea, m);
+            let eb = self.b.ins().band_imm_u(eb, m);
+            let p = self.b.ins().imul(ea, eb);
+            let p = self.b.ins().band_imm_u(p, m);
+            let p = if i == 0 {
+                p
+            } else {
+                self.b.ins().ishl_imm_u(p, i)
+            };
+            out = self.b.ins().bor(out, p);
+            i += esize as i64;
+        }
+        out
+    }
+
+    /// Lane-wise signed/unsigned maximum or minimum, with the same constants folded as
+    /// `kirikae_a64::ops::vmax`. `(x | H) - (y & !H)` cannot borrow between lanes and its
+    /// top bit says whether the low bits of `x` are not below those of `y`; when the top
+    /// bits differ they decide, and a signed compare is the unsigned one with the sign
+    /// bits flipped.
+    fn vec_minmax(
+        &mut self,
+        op: Op,
+        args: &[Expr],
+        t: &Temps,
+        k: &impl Fn(usize) -> Option<u64>,
+    ) -> Value {
+        let (Some(esize), Some(signed)) = (k(2), k(3)) else {
+            let v: Vec<Value> = args.iter().map(|a| self.expr(a, t)).collect();
+            return self.call_op(op, &v);
+        };
+        if !lane_width(esize) {
+            return self.iconst(0);
+        }
+        let (a, b) = (self.expr(&args[0], t), self.expr(&args[1], t));
+        let hrep = kirikae_a64::ops::splat(1 << (esize - 1), esize);
+        let (hval, low) = (self.iconst(hrep), self.iconst(!hrep));
+        let lane = self.iconst(kirikae_a64::ops::lane_mask(esize));
+        let (x, y) = if signed != 0 {
+            (self.b.ins().bxor(a, hval), self.b.ins().bxor(b, hval))
+        } else {
+            (a, b)
+        };
+        let xh = self.b.ins().bor(x, hval);
+        let yl = self.b.ins().band(y, low);
+        let diff = self.b.ins().isub(xh, yl);
+        let tops = self.b.ins().bxor(x, y);
+        let tops = self.b.ins().band(tops, hval);
+        let differ = self.b.ins().ushr_imm_u(tops, esize as i64 - 1);
+        let differ = self.b.ins().imul(differ, lane);
+        let xh = self.b.ins().band(x, hval);
+        let ge_x = self.b.ins().band(xh, differ);
+        let dh = self.b.ins().band(diff, hval);
+        let not_differ = self.b.ins().bnot(differ);
+        let ge_t = self.b.ins().band(dh, not_differ);
+        let ge = self.b.ins().bor(ge_x, ge_t);
+        let ge = self.b.ins().ushr_imm_u(ge, esize as i64 - 1);
+        let mask = self.b.ins().imul(ge, lane);
+        let ab = self.b.ins().bxor(a, b);
+        let sel = self.b.ins().band(ab, mask);
+        if op == Op::Vmax {
+            self.b.ins().bxor(b, sel)
+        } else {
+            self.b.ins().bxor(a, sel)
+        }
+    }
+
+    /// Lane-wise non-saturating absolute value, the same formula as
+    /// `kirikae_a64::ops::vabs`: negate the negative lanes with `(x ^ m) + sign`, where
+    /// the sign bit added at each lane base cannot carry out of its lane.
+    fn vec_abs(&mut self, args: &[Expr], t: &Temps, k: &impl Fn(usize) -> Option<u64>) -> Value {
+        let Some(esize) = k(1) else {
+            let v: Vec<Value> = args.iter().map(|a| self.expr(a, t)).collect();
+            return self.call_op(Op::Vabs, &v);
+        };
+        if !lane_width(esize) {
+            return self.iconst(0);
+        }
+        let a = self.expr(&args[0], t);
+        let ones = self.iconst(kirikae_a64::ops::splat(1, esize));
+        let lane = self.iconst(kirikae_a64::ops::lane_mask(esize));
+        let sign = self.b.ins().ushr_imm_u(a, esize as i64 - 1);
+        let sign = self.b.ins().band(sign, ones);
+        let negate = self.b.ins().imul(sign, lane);
+        let x = self.b.ins().bxor(a, negate);
+        self.b.ins().iadd(x, sign)
+    }
+
+    /// Lane-wise wrapping negation, mirroring `kirikae_a64::ops::vneg`. Adding one at
+    /// every lane base would carry into the next lane when a lane is zero, so the low
+    /// bits and the sign bits are combined separately.
+    fn vec_neg(&mut self, args: &[Expr], t: &Temps, k: &impl Fn(usize) -> Option<u64>) -> Value {
+        let Some(esize) = k(1) else {
+            let v: Vec<Value> = args.iter().map(|a| self.expr(a, t)).collect();
+            return self.call_op(Op::Vneg, &v);
+        };
+        if !lane_width(esize) {
+            return self.iconst(0);
+        }
+        let a = self.expr(&args[0], t);
+        let hrep = kirikae_a64::ops::splat(1 << (esize - 1), esize);
+        let (hval, low) = (self.iconst(hrep), self.iconst(!hrep));
+        let ones = self.iconst(kirikae_a64::ops::splat(1, esize));
+        let inverted = self.b.ins().bnot(a);
+        let low_bits = self.b.ins().band(inverted, low);
+        let v = self.b.ins().iadd(low_bits, ones);
+        let low_part = self.b.ins().band(v, low);
+        let sign = self.b.ins().band(inverted, hval);
+        let vh = self.b.ins().band(v, hval);
+        let top = self.b.ins().bxor(sign, vh);
+        self.b.ins().bor(low_part, top)
+    }
+
+    /// Sign-extends a lane value held in the low bits of `v` to a full `i64`.
+    fn sx_lane(&mut self, v: Value, esize: u64) -> Value {
+        let sh = (64 - esize) as i64;
+        let shifted = self.b.ins().ishl_imm_u(v, sh);
+        self.b.ins().sshr_imm_u(shifted, sh)
+    }
+
+    /// One saturating lane, the same formula as `kirikae_a64::ops::sat_lane`: the clamped
+    /// value and whether it clamped. The bounds and the sign extension are constants, so
+    /// only the compares and the selects remain.
+    fn sat_lane(&mut self, x: Value, y: Value, esize: u64, mode: u64) -> (Value, Value) {
+        let mask = self.iconst(kirikae_a64::ops::lane_mask(esize));
+        let zero = self.iconst(0);
+        if mode == 1 || mode == 3 {
+            return if mode == 1 {
+                let sum = self.b.ins().iadd(x, y);
+                let over = self.b.ins().icmp(IntCC::UnsignedGreaterThan, sum, mask);
+                (self.b.ins().select(over, mask, sum), over)
+            } else {
+                let diff = self.b.ins().isub(x, y);
+                let under = self.b.ins().icmp(IntCC::UnsignedLessThan, x, y);
+                (self.b.ins().select(under, zero, diff), under)
+            };
+        }
+        let exact = match mode {
+            2 => {
+                let (sa, sb) = (self.sx_lane(x, esize), self.sx_lane(y, esize));
+                self.b.ins().isub(sa, sb)
+            }
+            4 => {
+                let a = self.sx_lane(x, esize);
+                let negated = self.b.ins().isub(zero, a);
+                let negative = self.b.ins().icmp(IntCC::SignedLessThan, a, zero);
+                self.b.ins().select(negative, negated, a)
+            }
+            5 => {
+                let a = self.sx_lane(x, esize);
+                self.b.ins().isub(zero, a)
+            }
+            _ => {
+                let (sa, sb) = (self.sx_lane(x, esize), self.sx_lane(y, esize));
+                self.b.ins().iadd(sa, sb)
+            }
+        };
+        let bits = 1u64 << (esize - 1);
+        let (hi, lo) = (self.iconst(bits - 1), self.iconst(bits.wrapping_neg()));
+        let too_hi = self.b.ins().icmp(IntCC::SignedGreaterThan, exact, hi);
+        let too_lo = self.b.ins().icmp(IntCC::SignedLessThan, exact, lo);
+        let low = self.b.ins().select(too_lo, lo, exact);
+        let clamped = self.b.ins().select(too_hi, hi, low);
+        let value = self.b.ins().band(clamped, mask);
+        let wrapped = self.b.ins().band(exact, mask);
+        let changed = self.b.ins().icmp(IntCC::NotEqual, value, wrapped);
+        (value, changed)
+    }
+
+    /// `SQADD`/`SQSUB`/`SQABS`/`SQNEG` (`Op::Vsat`) and their cumulative `QC` bit
+    /// (`Op::VsatFlag`). `esize` and `mode` are literals from the lifter. A 64-bit lane
+    /// cannot widen into `i64`, so it is clamped with explicit overflow rules.
+    fn vec_sat(
+        &mut self,
+        op: Op,
+        args: &[Expr],
+        t: &Temps,
+        k: &impl Fn(usize) -> Option<u64>,
+    ) -> Value {
+        let (Some(esize), Some(mode)) = (k(2), k(3)) else {
+            let v: Vec<Value> = args.iter().map(|a| self.expr(a, t)).collect();
+            return self.call_op(op, &v);
+        };
+        if !lane_width(esize) {
+            return self.iconst(0);
+        }
+        let (a, b) = (self.expr(&args[0], t), self.expr(&args[1], t));
+        let flag = op == Op::VsatFlag;
+        if esize == 64 {
+            let (value, changed) = self.sat_lane64(a, b, mode);
+            return if flag { self.bool64(changed) } else { value };
+        }
+        let mask = self.iconst(kirikae_a64::ops::lane_mask(esize));
+        let mut out = self.iconst(0);
+        let mut i = 0i64;
+        while i < 64 {
+            let lane = |me: &mut Self, base: Value| {
+                let shifted = if i == 0 {
+                    base
+                } else {
+                    me.b.ins().ushr_imm_u(base, i)
+                };
+                me.b.ins().band(shifted, mask)
+            };
+            let (x, y) = (lane(self, a), lane(self, b));
+            let (value, changed) = self.sat_lane(x, y, esize, mode);
+            out = if flag {
+                let bit = self.bool64(changed);
+                self.b.ins().bor(out, bit)
+            } else {
+                let placed = if i == 0 {
+                    value
+                } else {
+                    self.b.ins().ishl_imm_u(value, i)
+                };
+                self.b.ins().bor(out, placed)
+            };
+            i += esize as i64;
+        }
+        out
+    }
+
+    /// The 64-bit lane cases of `vec_sat`: `sadd`/`ssub`/`sabs`/`sneg` overflow rules
+    /// replace the widen-and-clamp of the narrower lanes.
+    fn sat_lane64(&mut self, a: Value, b: Value, mode: u64) -> (Value, Value) {
+        let zero = self.iconst(0);
+        let max = self.iconst(u64::MAX);
+        let smax = self.iconst(i64::MAX as u64);
+        let smin = self.iconst(1u64 << 63);
+        let b_negative = self.b.ins().icmp(IntCC::SignedLessThan, b, zero);
+        let overflow = |me: &mut Self, left: Value, right: Value| {
+            let t = me.b.ins().band(left, right);
+            me.b.ins().icmp(IntCC::SignedLessThan, t, zero)
+        };
+        match mode {
+            1 => {
+                let r = self.b.ins().iadd(a, b);
+                let over = self.b.ins().icmp(IntCC::UnsignedLessThan, r, a);
+                (self.b.ins().select(over, max, r), over)
+            }
+            3 => {
+                let r = self.b.ins().isub(a, b);
+                let under = self.b.ins().icmp(IntCC::UnsignedLessThan, a, b);
+                (self.b.ins().select(under, zero, r), under)
+            }
+            2 => {
+                let r = self.b.ins().isub(a, b);
+                let (x, y) = (self.b.ins().bxor(a, b), self.b.ins().bxor(a, r));
+                let over = overflow(self, x, y);
+                let sat = self.b.ins().select(b_negative, smax, smin);
+                (self.b.ins().select(over, sat, r), over)
+            }
+            4 => {
+                let negated = self.b.ins().isub(zero, a);
+                let negative = self.b.ins().icmp(IntCC::SignedLessThan, a, zero);
+                let abs = self.b.ins().select(negative, negated, a);
+                let over = self.b.ins().icmp(IntCC::Equal, a, smin);
+                (self.b.ins().select(over, smax, abs), over)
+            }
+            5 => {
+                let negated = self.b.ins().isub(zero, a);
+                let over = self.b.ins().icmp(IntCC::Equal, a, smin);
+                (self.b.ins().select(over, smax, negated), over)
+            }
+            _ => {
+                let r = self.b.ins().iadd(a, b);
+                let (x, y) = (self.b.ins().bxor(a, r), self.b.ins().bxor(b, r));
+                let over = overflow(self, x, y);
+                let sat = self.b.ins().select(b_negative, smin, smax);
+                (self.b.ins().select(over, sat, r), over)
+            }
+        }
+    }
+
+    /// Lane-wise `MLA`/`MLS`: `d + a * b` or `d - a * b`, isolated per lane and masked,
+    /// exactly as `kirikae_a64::ops::vmla`.
+    fn vec_mla(
+        &mut self,
+        op: Op,
+        args: &[Expr],
+        t: &Temps,
+        k: &impl Fn(usize) -> Option<u64>,
+    ) -> Value {
+        let Some(esize) = k(3) else {
+            let v: Vec<Value> = args.iter().map(|a| self.expr(a, t)).collect();
+            return self.call_op(op, &v);
+        };
+        if !lane_width(esize) {
+            return self.iconst(0);
+        }
+        let (a, b, d) = (
+            self.expr(&args[0], t),
+            self.expr(&args[1], t),
+            self.expr(&args[2], t),
+        );
+        let add = op == Op::Vmla;
+        if esize == 64 {
+            let product = self.b.ins().imul(a, b);
+            return if add {
+                self.b.ins().iadd(d, product)
+            } else {
+                self.b.ins().isub(d, product)
+            };
+        }
+        let mask = self.iconst(kirikae_a64::ops::lane_mask(esize));
+        let mut out = self.iconst(0);
+        let mut i = 0i64;
+        while i < 64 {
+            let lane = |me: &mut Self, base: Value| {
+                let shifted = if i == 0 {
+                    base
+                } else {
+                    me.b.ins().ushr_imm_u(base, i)
+                };
+                me.b.ins().band(shifted, mask)
+            };
+            let (x, y) = (lane(self, a), lane(self, b));
+            let product = self.b.ins().imul(x, y);
+            let acc = lane(self, d);
+            let r = if add {
+                self.b.ins().iadd(acc, product)
+            } else {
+                self.b.ins().isub(acc, product)
+            };
+            let r = self.b.ins().band(r, mask);
+            let placed = if i == 0 {
+                r
+            } else {
+                self.b.ins().ishl_imm_u(r, i)
+            };
+            out = self.b.ins().bor(out, placed);
+            i += esize as i64;
+        }
+        out
+    }
+
+    /// Pairwise maximum or minimum (`Op::Vpmax`/`Op::Vpmin`) over `a | b << 64`, one
+    /// result lane per adjacent input pair, mirroring `kirikae_a64::ops::vpmax`.
+    fn vec_pair(
+        &mut self,
+        op: Op,
+        args: &[Expr],
+        t: &Temps,
+        k: &impl Fn(usize) -> Option<u64>,
+    ) -> Value {
+        let (Some(esize), Some(signed)) = (k(2), k(3)) else {
+            let v: Vec<Value> = args.iter().map(|a| self.expr(a, t)).collect();
+            return self.call_op(op, &v);
+        };
+        if !lane_width(esize) {
+            return self.iconst(0);
+        }
+        let (a, b) = (self.expr(&args[0], t), self.expr(&args[1], t));
+        let mask = self.iconst(kirikae_a64::ops::lane_mask(esize));
+        let signed = signed != 0;
+        let max = op == Op::Vpmax;
+        let cc = match (max, signed) {
+            (true, true) => IntCC::SignedGreaterThan,
+            (true, false) => IntCC::UnsignedGreaterThan,
+            (false, true) => IntCC::SignedLessThan,
+            (false, false) => IntCC::UnsignedLessThan,
+        };
+        let mut out = self.iconst(0);
+        let mut j = 0i64;
+        while j < 64 {
+            let input = |me: &mut Self, index: i64| {
+                let bit = index * esize as i64;
+                let word = if bit < 64 { a } else { b };
+                let shift = bit % 64;
+                let shifted = if shift == 0 {
+                    word
+                } else {
+                    me.b.ins().ushr_imm_u(word, shift)
+                };
+                me.b.ins().band(shifted, mask)
+            };
+            let first = 2 * (j / esize as i64);
+            let x = input(self, first);
+            let y = input(self, first + 1);
+            let (cx, cy) = if signed {
+                (self.sx_lane(x, esize), self.sx_lane(y, esize))
+            } else {
+                (x, y)
+            };
+            let take_x = self.b.ins().icmp(cc, cx, cy);
+            let r = self.b.ins().select(take_x, x, y);
+            let placed = if j == 0 {
+                r
+            } else {
+                self.b.ins().ishl_imm_u(r, j)
+            };
+            out = self.b.ins().bor(out, placed);
+            j += esize as i64;
+        }
+        out
     }
 
     fn bits_as_float(&mut self, v: Value, double: bool) -> Value {
@@ -888,11 +1584,16 @@ impl Lower<'_, '_> {
     }
 
     fn flush_free(&mut self, inputs: &[Value], result: Option<Value>, double: bool) -> Value {
-        let (abs, frac, min) = if double { (u64::MAX >> 1, (1u64 << 52) - 1, 1u64 << 52) } else { (0x7fff_ffff, 0x7f_ffff, 0x80_0000) };
+        let (abs, frac, min) = if double {
+            (u64::MAX >> 1, (1u64 << 52) - 1, 1u64 << 52)
+        } else {
+            (0x7fff_ffff, 0x7f_ffff, 0x80_0000)
+        };
         let within = |me: &mut Self, x: Value, limit: u64| {
             let a = me.b.ins().band_imm_u(x, abs as i64);
             let a = me.b.ins().iadd_imm_s(a, -1);
-            me.b.ins().icmp_imm_u(IntCC::UnsignedLessThan, a, limit as i64)
+            me.b.ins()
+                .icmp_imm_u(IntCC::UnsignedLessThan, a, limit as i64)
         };
         let mut bad = None;
         for &x in inputs.iter() {
@@ -916,7 +1617,10 @@ impl Lower<'_, '_> {
     fn fp_scalar(&mut self, op: Op, v: &[Value]) -> (Value, Option<Value>) {
         let double = fp_double(op);
         let n = fp_inputs(op);
-        let f: Vec<Value> = v[..n].iter().map(|&x| self.bits_as_float(x, double)).collect();
+        let f: Vec<Value> = v[..n]
+            .iter()
+            .map(|&x| self.bits_as_float(x, double))
+            .collect();
         let r = match op {
             Op::FAdd32 | Op::FAdd64 => self.b.ins().fadd(f[0], f[1]),
             Op::FSub32 | Op::FSub64 => self.b.ins().fsub(f[0], f[1]),
@@ -930,7 +1634,8 @@ impl Lower<'_, '_> {
                 let uno = self.b.ins().fcmp(FloatCC::Unordered, f[0], f[1]);
                 let eq = self.b.ins().fcmp(FloatCC::Equal, f[0], f[1]);
                 let lt = self.b.ins().fcmp(FloatCC::LessThan, f[0], f[1]);
-                let [a, b, less, greater] = [0b0011u64, 0b0110, 0b1000, 0b0010].map(|x| self.iconst(x << 28));
+                let [a, b, less, greater] =
+                    [0b0011u64, 0b0110, 0b1000, 0b0010].map(|x| self.iconst(x << 28));
                 let r = self.b.ins().select(lt, less, greater);
                 let r = self.b.ins().select(eq, b, r);
                 return (self.b.ins().select(uno, a, r), None);
@@ -944,7 +1649,9 @@ impl Lower<'_, '_> {
         let slow = self.b.create_block();
         let done = self.b.create_block();
         self.b.append_block_param(done, I64);
-        self.b.ins().brif(ok, done, &[BlockArg::Value(fast)], slow, &[]);
+        self.b
+            .ins()
+            .brif(ok, done, &[BlockArg::Value(fast)], slow, &[]);
         self.b.switch_to_block(slow);
         let r = self.call_op(op, v);
         self.b.ins().jump(done, &[BlockArg::Value(r)]);
@@ -961,14 +1668,22 @@ impl Lower<'_, '_> {
                     return None;
                 }
                 let f = self.bits_as_float(x, op == Op::FToInt64);
-                let r = if signed { self.b.ins().fcvt_to_sint_sat(int, f) } else { self.b.ins().fcvt_to_uint_sat(int, f) };
+                let r = if signed {
+                    self.b.ins().fcvt_to_sint_sat(int, f)
+                } else {
+                    self.b.ins().fcvt_to_uint_sat(int, f)
+                };
                 if width == 64 { r } else { self.z64(r) }
             }
             _ => {
                 let double = op == Op::FFromInt64;
                 let i = if width == 64 { x } else { self.r32(x) };
                 let ty = if double { types::F64 } else { types::F32 };
-                let f = if signed { self.b.ins().fcvt_from_sint(ty, i) } else { self.b.ins().fcvt_from_uint(ty, i) };
+                let f = if signed {
+                    self.b.ins().fcvt_from_sint(ty, i)
+                } else {
+                    self.b.ins().fcvt_from_uint(ty, i)
+                };
                 self.float_as_bits(f, double)
             }
         })
@@ -993,7 +1708,11 @@ impl Lower<'_, '_> {
         let v = self.b.ins().ushr_imm_u(ov, top);
         let n = self.b.ins().ushr_imm_u(r, top);
         let z = self.b.ins().icmp_imm_u(IntCC::Equal, r, 0);
-        let (n, v) = if narrow { (self.z64(n), self.z64(v)) } else { (n, v) };
+        let (n, v) = if narrow {
+            (self.z64(n), self.z64(v))
+        } else {
+            (n, v)
+        };
         let (z, c) = (self.bool64(z), self.bool64(c));
         let n = self.b.ins().ishl_imm_u(n, 31);
         let z = self.b.ins().ishl_imm_u(z, 30);
@@ -1004,7 +1723,13 @@ impl Lower<'_, '_> {
         self.b.ins().bor(nz, cv)
     }
 
-    fn op_with_immediates(&mut self, op: Op, args: &[Expr], t: &Temps, k: &dyn Fn(usize) -> Option<u64>) -> Option<Value> {
+    fn op_with_immediates(
+        &mut self,
+        op: Op,
+        args: &[Expr],
+        t: &Temps,
+        k: &dyn Fn(usize) -> Option<u64>,
+    ) -> Option<Value> {
         let i = |v: u64| v as i64;
         Some(match op {
             Op::Ubfm64 | Op::Ubfm32 => {
@@ -1035,7 +1760,11 @@ impl Lower<'_, '_> {
                 let top = self.b.ins().band_imm_u(top, i(!tm));
                 let bot = self.b.ins().band_imm_u(bot, i(tm));
                 let r = self.b.ins().bor(top, bot);
-                if op == Op::Sbfm32 { self.b.ins().band_imm_u(r, 0xffff_ffff) } else { r }
+                if op == Op::Sbfm32 {
+                    self.b.ins().band_imm_u(r, 0xffff_ffff)
+                } else {
+                    r
+                }
             }
             Op::Bfm64 | Op::Bfm32 => {
                 let (r, wm, tm) = (k(2)?, k(3)?, k(4)?);
@@ -1054,14 +1783,22 @@ impl Lower<'_, '_> {
                 let keep = self.b.ins().band_imm_u(dst, i(!tm));
                 let bot = self.b.ins().band_imm_u(bot, i(tm));
                 let res = self.b.ins().bor(keep, bot);
-                if op == Op::Bfm32 { self.b.ins().band_imm_u(res, 0xffff_ffff) } else { res }
+                if op == Op::Bfm32 {
+                    self.b.ins().band_imm_u(res, 0xffff_ffff)
+                } else {
+                    res
+                }
             }
             Op::Extr64 | Op::Extr32 => {
                 let lsb = k(2)?;
                 let hi = self.expr(&args[0], t);
                 let lo = self.expr(&args[1], t);
                 let width = if op == Op::Extr64 { 64 } else { 32 };
-                let (hi, lo) = if width == 32 { (self.r32(hi), self.r32(lo)) } else { (hi, lo) };
+                let (hi, lo) = if width == 32 {
+                    (self.r32(hi), self.r32(lo))
+                } else {
+                    (hi, lo)
+                };
                 let r = if lsb == 0 {
                     lo
                 } else {
@@ -1104,7 +1841,11 @@ impl Lower<'_, '_> {
                     }
                     _ => self.iconst(1),
                 };
-                if cc & 1 == 1 && cc != 15 { self.b.ins().bxor_imm_u(base, 1) } else { base }
+                if cc & 1 == 1 && cc != 15 {
+                    self.b.ins().bxor_imm_u(base, 1)
+                } else {
+                    base
+                }
             }
             _ => return None,
         })
@@ -1113,7 +1854,10 @@ impl Lower<'_, '_> {
     fn store_exclusive(&mut self, size: u8, addr: Value, lo: Value, hi: Value) -> Value {
         if size == 16 {
             let size = self.b.ins().iconst(I32, 16);
-            let call = self.b.ins().call(self.h.store_exclusive, &[self.cpu, size, addr, lo, hi]);
+            let call = self
+                .b
+                .ins()
+                .call(self.h.store_exclusive, &[self.cpu, size, addr, lo, hi]);
             return self.b.inst_results(call)[0];
         }
         let armed = self.load_cpu(abi::OFF_EXCL_ADDR);
@@ -1124,7 +1868,9 @@ impl Lower<'_, '_> {
         let (try_cas, done) = (self.b.create_block(), self.b.create_block());
         self.b.append_block_param(done, I64);
         let failed = self.iconst(1);
-        self.b.ins().brif(same, try_cas, &[], done, &[BlockArg::Value(failed)]);
+        self.b
+            .ins()
+            .brif(same, try_cas, &[], done, &[BlockArg::Value(failed)]);
         self.b.switch_to_block(try_cas);
         let ty = match size {
             1 => types::I8,
@@ -1132,7 +1878,14 @@ impl Lower<'_, '_> {
             4 => I32,
             _ => I64,
         };
-        let (e, x) = if ty == I64 { (expected, lo) } else { (self.b.ins().ireduce(ty, expected), self.b.ins().ireduce(ty, lo)) };
+        let (e, x) = if ty == I64 {
+            (expected, lo)
+        } else {
+            (
+                self.b.ins().ireduce(ty, expected),
+                self.b.ins().ireduce(ty, lo),
+            )
+        };
         let p = self.host(addr);
         let old = self.b.ins().atomic_cas(guest_flags(), p, e, x);
         let changed = self.b.ins().icmp(IntCC::NotEqual, old, e);
@@ -1143,9 +1896,14 @@ impl Lower<'_, '_> {
     }
 
     fn poll_then(&mut self, dest: ir::Block, args: &[BlockArg], reload: Regs) {
-        let budget = self.b.ins().load(I32, cpu_flags(), self.cpu, abi::OFF_BUDGET as i32);
+        let budget = self
+            .b
+            .ins()
+            .load(I32, cpu_flags(), self.cpu, abi::OFF_BUDGET as i32);
         let left = self.b.ins().iadd_imm_s(budget, -1);
-        self.b.ins().store(cpu_flags(), left, self.cpu, abi::OFF_BUDGET as i32);
+        self.b
+            .ins()
+            .store(cpu_flags(), left, self.cpu, abi::OFF_BUDGET as i32);
         let slow = self.b.create_block();
         self.b.ins().brif(left, dest, args, slow, &[]);
         self.b.switch_to_block(slow);
@@ -1182,7 +1940,10 @@ impl Lower<'_, '_> {
 
     fn after_call(&mut self, ret_addr: u64) {
         let pc = self.load_cpu(abi::OFF_PC);
-        let wrong = self.b.ins().icmp_imm_u(IntCC::NotEqual, pc, ret_addr as i64);
+        let wrong = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::NotEqual, pc, ret_addr as i64);
         let (resume, cont) = (self.b.create_block(), self.b.create_block());
         self.b.ins().brif(wrong, resume, &[], cont, &[]);
         self.b.switch_to_block(resume);
@@ -1190,7 +1951,10 @@ impl Lower<'_, '_> {
         let ret = self.iconst(ret_addr);
         self.b.ins().call(self.h.call_indirect, &[self.cpu, ret]);
         let pc = self.load_cpu(abi::OFF_PC);
-        let still_wrong = self.b.ins().icmp_imm_u(IntCC::NotEqual, pc, ret_addr as i64);
+        let still_wrong = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::NotEqual, pc, ret_addr as i64);
         self.b.ins().brif(still_wrong, self.ret, &[], cont, &[]);
         self.b.switch_to_block(cont);
         self.goto(ret_addr);
@@ -1217,6 +1981,10 @@ impl Lower<'_, '_> {
                     let v = self.expr(value, &t);
                     self.write(v_slot(*reg, *hi), v);
                 }
+                Stmt::SetSysReg(SysReg::Fpsr, e) => {
+                    let v = self.expr(e, &t);
+                    self.store_cpu(abi::OFF_FPSR, v);
+                }
                 Stmt::SetSysReg(r, e) => {
                     let v = self.expr(e, &t);
                     let id = self.b.ins().iconst(I32, *r as i64);
@@ -1239,7 +2007,13 @@ impl Lower<'_, '_> {
                     self.store_cpu(abi::OFF_EXCL_LO, l);
                     self.store_cpu(abi::OFF_EXCL_HI, h);
                 }
-                Stmt::StoreExclusive { size, addr, lo, hi, status } => {
+                Stmt::StoreExclusive {
+                    size,
+                    addr,
+                    lo,
+                    hi,
+                    status,
+                } => {
                     let (a, l, h) = (self.expr(addr, &t), self.expr(lo, &t), self.expr(hi, &t));
                     let r = self.store_exclusive(*size, a, l, h);
                     if *status != 31 {
@@ -1263,7 +2037,10 @@ impl Lower<'_, '_> {
                     self.sync();
                     let imm = self.b.ins().iconst(I32, *imm as i64);
                     self.b.ins().call(self.h.svc, &[self.cpu, imm]);
-                    let halted = self.b.ins().uload8(I64, cpu_flags(), self.cpu, abi::OFF_HALTED as i32);
+                    let halted =
+                        self.b
+                            .ins()
+                            .uload8(I64, cpu_flags(), self.cpu, abi::OFF_HALTED as i32);
                     let pc = self.load_cpu(abi::OFF_PC);
                     let moved = self.b.ins().icmp_imm_u(IntCC::NotEqual, pc, next as i64);
                     let moved = self.bool64(moved);
@@ -1303,7 +2080,9 @@ impl Lower<'_, '_> {
                 }
                 Stmt::JumpIndirect(e) => {
                     let v = self.expr(e, &t);
-                    let d = self.dispatch.expect("dispatch block exists for indirect jumps");
+                    let d = self
+                        .dispatch
+                        .expect("dispatch block exists for indirect jumps");
                     self.sync();
                     self.poll_then(d, &[BlockArg::Value(v)], 0);
                     return true;
@@ -1339,15 +2118,22 @@ impl Lower<'_, '_> {
 }
 
 fn object_compiler(isa: OwnedTargetIsa, name: &str) -> Result<Compiler<ObjectModule>, String> {
-    let builder = ObjectBuilder::new(isa, name, cranelift_module::default_libcall_names()).map_err(|e| e.to_string())?;
+    let builder = ObjectBuilder::new(isa, name, cranelift_module::default_libcall_names())
+        .map_err(|e| e.to_string())?;
     Compiler::new(ObjectModule::new(builder))
 }
 
 fn entries_object(isa: OwnedTargetIsa, entries: &BTreeSet<u64>) -> Result<Vec<u8>, String> {
     let mut c = object_compiler(isa, "kirikae_entries")?;
     let err = |e: cranelift_module::ModuleError| e.to_string();
-    let table = c.module.declare_data("kirikae_entries", Linkage::Export, false, false).map_err(err)?;
-    let count = c.module.declare_data("kirikae_entry_count", Linkage::Export, false, false).map_err(err)?;
+    let table = c
+        .module
+        .declare_data("kirikae_entries", Linkage::Export, false, false)
+        .map_err(err)?;
+    let count = c
+        .module
+        .declare_data("kirikae_entry_count", Linkage::Export, false, false)
+        .map_err(err)?;
     let mut desc = DataDescription::new();
     let mut bytes = vec![0u8; 16 * entries.len()];
     for (i, addr) in entries.iter().enumerate() {
@@ -1362,27 +2148,76 @@ fn entries_object(isa: OwnedTargetIsa, entries: &BTreeSet<u64>) -> Result<Vec<u8
     }
     c.module.define_data(table, &desc).map_err(err)?;
     let mut desc = DataDescription::new();
-    desc.define((entries.len() as u64).to_le_bytes().to_vec().into_boxed_slice());
+    desc.define(
+        (entries.len() as u64)
+            .to_le_bytes()
+            .to_vec()
+            .into_boxed_slice(),
+    );
     desc.set_align(8);
     c.module.define_data(count, &desc).map_err(err)?;
     c.module.finish().emit().map_err(|e| e.to_string())
 }
 
+/// How a call to a function that the current object does not hold is emitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Calls {
+    /// Declare it as an import: the linker resolves it in the single module (the default).
+    Import,
+    /// Leave it to the dispatcher. Required when the objects end up in separate DLLs, which
+    /// cannot reference each other's symbols.
+    Dispatch,
+}
+
 pub struct CompileReport {
     pub objects: Vec<PathBuf>,
+    /// Size in bytes of each object in `objects`, measured after writing it.
+    pub sizes: Vec<u64>,
+    /// The address range of each chunk in `objects`, in the order the entry table sorts them.
+    pub chunks: Vec<std::ops::Range<usize>>,
     pub functions: usize,
     pub instructions: u64,
+}
+
+/// Instructions the backend will lift, without compiling them. `build` uses it to decide up
+/// front whether the image has to be split, which is what fixes each object's call scope.
+pub fn estimate(space: &CodeSpace, entries: &BTreeSet<u64>) -> u64 {
+    entries
+        .iter()
+        .map(|&e| build_function(space, e, entries).insn_count() as u64)
+        .sum()
+}
+
+/// Write the `kirikae_entries` table for `addrs` as `<file>` inside `dir`.
+pub fn write_entries(dir: &Path, file: &str, addrs: &BTreeSet<u64>) -> Result<PathBuf, String> {
+    let isa = object_isa()?;
+    let path = dir.join(file);
+    std::fs::write(&path, entries_object(isa, addrs)?)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(path)
+}
+
+/// How `compile_program` lays the objects out and what it emits for calls.
+pub struct CompileOptions {
+    pub per_object: usize,
+    pub jobs: usize,
+    pub fast_regs: bool,
+    pub calls: Calls,
 }
 
 pub fn compile_program(
     space: &CodeSpace,
     entries: &BTreeSet<u64>,
     dir: &Path,
-    per_object: usize,
-    jobs: usize,
-    fast_regs: bool,
+    opts: &CompileOptions,
     progress: &(dyn Fn(usize, usize) + Sync),
 ) -> Result<CompileReport, String> {
+    let CompileOptions {
+        per_object,
+        jobs,
+        fast_regs,
+        calls,
+    } = *opts;
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let isa = object_isa()?;
     let list: Vec<u64> = entries.iter().copied().collect();
@@ -1404,10 +2239,14 @@ pub fn compile_program(
                     let result = (|| -> Result<(), String> {
                         let mut c = object_compiler(isa.clone(), &format!("chunk{i}"))?;
                         c.set_fast_regs(fast_regs);
+                        let in_scope = |t: u64| match calls {
+                            Calls::Import => true,
+                            Calls::Dispatch => chunks[i].binary_search(&t).is_ok(),
+                        };
                         for &entry in chunks[i] {
                             let f = build_function(space, entry, entries);
                             instructions.fetch_add(f.insn_count(), Ordering::Relaxed);
-                            c.compile(&f, entries)?;
+                            c.compile(&f, entries, &in_scope)?;
                         }
                         let bytes = c.module.finish().emit().map_err(|e| e.to_string())?;
                         std::fs::write(obj_path(i), bytes).map_err(|e| e.to_string())
@@ -1425,8 +2264,21 @@ pub fn compile_program(
         return Err(e);
     }
     let mut objects: Vec<PathBuf> = (0..chunks.len()).map(obj_path).collect();
-    let table = dir.join("entries.obj");
-    std::fs::write(&table, entries_object(isa, entries)?).map_err(|e| e.to_string())?;
+    let table = write_entries(dir, "entries.obj", entries)?;
     objects.push(table);
-    Ok(CompileReport { objects, functions: entries.len(), instructions: instructions.into_inner() as u64 })
+    let sizes = objects
+        .iter()
+        .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+        .collect();
+    let step = per_object.max(1);
+    let ranges = (0..chunks.len())
+        .map(|i| i * step..i * step + chunks[i].len())
+        .collect();
+    Ok(CompileReport {
+        objects,
+        sizes,
+        chunks: ranges,
+        functions: entries.len(),
+        instructions: instructions.into_inner() as u64,
+    })
 }

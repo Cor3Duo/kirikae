@@ -64,21 +64,47 @@ impl Emitter<'_> {
             Stmt::SetSp(e) => format!("c.sp = {};", expr(e)),
             Stmt::SetNzcv(e) => format!("c.nzcv = {};", expr(e)),
             Stmt::SetSysReg(r, e) => format!("c.set_sysreg(SysReg::{r:?}, {});", expr(e)),
-            Stmt::SetV { reg, hi, value } => format!("c.v[{reg}][{}] = {};", *hi as u8, expr(value)),
-            Stmt::Store { size, addr, value } => format!("c.st{}({}, {});", *size as u32 * 8, expr(addr), expr(value)),
-            Stmt::Monitor { addr, lo, hi } => format!("c.monitor({}, {}, {});", expr(addr), expr(lo), expr(hi)),
-            Stmt::StoreExclusive { size, addr, lo, hi, status } => {
-                let call = format!("c.store_exclusive({size}, {}, {}, {})", expr(addr), expr(lo), expr(hi));
-                if *status == 31 { format!("{call};") } else { format!("c.x[{status}] = {call};") }
+            Stmt::SetV { reg, hi, value } => {
+                format!("c.v[{reg}][{}] = {};", *hi as u8, expr(value))
+            }
+            Stmt::Store { size, addr, value } => {
+                format!("c.st{}({}, {});", *size as u32 * 8, expr(addr), expr(value))
+            }
+            Stmt::Monitor { addr, lo, hi } => {
+                format!("c.monitor({}, {}, {});", expr(addr), expr(lo), expr(hi))
+            }
+            Stmt::StoreExclusive {
+                size,
+                addr,
+                lo,
+                hi,
+                status,
+            } => {
+                let call = format!(
+                    "c.store_exclusive({size}, {}, {}, {})",
+                    expr(addr),
+                    expr(lo),
+                    expr(hi)
+                );
+                if *status == 31 {
+                    format!("{call};")
+                } else {
+                    format!("c.x[{status}] = {call};")
+                }
             }
             Stmt::Fence => "std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);".into(),
             Stmt::Simd(word) => format!("kirikae_rt::simd::exec(c, {word:#010x});"),
             Stmt::Svc(imm) => {
                 let next = insn.next();
-                format!("c.pc = {next:#x}; kirikae_rt::svc(c, {imm:#x}); if c.halted || c.pc != {next:#x} {{ return; }}")
+                format!(
+                    "c.pc = {next:#x}; kirikae_rt::svc(c, {imm:#x}); if c.halted || c.pc != {next:#x} {{ return; }}"
+                )
             }
             Stmt::Undefined(word) => {
-                format!("c.pc = {:#x}; kirikae_rt::undefined(c, {:#x}, {word:#010x}); return;", insn.addr, insn.addr)
+                format!(
+                    "c.pc = {:#x}; kirikae_rt::undefined(c, {:#x}, {word:#010x}); return;",
+                    insn.addr, insn.addr
+                )
             }
             Stmt::Return(e) => format!("c.pc = {}; return;", expr(e)),
             Stmt::Jump(t) => return self.goto(indent, *t),
@@ -88,17 +114,32 @@ impl Emitter<'_> {
                 self.line(indent, "}");
                 return self.goto(indent, insn.next());
             }
-            Stmt::JumpIndirect(e) => format!("if c.poll() {{ return; }} bb = {}; continue;", expr(e)),
+            Stmt::JumpIndirect(e) => {
+                format!("if c.poll() {{ return; }} bb = {}; continue;", expr(e))
+            }
             Stmt::Call(t) => {
                 if self.prog.entries.contains(t) {
                     self.line(indent, &format!("c.pc = {t:#x}; {}(c);", fn_name(*t)));
                 } else {
-                    self.line(indent, &format!("c.pc = {t:#x}; kirikae_rt::call_indirect(c, {:#x});", insn.next()));
+                    self.line(
+                        indent,
+                        &format!(
+                            "c.pc = {t:#x}; kirikae_rt::call_indirect(c, {:#x});",
+                            insn.next()
+                        ),
+                    );
                 }
                 return self.after_call(indent, insn.next());
             }
             Stmt::CallIndirect(e) => {
-                self.line(indent, &format!("c.pc = {}; kirikae_rt::call_indirect(c, {:#x});", expr(e), insn.next()));
+                self.line(
+                    indent,
+                    &format!(
+                        "c.pc = {}; kirikae_rt::call_indirect(c, {:#x});",
+                        expr(e),
+                        insn.next()
+                    ),
+                );
                 return self.after_call(indent, insn.next());
             }
         };
@@ -124,7 +165,10 @@ impl Emitter<'_> {
 
     fn function(&mut self) {
         let f = self.func;
-        self.line(0, &format!("pub extern \"C\" fn {}(c: &mut Cpu) {{", fn_name(f.entry)));
+        self.line(
+            0,
+            &format!("pub extern \"C\" fn {}(c: &mut Cpu) {{", fn_name(f.entry)),
+        );
         self.line(1, &format!("let mut bb: u64 = {:#x};", f.entry));
         self.line(1, "loop {");
         self.line(2, "match bb {");
@@ -140,22 +184,47 @@ impl Emitter<'_> {
 }
 
 pub fn emit_function(prog: &Program, func: &Function) -> String {
-    let mut e = Emitter { out: String::new(), prog, func, block_start: func.entry };
+    let mut e = Emitter {
+        out: String::new(),
+        prog,
+        func,
+        block_start: func.entry,
+    };
     e.function();
     e.out
 }
 
 pub fn emit_program(prog: &Program, image_file: &str) -> String {
     let mut out = String::new();
-    writeln!(out, "// Generated by kirikae {}. Do not edit: rerun `kirikae build` instead.", env!("CARGO_PKG_VERSION")).unwrap();
+    writeln!(
+        out,
+        "// Generated by kirikae {}. Do not edit: rerun `kirikae build` instead.",
+        env!("CARGO_PKG_VERSION")
+    )
+    .unwrap();
     out.push_str(
         "#![allow(unused_mut, unused_variables, unused_braces, unused_imports, unused_parens, unreachable_code, non_snake_case, clippy::all)]\n\n",
     );
     out.push_str("use kirikae_rt::{ops, Cpu, SysReg};\n\n");
-    writeln!(out, "static IMAGE: &[u8] = include_bytes!({image_file:?});\n").unwrap();
-    writeln!(out, "static ENTRIES: [kirikae_rt::Entry; {}] = [", prog.functions.len()).unwrap();
+    writeln!(
+        out,
+        "static IMAGE: &[u8] = include_bytes!({image_file:?});\n"
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "static ENTRIES: [kirikae_rt::Entry; {}] = [",
+        prog.functions.len()
+    )
+    .unwrap();
     for f in &prog.functions {
-        writeln!(out, "    kirikae_rt::Entry {{ addr: {:#x}, func: {} }},", f.entry, fn_name(f.entry)).unwrap();
+        writeln!(
+            out,
+            "    kirikae_rt::Entry {{ addr: {:#x}, func: {} }},",
+            f.entry,
+            fn_name(f.entry)
+        )
+        .unwrap();
     }
     out.push_str("];\n\n");
     out.push_str("fn main() {\n    kirikae_rt::program_main(IMAGE, &ENTRIES)\n}\n\n");

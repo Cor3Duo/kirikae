@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::FuncId;
 use kirikae_a64::{Expr, Insn, Op, Stmt, SysReg};
-use kirikae_recomp::clif::{host_isa, Compiler};
+use kirikae_recomp::clif::{Compiler, host_isa};
 use kirikae_recomp::{Block, Function};
 use kirikae_rt::abi;
 
@@ -57,7 +57,10 @@ fn leaf(r: &mut Rng, tmps: u8) -> Expr {
         1 => c(r.below(16)),
         2 => Expr::Sp,
         3 => Expr::Nzcv,
-        4 => Expr::V { reg: r.below(4) as u8, hi: r.below(2) == 1 },
+        4 => Expr::V {
+            reg: r.below(4) as u8,
+            hi: r.below(2) == 1,
+        },
         5 if tmps > 0 => Expr::Tmp(r.below(tmps as u64) as u8),
         6 => Expr::SysReg(SysReg::TpidrEl0),
         _ => Expr::Reg(r.below(REGS) as u8),
@@ -79,7 +82,10 @@ fn expr(r: &mut Rng, depth: u32, tmps: u8) -> Expr {
         5 => op(Op::FlagsAdd64, vec![a, b, d]),
         6 => op(Op::Select, vec![op(Op::Bit, vec![a, c(3)]), b, d]),
         7 => op(Op::Cond, vec![Expr::Nzcv, c(r.below(16))]),
-        8 => Expr::Load { size: [1, 2, 4, 8][r.below(4) as usize], addr: Box::new(addr(r, tmps)) },
+        8 => Expr::Load {
+            size: [1, 2, 4, 8][r.below(4) as usize],
+            addr: Box::new(addr(r, tmps)),
+        },
         _ => op(Op::Umulh, vec![a, b]),
     }
 }
@@ -96,8 +102,16 @@ fn body(r: &mut Rng) -> Vec<Stmt> {
             }
             1 => Stmt::SetSp(e),
             2 => Stmt::SetNzcv(op(Op::And, vec![e, c(0xf000_0000)])),
-            3 => Stmt::SetV { reg: r.below(4) as u8, hi: r.below(2) == 1, value: e },
-            4 => Stmt::Store { size: [1, 2, 4, 8][r.below(4) as usize], addr: addr(r, tmps), value: e },
+            3 => Stmt::SetV {
+                reg: r.below(4) as u8,
+                hi: r.below(2) == 1,
+                value: e,
+            },
+            4 => Stmt::Store {
+                size: [1, 2, 4, 8][r.below(4) as usize],
+                addr: addr(r, tmps),
+                value: e,
+            },
             5 if r.below(4) == 0 => Stmt::SetSysReg(SysReg::TpidrEl0, e),
             6 => Stmt::Simd(SIMD[r.below(SIMD.len() as u64) as usize]),
             _ => Stmt::SetReg(r.below(REGS) as u8, e),
@@ -118,9 +132,17 @@ fn random_function(r: &mut Rng, entry: u64) -> Function {
         let start = starts[i];
         let alive = op(Op::Ne, vec![Expr::Reg(COUNTER), c(0)]);
         let decrement = Stmt::SetReg(COUNTER, op(Op::Sub, vec![Expr::Reg(COUNTER), alive]));
-        let mut insns = vec![Insn { addr: start, word: 0, stmts: vec![decrement] }];
+        let mut insns = vec![Insn {
+            addr: start,
+            word: 0,
+            stmts: vec![decrement],
+        }];
         for k in 0..lens[i] {
-            insns.push(Insn { addr: start + 4 + 4 * k, word: 0, stmts: body(r) });
+            insns.push(Insn {
+                addr: start + 4 + 4 * k,
+                word: 0,
+                stmts: body(r),
+            });
         }
         let last = insns.last_mut().unwrap();
         let next = last.addr + 4;
@@ -133,11 +155,18 @@ fn random_function(r: &mut Rng, entry: u64) -> Function {
                 0 | 1 => {
                     let cond = op(Op::Bit, vec![expr(r, 1, 0), c(r.below(64))]);
                     let alive = op(Op::Ne, vec![Expr::Reg(COUNTER), c(0)]);
-                    let cond = if starts[any] <= start { op(Op::And, vec![cond, alive]) } else { cond };
+                    let cond = if starts[any] <= start {
+                        op(Op::And, vec![cond, alive])
+                    } else {
+                        cond
+                    };
                     last.stmts.push(Stmt::JumpIf(cond, starts[any]));
                 }
                 2 => last.stmts.push(Stmt::Jump(forward)),
-                5 => last.stmts.push(Stmt::JumpIf(op(Op::Bit, vec![expr(r, 1, 0), c(r.below(64))]), OUTSIDE)),
+                5 => last.stmts.push(Stmt::JumpIf(
+                    op(Op::Bit, vec![expr(r, 1, 0), c(r.below(64))]),
+                    OUTSIDE,
+                )),
                 6 if r.below(3) == 0 => last.stmts.push(Stmt::Jump(OUTSIDE)),
                 3 => {
                     last.stmts.push(Stmt::SetReg(30, c(next)));
@@ -151,25 +180,53 @@ fn random_function(r: &mut Rng, entry: u64) -> Function {
                 _ => {}
             }
         }
-        blocks.push(Block { start, insns, next: starts[i + 1] });
+        blocks.push(Block {
+            start,
+            insns,
+            next: starts[i + 1],
+        });
     }
     Function { entry, blocks }
 }
 
 fn callee() -> Function {
     let stmts = vec![
-        Stmt::SetReg(0, op(Op::Add, vec![op(Op::Mul, vec![Expr::Reg(0), c(3)]), Expr::Reg(1)])),
+        Stmt::SetReg(
+            0,
+            op(
+                Op::Add,
+                vec![op(Op::Mul, vec![Expr::Reg(0), c(3)]), Expr::Reg(1)],
+            ),
+        ),
         Stmt::SetReg(2, op(Op::Xor, vec![Expr::Reg(2), Expr::Sp])),
-        Stmt::SetV { reg: 1, hi: true, value: op(Op::Add, vec![Expr::V { reg: 1, hi: false }, c(5)]) },
+        Stmt::SetV {
+            reg: 1,
+            hi: true,
+            value: op(Op::Add, vec![Expr::V { reg: 1, hi: false }, c(5)]),
+        },
         Stmt::SetNzcv(c(0x6000_0000)),
         Stmt::SetSp(op(Op::Sub, vec![Expr::Sp, c(16)])),
         Stmt::Return(Expr::Reg(30)),
     ];
-    Function { entry: CALLEE, blocks: vec![Block { start: CALLEE, insns: vec![Insn { addr: CALLEE, word: 0, stmts }], next: CALLEE + 4 }] }
+    Function {
+        entry: CALLEE,
+        blocks: vec![Block {
+            start: CALLEE,
+            insns: vec![Insn {
+                addr: CALLEE,
+                word: 0,
+                stmts,
+            }],
+            next: CALLEE + 4,
+        }],
+    }
 }
 
 fn jit(fast_regs: bool) -> Compiler<JITModule> {
-    let mut b = JITBuilder::with_isa(host_isa().unwrap(), cranelift_module::default_libcall_names());
+    let mut b = JITBuilder::with_isa(
+        host_isa().unwrap(),
+        cranelift_module::default_libcall_names(),
+    );
     for (name, ptr) in abi::helpers() {
         b.symbol(name, ptr);
     }
@@ -208,7 +265,10 @@ impl State {
     }
 
     fn observed(&self) -> (Vec<u64>, Vec<u8>) {
-        (self.cpu[abi::OFF_X / 8..abi::OFF_NZCV / 8 + 2].to_vec(), self.mem.clone())
+        (
+            self.cpu[abi::OFF_X / 8..abi::OFF_NZCV / 8 + 2].to_vec(),
+            self.mem.clone(),
+        )
     }
 }
 
@@ -216,17 +276,24 @@ impl State {
 fn fast_registers_match_memory_registers() {
     assert!(SIMD.iter().all(|w| kirikae_a64::simd::supported(*w)));
     let mut r = Rng(0x0dd5_eed5_1234_5678);
-    let funcs: Vec<Function> = (0..400).map(|i| random_function(&mut r, 0x1000 + 0x1000 * i)).collect();
+    let funcs: Vec<Function> = (0..400)
+        .map(|i| random_function(&mut r, 0x1000 + 0x1000 * i))
+        .collect();
     let mut entries: BTreeSet<u64> = funcs.iter().map(|f| f.entry).collect();
     entries.insert(CALLEE);
 
     let compile = |fast| {
         let mut c = jit(fast);
-        c.compile(&callee(), &entries).unwrap();
-        let ids: Vec<FuncId> = funcs.iter().map(|f| c.compile(f, &entries).unwrap()).collect();
+        c.compile(&callee(), &entries, &|_| true).unwrap();
+        let ids: Vec<FuncId> = funcs
+            .iter()
+            .map(|f| c.compile(f, &entries, &|_| true).unwrap())
+            .collect();
         c.module.finalize_definitions().unwrap();
-        let ptrs: Vec<extern "C" fn(*mut u64)> =
-            ids.iter().map(|id| unsafe { std::mem::transmute(c.module.get_finalized_function(*id)) }).collect();
+        let ptrs: Vec<extern "C" fn(*mut u64)> = ids
+            .iter()
+            .map(|id| unsafe { std::mem::transmute(c.module.get_finalized_function(*id)) })
+            .collect();
         (c, ptrs)
     };
     let (_slow_module, slow) = compile(false);
@@ -235,10 +302,16 @@ fn fast_registers_match_memory_registers() {
     for (i, f) in funcs.iter().enumerate() {
         for run in 0..4 {
             let mut a = State::new(&mut r);
-            let mut b = State { cpu: a.cpu.clone(), mem: a.mem.clone() };
+            let mut b = State {
+                cpu: a.cpu.clone(),
+                mem: a.mem.clone(),
+            };
             a.run(slow[i]);
             b.run(fast[i]);
-            assert!(a.observed() == b.observed(), "function {i} run {run} differs:\n{f:#x?}");
+            assert!(
+                a.observed() == b.observed(),
+                "function {i} run {run} differs:\n{f:#x?}"
+            );
         }
     }
 }
