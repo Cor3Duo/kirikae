@@ -19,23 +19,40 @@
 //!   operands, and `movw`/`movt`;
 //! - `b`, `bl`, `bx`, `blx`;
 //! - `ldr`/`str` (byte and word), `ldrh`/`strh`, `ldrsb`/`ldrsh`, `ldrd`/`strd`, and
-//!   `ldrex`/`strex` with their byte and halfword forms, all immediate or register
-//!   offset and pre/post-indexed;
+//!   `ldrex`/`strex` with their byte and halfword forms, plus the ARMv8 acquire/release
+//!   loads and stores (`lda`/`ldab`/`ldah`, `stl`/`stlb`/`stlh`);
 //! - `ldm`/`stm` in all four addressing modes;
 //! - `mul`/`mla`, `umull`/`umlal`/`smull`/`smlal`, and the halfword multiplies
 //!   (`smla<x><y>`, `smlaw<y>`, `smul<x><y>`, `smulw<y>`, `smlal<x><y>`);
+//! - the media dual multiplies (`smuad`/`smusd`/`smlad`/`smlsd` with their `x` forms,
+//!   `smlald`/`smlsld`, and `smmul`/`smmla`/`smmls` with their rounding forms) and the
+//!   integer divide (`udiv`/`sdiv`);
 //! - the media instructions: `uxtb`/`uxth`/`sxtb`/`sxth`, their 16-bit and accumulating
 //!   forms, `rev`/`rev16`/`revsh`/`rbit`/`clz`, `pkhbt`/`pkhtb`, `sel`, `ssat`/`usat`
 //!   and their 16-bit forms, `bfc`/`bfi`/`sbfx`/`ubfx`, and the whole parallel
 //!   add/subtract family (`sadd16` … `uhsub8`);
 //! - `qadd`/`qsub`/`qdadd`/`qdsub` and the system instructions `mrs`, `msr` of the
-//!   flags byte, and the hints (`nop`, `yield`, `wfe`, `wfi`, `sev`);
-//! - `svc` and `bkpt` so the discovery loop can stop at a supervisor call or a trap.
+//!   flags byte, the hints (`nop`, `yield`, `wfe`, `wfi`, `sev`) and `mrc`/`mcr` of the
+//!   two `cp15` thread pointers;
+//! - `svc` and `bkpt` so the discovery loop can stop at a supervisor call or a trap;
+//! - the unconditional-space hints and barriers (`nop`, `yield`, `wfe`, `wfi`, `sev`,
+//!   `sevl`, `dsb`, `dmb`, `isb`, `clrex`) and `pld`, which the interpreter models as
+//!   the no-ops they are for the host, and `mrrc` of the two 64-bit counters;
+//! - VFP (`vfp.rs`): `vldr`/`vstr`, `vldm`/`vstm`/`vpush`/`vpop`, `vmov` in every form
+//!   (register, immediate, core register, core pair and 8/16/32-bit element), `vdup`,
+//!   `vmrs`/`vmsr`, the fused and non-fused arithmetic, `vabs`/`vneg`/`vsqrt`, `vcmp`/
+//!   `vcmpe` with FPSCR flags, `vcvt` between precisions and to and from integers, and
+//!   `vrintr`/`vrintz`/`vrintx`;
+//! - Advanced SIMD (`neon.rs`): `vld1`…`vld4`/`vst1`…`vst4` structure transfers,
+//!   three-register integer and float arithmetic, comparisons and bitwise logic,
+//!   `vabs`/`vneg`/`vrev`, `vext` and the modified immediates.
 //!
 //! Everything else is rejected with a [`DecodeError`], never guessed and never panics.
-//! That includes the deprecated `swp`, any `msr` of the control or status fields, and
-//! the media multiply-accumulate forms (`smlad`, `smmul`), which need the Q flag rules
-//! this slice does not model.
+//! That includes the deprecated `swp`, any `msr` of the control or status fields, the
+//! VFP fixed-point conversions and two-single `vmov`, the Advanced SIMD table lookups,
+//! lane transfers, shift-by-immediate, widening/narrowing, zip/unzip/transpose and
+//! `vswp`, and the `cp15` registers other than the thread pointers, the counters and
+//! `fpscr`.
 //!
 //! # Intended integration (not wired yet)
 //!
@@ -66,11 +83,14 @@
 
 pub mod decode;
 pub mod ir;
+pub mod neon;
 pub mod opcode;
+pub mod vfp;
 
-pub use decode::{DecodeError, decode};
+pub use decode::{DecodeError, decode, describe_unsupported};
 pub use ir::{
-    Block, BlockMode, Cond, ExecState, Insn, Mem, MemSize, Offset, Operand, Reg, RegList, Shift,
-    Target,
+    A32SysReg, Block, BlockMode, Cond, Convert, DReg, ExecState, Insn, Mem, MemSize, NeonMem,
+    Offset, Operand, PostUpdate, Reg, RegList, SReg, Shift, Target, VBlock, VecShape, VfpDest,
+    VfpSys,
 };
 pub use opcode::Opcode;

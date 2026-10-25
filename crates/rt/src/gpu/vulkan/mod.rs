@@ -36,7 +36,7 @@ use pipeline::{
     pipeline_cache_matches, remove_stale_saves,
 };
 use present::Swapchain;
-use submit::{Batch, Garbage, IN_FLIGHT, RING_SIZE, Ring};
+use submit::{Batch, Garbage, IN_FLIGHT, LastSubmit, LossReport, RING_SIZE, Ring};
 use textures::{TexEntry, TexKey};
 use volumes::Volume;
 
@@ -130,6 +130,8 @@ pub struct Renderer {
     cache_saved: (u64, std::time::Instant),
     cache_saver: Option<std::thread::JoinHandle<()>>,
     guest: *const GuestMemory,
+    lost: LossReport,
+    last_submit: LastSubmit,
     pub name: String,
     pub stats: RenderStats,
     trace_state: String,
@@ -206,7 +208,9 @@ impl Drop for Renderer {
         self.save_pipeline_cache(true);
         unsafe {
             let d = &self.device;
-            let _ = d.device_wait_idle();
+            if !self.lost.is_lost() {
+                let _ = d.device_wait_idle();
+            }
             d.destroy_pipeline_cache(self.pipeline_cache, None);
             for p in self
                 .pipelines
@@ -417,7 +421,17 @@ impl Renderer {
             .shader_clip_distance(supported.shader_clip_distance == vk::TRUE)
             .shader_image_gather_extended(supported.shader_image_gather_extended == vk::TRUE)
             .depth_clamp(supported.depth_clamp == vk::TRUE)
-            .depth_bias_clamp(supported.depth_bias_clamp == vk::TRUE);
+            .depth_bias_clamp(supported.depth_bias_clamp == vk::TRUE)
+            // Maxwell shaders store through storage buffers and index guest memory without
+            // bounds checks. Without these the driver may fault (VK_ERROR_DEVICE_LOST) on an
+            // out-of-range access; robust accesses return zero or are discarded instead. The
+            // fragment/vertex store bits are required by VUID-RuntimeSpirv-NonWritable-06340
+            // for the writable storage buffers the guest shaders declare.
+            .robust_buffer_access(supported.robust_buffer_access == vk::TRUE)
+            .fragment_stores_and_atomics(supported.fragment_stores_and_atomics == vk::TRUE)
+            .vertex_pipeline_stores_and_atomics(
+                supported.vertex_pipeline_stores_and_atomics == vk::TRUE,
+            );
         let mut v13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true);
         let priorities = [1.0];
         let queues = [vk::DeviceQueueCreateInfo::default()
@@ -663,10 +677,18 @@ impl Renderer {
             cache_saved: (0, std::time::Instant::now()),
             cache_saver: None,
             guest: std::ptr::null(),
+            lost: LossReport::default(),
+            last_submit: LastSubmit::default(),
             name,
             stats: RenderStats::default(),
             trace_state: String::new(),
         })
+    }
+
+    /// Whether the host Vulkan device was lost (or a submission failed so hard that
+    /// rendering cannot continue). Rendering stops permanently after this.
+    pub fn device_lost(&self) -> bool {
+        self.lost.is_lost()
     }
 
     fn clock_start(&self) -> std::time::Instant {

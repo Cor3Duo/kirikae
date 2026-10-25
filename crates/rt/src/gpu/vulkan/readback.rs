@@ -97,6 +97,9 @@ impl Renderer {
     }
 
     pub(super) fn read_raw(&mut self, key: ImageKey, layers: u32) -> Option<Vec<u8>> {
+        if self.lost() {
+            return None;
+        }
         let bpp = bytes_per_pixel(key.format)?;
         let size = (key.width * key.height * bpp) as u64 * layers as u64;
         let (buffer, ptr) = self.readback_buffer(size)?;
@@ -126,6 +129,9 @@ impl Renderer {
         };
         self.barrier();
         self.finish();
+        if self.lost() {
+            return None;
+        }
         if !self.readback_coherent
             && let Some((_, memory, _, _)) = self.readback
         {
@@ -184,12 +190,18 @@ impl Renderer {
     }
 
     pub(super) fn readback_buffer(&mut self, size: u64) -> Option<(vk::Buffer, *mut u8)> {
+        if self.lost() {
+            return None;
+        }
         if let Some((b, _, s, p)) = self.readback
             && s >= size
         {
             return Some((b, p));
         }
         self.finish();
+        if self.lost() {
+            return None;
+        }
         unsafe {
             if let Some((b, m, _, _)) = self.readback.take() {
                 self.device.destroy_buffer(b, None);

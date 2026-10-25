@@ -1,4 +1,4 @@
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{Engines, Gpu, trace};
 use crate::mem::GuestMemory;
@@ -50,6 +50,24 @@ pub mod reg {
 }
 
 const OCCLUSION_VISIBLE: u64 = 1 << 24;
+
+static ZERO_TARGET_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// `CT_SELECT` (method 0x487) packs the number of colour targets in bits 0..4 and one
+/// 3-bit slot per output from bit 4 on, three bits apart.
+pub fn target_count(ct_select: u32) -> u32 {
+    (ct_select & 0xf).min(8)
+}
+
+/// Colour-target slot (0..8) that `CT_SELECT` maps output `k` to.
+pub fn target_slot(ct_select: u32, k: u32) -> usize {
+    (ct_select >> (4 + 3 * k) & 7) as usize
+}
+
+/// First method of colour target `slot`'s block: eight slots of sixteen methods each.
+pub fn color_block(slot: usize) -> usize {
+    reg::COLOR_TARGET + 16 * slot
+}
 
 pub const STAGES: usize = 6;
 pub const STAGE_NAMES: [&str; STAGES] = [
@@ -273,14 +291,15 @@ impl Gpu {
                     )
                 })
                 .collect();
-            let rt = reg::COLOR_TARGET;
+            let ct = regs[reg::CT_SELECT];
+            let slot = target_slot(ct, 0);
+            let base = color_block(slot);
             eprintln!(
-                "gpu: draw #{n} {draw:?} rt0 {:#x} {}x{} fmt {:#x} ct_select {:#x}; shaders {}; cb[fragment] {:?}",
-                address(regs, rt),
-                regs[rt + 2],
-                regs[rt + 3],
-                regs[rt + 4],
-                regs[reg::CT_SELECT],
+                "gpu: draw #{n} {draw:?} rt0[slot {slot}] {:#x} {}x{} fmt {:#x} ct_select {ct:#x}; shaders {}; cb[fragment] {:?}",
+                address(regs, base),
+                regs[base + 2],
+                regs[base + 3],
+                regs[base + 4],
                 stages.join(", "),
                 cbs[4]
                     .iter()
@@ -297,19 +316,52 @@ impl Gpu {
                     .collect();
                 eprintln!("gpu:   regs {}", nz.join(" "));
             }
-            let ct = regs[reg::CT_SELECT];
-            for k in 1..(ct & 0xf).min(8) {
-                let base = reg::COLOR_TARGET + 16 * (ct >> (4 + 3 * k) & 7) as usize;
+            for k in 1..target_count(ct) {
+                let at = color_block(target_slot(ct, k));
                 eprintln!(
-                    "gpu:   target {k}: {:#x} regs {:x?}",
-                    address(regs, base),
-                    &regs[base + 2..base + 9]
+                    "gpu:   target {k} (slot {}): {:#x} {}x{} fmt {:#x} regs {:x?}",
+                    target_slot(ct, k),
+                    address(regs, at),
+                    regs[at + 2],
+                    regs[at + 3],
+                    regs[at + 4],
+                    &regs[at + 2..at + 10]
                 );
             }
-            if regs[reg::COLOR_TARGET + 6] & 0xffff > 1 || regs[reg::COLOR_TARGET + 8] != 0 {
+            if regs[base + 6] & 0xffff > 1 || regs[base + 8] != 0 {
                 eprintln!(
-                    "gpu:   target 0 layered: regs {:x?}",
-                    &regs[reg::COLOR_TARGET + 2..reg::COLOR_TARGET + 9]
+                    "gpu:   target 0 layered: layers {:#x} layer stride {:#x} base layer {:#x}",
+                    regs[base + 6] & 0xffff,
+                    regs[base + 7],
+                    regs[base + 8]
+                );
+            }
+            // A guest that writes a size and a format but leaves the address pair at zero
+            // has bound the geometry of a target and not the surface. Nothing downstream can
+            // recover it, so the whole block is reported once instead of failing every draw.
+            if address(regs, base) == 0 && !ZERO_TARGET_REPORTED.swap(true, Ordering::Relaxed) {
+                eprintln!(
+                    "gpu: colour targets: draw #{n} names {} target(s) and slot {slot}'s address registers {:#x}/{:#x} are zero; the guest wrote the size and format but no surface, so every draw is skipped",
+                    target_count(ct),
+                    base,
+                    base + 1
+                );
+                for slot in 0..8 {
+                    let base = color_block(slot);
+                    if regs[base..base + 10].iter().any(|&w| w != 0) {
+                        eprintln!(
+                            "gpu:   target {slot} methods {base:#x}..{:#x}: {:x?}",
+                            base + 9,
+                            &regs[base..base + 10]
+                        );
+                    }
+                }
+                eprintln!(
+                    "gpu:   depth methods {:#x}..{:#x}: {:x?} size {:x?}",
+                    reg::ZT_A,
+                    reg::ZT_A + 5,
+                    &regs[reg::ZT_A..reg::ZT_A + 6],
+                    [regs[0x48a], regs[0x48b]]
                 );
             }
         }
@@ -432,5 +484,71 @@ impl Gpu {
             b.extend_from_slice(&super::report_ticks().to_le_bytes());
             self.write(mem, addr, &b);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The block Brilliant Diamond's driver writes: the size, the format and the tiling of the
+    /// window target, and both address words zero.
+    fn bd_registers() -> Vec<u32> {
+        let mut regs = vec![0u32; 0x1000];
+        regs[reg::COLOR_TARGET + 2] = 1920;
+        regs[reg::COLOR_TARGET + 3] = 1080;
+        regs[reg::COLOR_TARGET + 4] = 0xd5;
+        regs[reg::COLOR_TARGET + 5] = 0x40;
+        regs[reg::COLOR_TARGET + 6] = 1;
+        regs[reg::COLOR_TARGET + 7] = 0x21c000;
+        regs[reg::CT_SELECT] = 0xfac_6881;
+        regs
+    }
+
+    /// The block Super Mario Bros. Wonder's driver writes for its first window texture.
+    fn smbw_registers() -> Vec<u32> {
+        let mut regs = bd_registers();
+        regs[reg::COLOR_TARGET] = 0x2;
+        regs[reg::COLOR_TARGET + 1] = 0x01e0_0000;
+        regs[reg::COLOR_TARGET + 4] = 0xd6;
+        regs
+    }
+
+    #[test]
+    fn ct_select_names_the_colour_target_slots() {
+        assert_eq!(target_count(0xfac_6881), 1);
+        assert_eq!(target_slot(0xfac_6881, 0), 0);
+        assert_eq!(color_block(0), reg::COLOR_TARGET);
+        // Two outputs, the first in slot 0 and the second in slot 3.
+        let ct = 2 | 3 << 7;
+        assert_eq!(target_count(ct), 2);
+        assert_eq!(target_slot(ct, 0), 0);
+        assert_eq!(target_slot(ct, 1), 3);
+        assert_eq!(color_block(3), reg::COLOR_TARGET + 0x30);
+    }
+
+    #[test]
+    fn the_bd_block_has_a_size_and_a_format_but_no_address() {
+        let regs = bd_registers();
+        let base = color_block(target_slot(regs[reg::CT_SELECT], 0));
+        assert_eq!(address(&regs, base), 0);
+        assert_eq!(
+            (regs[base + 2], regs[base + 3], regs[base + 4]),
+            (1920, 1080, 0xd5)
+        );
+        let format = crate::gpu::formats::color_target(regs[base + 4]).unwrap();
+        assert_eq!(format.bytes, 4);
+    }
+
+    #[test]
+    fn the_smbw_block_carries_the_window_texture_address() {
+        let regs = smbw_registers();
+        let base = color_block(target_slot(regs[reg::CT_SELECT], 0));
+        assert_eq!(address(&regs, base), 0x2_01e0_0000);
+        assert_eq!(
+            (regs[base + 2], regs[base + 3], regs[base + 4]),
+            (1920, 1080, 0xd6)
+        );
+        assert_eq!(base, reg::COLOR_TARGET);
     }
 }

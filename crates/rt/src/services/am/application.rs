@@ -553,7 +553,7 @@ mod tests {
             app_reply(&app, 20, vec![0; 0x10]).data,
             SAVE_DATA_SIZE.to_le_bytes()
         );
-        assert_eq!(app_reply(&app, 24, Vec::new()).data, [1, 1]);
+        assert_eq!(app_reply(&app, 24, Vec::new()).data, [4, 4]);
 
         let mut extend = vec![0u8; 0x28];
         extend[0] = 1;

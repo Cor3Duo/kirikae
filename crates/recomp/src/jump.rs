@@ -20,7 +20,7 @@
 
 use std::collections::BTreeSet;
 
-use kirikae_a64::{Control, Expr, Stmt};
+use kirikae_a64::{Control, Expr, Insn, Stmt};
 
 use crate::discover::CodeSpace;
 
@@ -38,6 +38,12 @@ const MIN_UNBOUNDED: usize = 4;
 const MAX_UNBOUNDED: usize = 64;
 /// Farthest a case label may be from its `br`.
 const MAX_SPAN: u64 = 1 << 20;
+/// How far back a register the run never writes may have been set: a table base is commonly
+/// loaded with `adrp`/`add` before the bound check, outside the run this pass symbolically
+/// executes.
+const MAX_LOOKBACK: u64 = 48;
+/// How many register definitions folding a constant may chain (`adrp` then `add` is two).
+const MAX_FOLD_DEPTH: u32 = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Table {
@@ -243,9 +249,121 @@ fn bound(space: &CodeSpace, at: u64) -> Option<(u8, u64)> {
     (count > 0 && count <= MAX_CASES).then_some((index, count))
 }
 
+/// Whether the instruction materialises an address (`adr`, `adrp` or `add` immediate).
+///
+/// Only these may be folded backwards: a table base set up once with `adrp`/`add` is the same on
+/// every path, while folding an arbitrary constant would also fold a switch index that happens to
+/// have a literal definition somewhere earlier.
+fn is_address_forming(word: u32) -> bool {
+    word & 0x9f00_0000 == 0x1000_0000
+        || word & 0x9f00_0000 == 0x9000_0000
+        || (word & 0xff80_0000 == 0x9100_0000 && (word >> 22) & 3 == 0)
+}
+
+/// A value `reg` still holds on the fall-through path before `at`, when its nearest definition is
+/// a constant.
+///
+/// A table base is often hoisted out of the run (`adrp x20, page; add x20, x20, #off` before the
+/// bound check), so the symbolic run sees a free register and gives up. Scanning backwards finds
+/// the definition. Reading backwards stays on the executed path: a conditional branch and a
+/// forward unconditional branch do not end the search (the code after them is reached from their
+/// target, and the definition is before both), while a backward jump, an indirect jump or a return
+/// does (the previous instruction need not have run). A call clobbers the caller-saved registers
+/// but not `x19`..`x28`.
+///
+/// Crossing a forward branch can read a definition that a different path would not have run. That
+/// only makes the decoded table wrong, never the generated code: an indirect jump dispatches with
+/// the value computed at run time, so the targets this reads only decide which blocks are lifted.
+fn constant_before(space: &CodeSpace, at: u64, reg: u8, depth: u32) -> Option<u64> {
+    if depth == 0 || reg >= 31 {
+        return None;
+    }
+    let mut addr = at;
+    for _ in 0..MAX_LOOKBACK {
+        addr = addr.checked_sub(4)?;
+        let insn = space.lift(addr)?;
+        match insn.control() {
+            // A forward unconditional branch does not end the search: the code after it was
+            // entered at its target, and a table base set before the branch is still there.
+            Control::Jump(t) if t > addr => {}
+            Control::Jump(_) | Control::JumpIndirect | Control::Return | Control::Undefined => {
+                return None;
+            }
+            Control::Call(_) | Control::CallIndirect if reg < 19 => return None,
+            _ => {}
+        }
+        for s in &insn.stmts {
+            if let Stmt::SetReg(n, _) = s
+                && *n == reg
+            {
+                return is_address_forming(insn.word)
+                    .then(|| fold_insn(space, addr, &insn, reg, depth - 1))
+                    .flatten();
+            }
+        }
+    }
+    None
+}
+
+/// A value from the instruction's own expression, with its `Let` temporaries folded.
+fn partial(space: &CodeSpace, at: u64, e: &Expr, tmp: &[Option<u64>], depth: u32) -> Option<u64> {
+    match e {
+        Expr::Const(v) => Some(*v),
+        Expr::Tmp(n) => *tmp.get(*n as usize)?,
+        Expr::Reg(n) => constant_before(space, at, *n, depth),
+        Expr::Op(op, args) => {
+            let values: Vec<u64> = args
+                .iter()
+                .map(|a| partial(space, at, a, tmp, depth))
+                .collect::<Option<_>>()?;
+            Some(op.eval(&values))
+        }
+        _ => None,
+    }
+}
+
+/// The constant `reg` is set to by `insn`, replaying the `Let` temporaries that feed it.
+fn fold_insn(space: &CodeSpace, at: u64, insn: &Insn, reg: u8, depth: u32) -> Option<u64> {
+    let mut tmp: Vec<Option<u64>> = vec![None; 8];
+    for s in &insn.stmts {
+        match s {
+            Stmt::Let(n, e) => {
+                let value = partial(space, at, e, &tmp, depth);
+                if let Some(slot) = tmp.get_mut(*n as usize) {
+                    *slot = value;
+                }
+            }
+            Stmt::SetReg(n, e) if *n == reg => return partial(space, at, e, &tmp, depth),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Replace every register the run left free with the constant it holds there, when it has one.
+fn with_constants(space: &CodeSpace, start: u64, e: &Expr, depth: u32) -> Expr {
+    match e {
+        Expr::Reg(n) => {
+            constant_before(space, start, *n, depth).map_or_else(|| e.clone(), Expr::Const)
+        }
+        Expr::Op(op, args) => Expr::Op(
+            *op,
+            args.iter()
+                .map(|a| with_constants(space, start, a, depth))
+                .collect(),
+        ),
+        Expr::Load { size, addr } => Expr::Load {
+            size: *size,
+            addr: Box::new(with_constants(space, start, addr, depth)),
+        },
+        other => other.clone(),
+    }
+}
+
 /// Read the table behind `br`, or `None` when the site is not a table this pass can follow.
 pub fn jump_table(space: &CodeSpace, br: u64) -> Option<Table> {
     let (start, expr) = destination(space, br)?;
+    let expr = with_constants(space, start, &expr, MAX_FOLD_DEPTH);
     let index = index_register(space, &expr);
     let Some(index) = index else {
         // No free register: either a constant destination or an expression that still depends on

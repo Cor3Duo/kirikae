@@ -83,13 +83,48 @@ const SURFACE_BLOCK_HEIGHT_LOG2: u32 = 1;
 /// output is matched to the entry with the lowest picture order count (the next
 /// one in display order). Entries of an earlier IDR period are consumed first
 /// because the decoder still owes their pictures when a new period starts.
-const MAX_PENDING_PICTURES: usize = 8;
+///
+/// A conforming stream reorders at most its DPB, and the rebuilt SPS never asks
+/// for more than [`h264::MAX_REFERENCE_FRAMES`], so one slot more than that
+/// covers the whole output queue.
+const MAX_PENDING_PICTURES: usize = h264::MAX_REFERENCE_FRAMES as usize + 1;
 
 struct PendingPicture {
     luma: u32,
     chroma: u32,
     poc: i32,
     period: u64,
+}
+
+/// Picture-setup fields that make the rebuilt parameter sets (and therefore the
+/// decoder state) incompatible with the previous stream on the channel.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SetupKey {
+    width_mbs: u32,
+    height_mbs: u32,
+    frame_mbs_only: bool,
+    chroma_format_idc: u32,
+    entropy_coding_mode: bool,
+    pic_order_cnt_type: u32,
+    log2_max_pic_order_cnt_lsb_minus4: u32,
+    log2_max_frame_num_minus4: u32,
+    crop: h264::Crop,
+}
+
+impl SetupKey {
+    fn of(info: &PictureInfo) -> SetupKey {
+        SetupKey {
+            width_mbs: info.width_mbs,
+            height_mbs: info.height_mbs,
+            frame_mbs_only: info.frame_mbs_only,
+            chroma_format_idc: info.chroma_format_idc,
+            entropy_coding_mode: info.entropy_coding_mode,
+            pic_order_cnt_type: info.pic_order_cnt_type,
+            log2_max_pic_order_cnt_lsb_minus4: info.log2_max_pic_order_cnt_lsb_minus4,
+            log2_max_frame_num_minus4: info.log2_max_frame_num_minus4,
+            crop: info.sps.crop,
+        }
+    }
 }
 
 impl PendingPicture {
@@ -114,6 +149,7 @@ struct H264Channel {
     decoder: h264::Decoder,
     pending: VecDeque<PendingPicture>,
     period: u64,
+    setup: Option<SetupKey>,
 }
 
 impl H264Channel {
@@ -122,8 +158,49 @@ impl H264Channel {
             decoder: h264::Decoder::new()?,
             pending: VecDeque::new(),
             period: 0,
+            setup: None,
         })
     }
+}
+
+/// Writes every picture OpenH264 still holds for this channel, in display order,
+/// into the surfaces their access units named.
+///
+/// Returns how many pictures were written. Used when the stream ends (an empty
+/// submission), when its parameter sets change, and when the guest changes the
+/// input buffer; without it the final picture of a stream is only produced when
+/// the next IDR arrives.
+fn flush_pictures(dma: &Dma, context: u32, channel: &mut H264Channel) -> Result<usize, String> {
+    let pictures = channel.decoder.flush()?;
+    // Surfaces the queue no longer has (an older IDR period whose entries were
+    // dropped) cannot be written; the oldest owed pictures go first.
+    let wanted = pictures.len().min(channel.pending.len());
+    let mut written = 0;
+    for picture in pictures.into_iter().take(wanted) {
+        let target = PendingPicture::take_for_output(&mut channel.pending, channel.period)
+            .ok_or_else(|| "NVDEC: flushed picture has no pending surface".to_string())?;
+        if !write_picture(dma, target.luma, target.chroma, &picture) {
+            return Err(format!(
+                "NVDEC: output surface at luma {:#x} / chroma {:#x} is not mapped",
+                (target.luma as u64) << 8,
+                (target.chroma as u64) << 8
+            ));
+        }
+        written += 1;
+        clock::decoded();
+        if trace() {
+            eprintln!(
+                "nvdec: H.264 flush on channel {context}: {}x{} picture at poc {} -> surface {:#x} ({} pending)",
+                picture.width,
+                picture.height,
+                target.poc,
+                (target.luma as u64) << 8,
+                channel.pending.len()
+            );
+        }
+    }
+    channel.pending.clear();
+    Ok(written)
 }
 
 pub struct Nvdec {
@@ -189,7 +266,7 @@ impl Nvdec {
         let raw = dma
             .read(setup, h264::PICTURE_INFO_SIZE)
             .ok_or_else(|| format!("NVDEC: picture setup {setup:#x} is not mapped"))?;
-        let info = PictureInfo::parse(&raw);
+        let mut info = PictureInfo::parse(&raw);
         let base = self.regs[reg::IN_BUF_BASE as usize];
         let slices = dma
             .read(base, info.bitstream_size as usize)
@@ -198,10 +275,31 @@ impl Nvdec {
             return Err("NVDEC: interlaced H.264 is not supported".into());
         }
         if slices.is_empty() {
-            if trace() {
-                eprintln!("nvdec: H.264 submit with an empty bitstream on channel {context}");
+            // An empty submission is the guest's end-of-stream/flush signal: the
+            // decoder still owes the pictures in its reorder buffer, and without
+            // draining them the last frames of a stream are only produced when
+            // the next IDR arrives.
+            let Some(channel) = self.h264.get_mut(&context) else {
+                if trace() {
+                    eprintln!(
+                        "nvdec: H.264 flush on channel {context} with no decoder; nothing to drain"
+                    );
+                }
+                return Ok(());
+            };
+            let flushed = flush_pictures(dma, context, channel)?;
+            self.pictures += flushed as u64;
+            if trace() && flushed == 0 {
+                eprintln!("nvdec: H.264 flush on channel {context}: decoder held no picture");
             }
             return Ok(());
+        }
+        // The picture setup does not carry the cropping rectangle, the level or
+        // `max_num_ref_frames`. A title that leaves its parameter sets in band
+        // supplies them; otherwise the rebuilt SPS uses the coded size and a
+        // level derived from the picture size.
+        if let Some(sps) = h264::in_band_sps(&slices) {
+            info.sps = sps;
         }
         if let Some(dir) = std::env::var_os("KIRIKAE_VIDEO_DUMP") {
             let path = std::path::Path::new(&dir).join(format!("nvdec-{context}.h264"));
@@ -210,7 +308,9 @@ impl Nvdec {
                 .append(true)
                 .open(path)
             {
-                let _ = f.write_all(&h264::parameter_sets(&info));
+                if let Ok(sets) = h264::parameter_sets(&info) {
+                    let _ = f.write_all(&sets);
+                }
                 let _ = f.write_all(&slices);
             }
         }
@@ -227,6 +327,20 @@ impl Nvdec {
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
             std::collections::hash_map::Entry::Vacant(e) => e.insert(H264Channel::new()?),
         };
+        let key = SetupKey::of(&info);
+        if channel.setup.is_some_and(|previous| previous != key) {
+            // A new resolution or entropy mode starts a new stream: the decoder
+            // cannot mix the two, so the old reorder buffer is drained first.
+            let flushed = flush_pictures(dma, context, channel)?;
+            self.pictures += flushed as u64;
+            if trace() {
+                eprintln!(
+                    "nvdec: H.264 setup changed on channel {context} ({}x{} MBs), flushed {flushed} picture(s)",
+                    info.width_mbs, info.height_mbs
+                );
+            }
+        }
+        channel.setup = Some(key);
         if contains_idr(&slices) {
             channel.period += 1;
             let keep_from = channel.period.saturating_sub(1);
@@ -249,13 +363,15 @@ impl Nvdec {
             }
         };
         self.pictures += 1;
+        let (coded_width, coded_height) = info.coded_size();
+        let (width, height) = info.display_size();
+        let (level, refs) = h264::level_and_refs(&info).unwrap_or((0, 0));
         let Some(picture) = frame else {
             if trace() {
                 eprintln!(
-                    "nvdec: H.264 picture {} on channel {context}: {}x{} MBs, {} bytes in {} slices, frame_num {}, poc {}, surface {surface} -> no output yet",
+                    "nvdec: H.264 picture {} on channel {context}: {coded_width}x{coded_height} MBs, {width}x{height} display (crop {:?}), {} bytes in {} slices, frame_num {}, poc {}, surface {surface} -> no output yet",
                     self.pictures,
-                    info.width_mbs,
-                    info.height_mbs,
+                    info.sps.crop,
                     info.bitstream_size,
                     info.num_slices,
                     info.frame_num,
@@ -268,10 +384,9 @@ impl Nvdec {
             .ok_or_else(|| "NVDEC: decoded picture has no pending surface".to_string())?;
         if trace() {
             eprintln!(
-                "nvdec: H.264 picture {} on channel {context}: {}x{} MBs, {} bytes in {} slices, frame_num {}, poc {}, surface {surface} (poc {} at luma {:#x}, chroma {:#x}) -> decoded (8-bit)",
+                "nvdec: H.264 picture {} on channel {context}: {coded_width}x{coded_height} MBs, {width}x{height} display (crop {:?}), {} bytes in {} slices, frame_num {}, poc {}, surface {surface} (poc {} at luma {:#x}, chroma {:#x}) -> decoded (8-bit, level {}, {} refs)",
                 self.pictures,
-                info.width_mbs,
-                info.height_mbs,
+                info.sps.crop,
                 info.bitstream_size,
                 info.num_slices,
                 info.frame_num,
@@ -279,6 +394,8 @@ impl Nvdec {
                 target.poc,
                 (target.luma as u64) << 8,
                 (target.chroma as u64) << 8,
+                level,
+                refs,
             );
         }
         if !write_picture(dma, target.luma, target.chroma, &picture) {
@@ -633,6 +750,122 @@ mod tests {
         assert!(contains_idr(&[0, 0, 1, 0x65, 0x88]));
         assert!(!contains_idr(&[0, 0, 0, 1, 0x41, 0x9a]));
         assert!(!contains_idr(&[0, 0, 0, 1, 0x67, 0x64]));
+    }
+
+    /// The decoder holds a picture until the next submission, so a stream that
+    /// ends without one loses its last frame. An empty submission is the
+    /// guest's flush: it drains the reorder buffer into the pending surfaces.
+    #[cfg(feature = "h264")]
+    #[test]
+    fn an_empty_submission_flushes_the_last_picture() {
+        use crate::host1x::h264::support::{setup_from, write_setup};
+        use openh264::decoder::Decoder as OpenH264;
+        use openh264::encoder::Encoder;
+        use openh264::formats::{RgbSliceU8, YUVBuffer, YUVSource};
+
+        const SETUP: usize = 0x0000;
+        const BITSTREAM: usize = 0x1000;
+        let (w, h) = (96usize, 64usize);
+        let mut encoder = Encoder::new().unwrap();
+        let frames: Vec<Vec<u8>> = (0..3)
+            .map(|t| {
+                let rgb: Vec<u8> = (0..w * h)
+                    .flat_map(|i| {
+                        [
+                            (i % w * 2 + t * 17) as u8,
+                            (i / w * 4 + t * 9) as u8,
+                            (i * 5 + t * 11 % 251) as u8,
+                        ]
+                    })
+                    .collect();
+                encoder
+                    .encode(&YUVBuffer::from_rgb8_source(RgbSliceU8::new(&rgb, (w, h))))
+                    .unwrap()
+                    .to_vec()
+            })
+            .collect();
+        let nal_type = |n: &[u8]| n[n.iter().position(|&b| b == 1).unwrap() + 1] & 0x1f;
+        let body = |n: &[u8]| n[n.iter().position(|&b| b == 1).unwrap() + 2..].to_vec();
+        let nals: Vec<&[u8]> = openh264::nal_units(&frames[0]).collect();
+        let sps = body(nals.iter().find(|n| nal_type(n) == 7).unwrap());
+        let pps = body(nals.iter().find(|n| nal_type(n) == 8).unwrap());
+        let slices = |frame: &[u8]| -> Vec<u8> {
+            openh264::nal_units(frame)
+                .filter(|n| matches!(nal_type(n), 1 | 5))
+                .flatten()
+                .copied()
+                .collect()
+        };
+        let mut setup = setup_from(&sps, &pps);
+        setup.output_surface = 0;
+
+        let harness = Harness::new();
+        let mut nvdec = Nvdec::default();
+        let dma = harness.dma();
+        nvdec
+            .write(&dma, 0, reg::APPLICATION_ID, CODEC_H264)
+            .unwrap();
+        nvdec
+            .write(&dma, 0, reg::DRV_PIC_SETUP, harness.at(SETUP))
+            .unwrap();
+        nvdec
+            .write(&dma, 0, reg::IN_BUF_BASE, harness.at(BITSTREAM))
+            .unwrap();
+        nvdec
+            .write(&dma, 0, reg::PICTURE_LUMA, harness.at(LUMA))
+            .unwrap();
+        nvdec
+            .write(&dma, 0, reg::PICTURE_CHROMA, harness.at(CHROMA))
+            .unwrap();
+
+        for frame in &frames {
+            let au = slices(frame);
+            setup.bitstream_size = au.len() as u32;
+            assert!(
+                harness
+                    .mem
+                    .write(0x8000_0000 + SETUP as u64, &write_setup(&setup))
+            );
+            assert!(harness.mem.write(0x8000_0000 + BITSTREAM as u64, &au));
+            nvdec.write(&dma, 0, reg::EXECUTE, 0).unwrap();
+        }
+        // No empty submission: the last picture has not reached the surface;
+        // the one before it is the newest one written. The reference decodes the
+        // stream in order because only the first access unit carries the SPS.
+        let mut reference = OpenH264::new().unwrap();
+        let mut decoded: Vec<Vec<u8>> = Vec::new();
+        for frame in &frames {
+            let yuv = reference.decode(frame).unwrap().expect("reference picture");
+            let stride = yuv.strides().0;
+            decoded.push(
+                (0..h)
+                    .flat_map(|y| yuv.y()[y * stride..y * stride + w].iter().copied())
+                    .collect(),
+            );
+        }
+        assert_eq!(
+            harness.read_plane(LUMA, w, h),
+            decoded[1],
+            "frame 1 was presented"
+        );
+
+        // Flush: the decoder's last picture is written now.
+        setup.bitstream_size = 0;
+        assert!(
+            harness
+                .mem
+                .write(0x8000_0000 + SETUP as u64, &write_setup(&setup))
+        );
+        nvdec.write(&dma, 0, reg::EXECUTE, 0).unwrap();
+        assert_eq!(
+            harness.read_plane(LUMA, w, h),
+            decoded[2],
+            "flushed picture"
+        );
+
+        // A second flush has nothing to add.
+        nvdec.write(&dma, 0, reg::EXECUTE, 0).unwrap();
+        assert_eq!(harness.read_plane(LUMA, w, h), decoded[2]);
     }
 
     #[test]

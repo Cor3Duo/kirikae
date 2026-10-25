@@ -1,6 +1,6 @@
-use kirikae_a64::asm::{self, cond, Asm, FP, LR, SP, XZR};
-use kirikae_loader::nro::{Header, Segment, HEADER_SIZE};
+use kirikae_a64::asm::{self, Asm, FP, LR, SP, XZR, cond};
 use kirikae_loader::LOAD_BASE;
+use kirikae_loader::nro::{HEADER_SIZE, Header, Segment};
 
 const TEXT: u32 = 0x0000;
 const RO: u32 = 0x1000;
@@ -38,7 +38,11 @@ struct Program {
 
 impl Program {
     fn new() -> Program {
-        let mut p = Program { a: Asm::new(LOAD_BASE + HEADER_SIZE as u64), ro: Vec::new(), mod0_at: 0 };
+        let mut p = Program {
+            a: Asm::new(LOAD_BASE + HEADER_SIZE as u64),
+            ro: Vec::new(),
+            mod0_at: 0,
+        };
         p.ro.extend_from_slice(&[0u8; 0x1c]);
         p.string("msg_nl", b"\n");
         p.a.define("numbuf_end", BSS + 32);
@@ -56,7 +60,10 @@ impl Program {
     }
 
     fn print(&mut self, label: &str, len: u64) {
-        self.a.addr_of(0, label).mov_imm(1, len).emit(asm::svc(SVC_OUTPUT_DEBUG_STRING));
+        self.a
+            .addr_of(0, label)
+            .mov_imm(1, len)
+            .emit(asm::svc(SVC_OUTPUT_DEBUG_STRING));
     }
 
     fn emit_print_u64(&mut self) {
@@ -71,7 +78,9 @@ impl Program {
         a.emit(asm::add_imm(5, 5, b'0' as u32));
         a.emit(asm::ldst_imm9(0, 0, 5, 2, -1, 3));
         a.emit(asm::mov_reg(0, 4)).cbnz_to(0, "digit");
-        a.emit(asm::sub_reg(1, 1, 2)).emit(asm::mov_reg(0, 2)).emit(asm::svc(SVC_OUTPUT_DEBUG_STRING));
+        a.emit(asm::sub_reg(1, 1, 2))
+            .emit(asm::mov_reg(0, 2))
+            .emit(asm::svc(SVC_OUTPUT_DEBUG_STRING));
         self.print("msg_nl", 1);
         let a = &mut self.a;
         a.emit(asm::ldstp(2, 1, true, FP, LR, SP, 16));
@@ -81,12 +90,23 @@ impl Program {
     fn finish(mut self, bss_size: u32) -> Vec<u8> {
         let mod0_addr = LOAD_BASE + RO as u64 + self.mod0_at as u64;
         let rel = |addr: u64| (addr as i64 - mod0_addr as i64) as i32 as u32;
-        let mod0 = [u32::from_le_bytes(*b"MOD0"), 0, rel(BSS), rel(BSS + bss_size as u64), 0, 0, 0];
+        let mod0 = [
+            u32::from_le_bytes(*b"MOD0"),
+            0,
+            rel(BSS),
+            rel(BSS + bss_size as u64),
+            0,
+            0,
+            0,
+        ];
         for (i, v) in mod0.iter().enumerate() {
             let at = self.mod0_at + 4 * i;
             self.ro[at..at + 4].copy_from_slice(&v.to_le_bytes());
         }
-        assert!(self.ro.len() <= PAGE as usize, "test program outgrew its rodata page");
+        assert!(
+            self.ro.len() <= PAGE as usize,
+            "test program outgrew its rodata page"
+        );
 
         let words = self.a.finish();
         let text_size = HEADER_SIZE as u32 + 4 * words.len() as u32;
@@ -104,9 +124,18 @@ impl Program {
             version: 0,
             size: file.len() as u32,
             flags: 0,
-            text: Segment { offset: TEXT, size: RO },
-            ro: Segment { offset: RO, size: PAGE },
-            data: Segment { offset: DATA, size: PAGE },
+            text: Segment {
+                offset: TEXT,
+                size: RO,
+            },
+            ro: Segment {
+                offset: RO,
+                size: PAGE,
+            },
+            data: Segment {
+                offset: DATA,
+                size: PAGE,
+            },
             bss_size,
             module_id: [0; 32],
             dso_handle_offset: 0,
@@ -135,14 +164,19 @@ pub fn hello_nro() -> Vec<u8> {
     p.a.emit(asm::add_imm(FP, SP, 0));
     p.print("msg_hello", hello);
 
-    p.a.emit(asm::movz(true, 0, 0, 0)).emit(asm::movz(true, 1, 100, 0));
+    p.a.emit(asm::movz(true, 0, 0, 0))
+        .emit(asm::movz(true, 1, 100, 0));
     p.a.label("sum_loop");
-    p.a.emit(asm::add_reg(0, 0, 1)).emit(asm::subs_imm(1, 1, 1)).bcond_to(cond::NE, "sum_loop");
+    p.a.emit(asm::add_reg(0, 0, 1))
+        .emit(asm::subs_imm(1, 1, 1))
+        .bcond_to(cond::NE, "sum_loop");
     p.a.emit(asm::mov_reg(19, 0));
     p.print("msg_sum", sum);
     p.a.emit(asm::mov_reg(0, 19)).bl_to("print_u64");
 
-    p.a.adr_to(9, "square").emit(asm::movz(true, 0, 12, 0)).emit(asm::blr(9));
+    p.a.adr_to(9, "square")
+        .emit(asm::movz(true, 0, 12, 0))
+        .emit(asm::blr(9));
     p.a.emit(asm::mov_reg(19, 0));
     p.print("msg_square", square);
     p.a.emit(asm::mov_reg(0, 19)).bl_to("print_u64");
@@ -152,12 +186,18 @@ pub fn hello_nro() -> Vec<u8> {
     p.a.label("switch_loop");
     p.a.emit(asm::mov_reg(0, 20)).bl_to("classify");
     p.a.addr_of(1, "chbuf").emit(asm::ldst_uimm(0, 0, 0, 1, 0));
-    p.a.emit(asm::mov_reg(0, 1)).emit(asm::movz(true, 1, 1, 0)).emit(asm::svc(SVC_OUTPUT_DEBUG_STRING));
-    p.a.emit(asm::add_imm(20, 20, 1)).emit(asm::cmp_imm(20, 4)).bcond_to(cond::NE, "switch_loop");
+    p.a.emit(asm::mov_reg(0, 1))
+        .emit(asm::movz(true, 1, 1, 0))
+        .emit(asm::svc(SVC_OUTPUT_DEBUG_STRING));
+    p.a.emit(asm::add_imm(20, 20, 1))
+        .emit(asm::cmp_imm(20, 4))
+        .bcond_to(cond::NE, "switch_loop");
     p.print("msg_nl", 1);
 
     p.print("msg_fib", fib);
-    p.a.emit(asm::movz(true, 0, 15, 0)).bl_to("fib").bl_to("print_u64");
+    p.a.emit(asm::movz(true, 0, 15, 0))
+        .bl_to("fib")
+        .bl_to("print_u64");
 
     p.a.emit(asm::ldstp(2, 1, true, FP, LR, SP, 16));
     p.a.emit(asm::svc(SVC_EXIT_PROCESS));
@@ -185,7 +225,9 @@ pub fn hello_nro() -> Vec<u8> {
     a.emit(asm::str(19, SP, 16));
     a.emit(asm::cmp_imm(0, 2)).bcond_to(cond::LO, "fib_out");
     a.emit(asm::mov_reg(19, 0));
-    a.emit(asm::sub_imm(0, 19, 1)).bl_to("fib").emit(asm::str(0, SP, 24));
+    a.emit(asm::sub_imm(0, 19, 1))
+        .bl_to("fib")
+        .emit(asm::str(0, SP, 24));
     a.emit(asm::sub_imm(0, 19, 2)).bl_to("fib");
     a.emit(asm::ldr(1, SP, 24)).emit(asm::add_reg(0, 0, 1));
     a.label("fib_out");
@@ -216,6 +258,113 @@ pub fn unguarded_jump_nro() -> Vec<u8> {
     p.finish(PAGE)
 }
 
+/// A function only reachable through an absolute pointer in `.rodata`: the program loads the
+/// slot and calls it with `blr`, so no `bl`, `adr` or jump table names it.
+///
+/// Returns the image and the address of the callee.
+pub fn pointer_callee() -> (Vec<u8>, u64) {
+    let mut p = Program::new();
+    let slot_off = p.ro.len();
+    p.string("slot", &[0u8; 8]);
+    p.a.label("start");
+    p.a.adr_to(9, "slot");
+    p.a.emit(asm::ldr(9, 9, 0)).emit(asm::blr(9));
+    p.a.emit(asm::svc(SVC_EXIT_PROCESS));
+    p.a.label("callee");
+    p.a.emit(asm::movz(true, 0, 42, 0)).emit(asm::ret());
+    let callee = p.a.label_addr("callee");
+    p.ro[slot_off..slot_off + 8].copy_from_slice(&callee.to_le_bytes());
+    (p.finish(PAGE), callee)
+}
+
+/// A `switch` whose table of byte offsets lives in `.text`, right after the `br` that reads it.
+///
+/// This is the shape a compiler emits for a dense switch when it keeps the table with the code.
+pub fn text_table_nro() -> Vec<u8> {
+    let mut p = Program::new();
+    p.a.label("start");
+    p.a.emit(asm::movz(true, 0, 2, 0));
+    p.a.emit(asm::addsub_imm(false, true, true, XZR, 0, 3, false));
+    p.a.bcond_to(cond::HI, "other");
+    p.a.adr_to(9, "table");
+    p.a.emit(asm::ldst_reg(0, 3, 10, 9, 0, 3, true));
+    p.a.emit(asm::add_reg(9, 9, 10)).emit(asm::br(9));
+    // Four cases of two words each start right after this word, so the offsets are 4, 12, 20, 28.
+    p.a.label("table");
+    p.a.emit(u32::from_le_bytes([4, 12, 20, 28]));
+    for (i, ch) in b"abcd".iter().enumerate() {
+        p.a.label(&format!("case{i}"));
+        p.a.emit(asm::movz(true, 0, u32::from(*ch), 0))
+            .emit(asm::ret());
+    }
+    p.a.label("other");
+    p.a.emit(asm::movz(true, 0, u32::from(b'?'), 0))
+        .emit(asm::ret());
+    p.finish(PAGE)
+}
+
+/// [`lookup_table_nro`] with an unconditional branch between the table base and the `br`.
+///
+/// The value was set before the branch, so a backward scan that stops at the branch misses it;
+/// this is the shape that kept the Brilliant Diamond addresses in the interpreter.
+pub fn branched_lookup_nro() -> Vec<u8> {
+    let mut p = Program::new();
+    p.string("lookup", &[0, 2, 4, 6]);
+    p.a.label("start");
+    p.a.emit(asm::movz(true, 9, 2, 0));
+    p.a.addr_of(20, "lookup");
+    p.a.b_to("dispatch");
+    p.a.emit(asm::nop());
+    p.a.label("dispatch");
+    p.a.emit(asm::addsub_imm(false, true, true, XZR, 9, 3, false));
+    p.a.bcond_to(cond::HI, "other");
+    p.a.adr_to(10, "cases");
+    p.a.emit(asm::ldst_reg(0, 1, 11, 20, 9, 3, true));
+    p.a.emit(add_shifted(10, 10, 11, 2)).emit(asm::br(10));
+    p.a.label("cases");
+    for (i, ch) in b"abcd".iter().enumerate() {
+        p.a.label(&format!("case{i}"));
+        p.a.emit(asm::movz(true, 0, u32::from(*ch), 0))
+            .emit(asm::ret());
+    }
+    p.a.label("other");
+    p.a.emit(asm::movz(true, 0, u32::from(b'?'), 0))
+        .emit(asm::ret());
+    p.finish(PAGE)
+}
+
+fn add_shifted(rd: u32, rn: u32, rm: u32, amount: u32) -> u32 {
+    0x8b00_0000 | (rm << 16) | (amount << 10) | (rn << 5) | rd
+}
+
+/// A `switch` whose byte table of word offsets is indexed through a second table held in a
+/// register: the two-stage dispatch that keeps its table base outside the run.
+///
+/// `adrp`/`add` load the lookup table into `x20` before the bound check, so the run that ends in
+/// `br` only sees a free `x20`; the pass has to fold it from the code before the run.
+pub fn lookup_table_nro() -> Vec<u8> {
+    let mut p = Program::new();
+    p.string("lookup", &[0, 2, 4, 6]);
+    p.a.label("start");
+    p.a.emit(asm::movz(true, 9, 2, 0));
+    p.a.addr_of(20, "lookup");
+    p.a.emit(asm::addsub_imm(false, true, true, XZR, 9, 3, false));
+    p.a.bcond_to(cond::HI, "other");
+    p.a.adr_to(10, "cases");
+    p.a.emit(asm::ldst_reg(0, 1, 11, 20, 9, 3, true));
+    p.a.emit(add_shifted(10, 10, 11, 2)).emit(asm::br(10));
+    p.a.label("cases");
+    for (i, ch) in b"abcd".iter().enumerate() {
+        p.a.label(&format!("case{i}"));
+        p.a.emit(asm::movz(true, 0, u32::from(*ch), 0))
+            .emit(asm::ret());
+    }
+    p.a.label("other");
+    p.a.emit(asm::movz(true, 0, u32::from(b'?'), 0))
+        .emit(asm::ret());
+    p.finish(PAGE)
+}
+
 pub fn threads_nro() -> Vec<u8> {
     threads_program(None)
 }
@@ -243,32 +392,43 @@ fn threads_program(cores: Option<[u32; 2]>) -> Vec<u8> {
     a.label("start");
     a.emit(asm::ldstp(2, 3, false, FP, LR, SP, -16));
     for k in 0..2 {
-        a.addr_of(1, "worker").addr_of(2, &format!("slot{k}")).addr_of(3, &format!("stack{k}_top"));
+        a.addr_of(1, "worker")
+            .addr_of(2, &format!("slot{k}"))
+            .addr_of(3, &format!("stack{k}_top"));
         a.emit(asm::movz(true, 4, 44, 0));
         match cores {
             Some(c) => a.emit(asm::movz(true, 5, c[k], 0)),
             None => a.emit(asm::movn(true, 5, 1, 0)),
         };
         a.emit(asm::svc(SVC_CREATE_THREAD));
-        a.addr_of(9, &format!("slot{k}")).emit(asm::ldst_uimm(2, 0, 1, 9, 0));
+        a.addr_of(9, &format!("slot{k}"))
+            .emit(asm::ldst_uimm(2, 0, 1, 9, 0));
         a.emit(asm::mov_reg(0, 1)).emit(asm::svc(SVC_START_THREAD));
     }
     a.addr_of(23, "done");
     a.label("wait_done");
     a.emit(asm::ldst_uimm(2, 1, 9, 23, 0));
     a.emit(asm::cmp_imm(9, 2)).bcond_to(cond::EQ, "all_done");
-    a.emit(asm::mov_reg(0, 23)).emit(asm::movz(true, 1, 0, 0)).emit(asm::movz(true, 2, 2, 0)).emit(asm::movn(true, 3, 0, 0));
+    a.emit(asm::mov_reg(0, 23))
+        .emit(asm::movz(true, 1, 0, 0))
+        .emit(asm::movz(true, 2, 2, 0))
+        .emit(asm::movn(true, 3, 0, 0));
     a.emit(asm::svc(SVC_WAIT_FOR_ADDRESS));
     a.b_to("wait_done");
     a.label("all_done");
     for k in 0..2 {
-        a.addr_of(1, &format!("slot{k}")).emit(asm::movz(true, 2, 1, 0)).emit(asm::movn(true, 3, 0, 0));
+        a.addr_of(1, &format!("slot{k}"))
+            .emit(asm::movz(true, 2, 1, 0))
+            .emit(asm::movn(true, 3, 0, 0));
         a.emit(asm::svc(SVC_WAIT_SYNCHRONIZATION));
     }
     p.print("msg_threads", label);
     let a = &mut p.a;
     a.addr_of(9, "counter").emit(asm::ldst_uimm(2, 1, 0, 9, 0));
-    a.addr_of(9, "hits").emit(asm::ldst_uimm(2, 1, 9, 9, 0)).emit(asm::add_reg(0, 0, 9)).bl_to("print_u64");
+    a.addr_of(9, "hits")
+        .emit(asm::ldst_uimm(2, 1, 9, 9, 0))
+        .emit(asm::add_reg(0, 0, 9))
+        .bl_to("print_u64");
     a.emit(asm::ldstp(2, 1, true, FP, LR, SP, 16));
     a.emit(asm::svc(SVC_EXIT_PROCESS));
     p.emit_print_u64();
@@ -276,41 +436,86 @@ fn threads_program(cores: Option<[u32; 2]>) -> Vec<u8> {
     let a = &mut p.a;
     a.label("worker");
     a.emit(asm::ldst_uimm(2, 1, 19, 0, 0));
-    a.addr_of(20, "mutex").addr_of(21, "counter").addr_of(23, "done");
-    a.addr_of(24, "hits").emit(asm::movz(true, 22, THREAD_ATOMIC_ITERATIONS, 0));
+    a.addr_of(20, "mutex")
+        .addr_of(21, "counter")
+        .addr_of(23, "done");
+    a.addr_of(24, "hits")
+        .emit(asm::movz(true, 22, THREAD_ATOMIC_ITERATIONS, 0));
     a.label("hit");
-    a.emit(asm::ldaxr(false, 9, 24)).emit(asm::addsub_imm(false, false, false, 9, 9, 1, false));
+    a.emit(asm::ldaxr(false, 9, 24))
+        .emit(asm::addsub_imm(false, false, false, 9, 9, 1, false));
     a.emit(asm::stlxr(false, 10, 9, 24)).cbnz_to(10, "hit");
     a.emit(asm::subs_imm(22, 22, 1)).bcond_to(cond::NE, "hit");
     a.emit(asm::movz(true, 22, THREAD_ITERATIONS, 0));
     a.label("iteration");
     a.label("lock");
     a.emit(asm::ldaxr(false, 9, 20)).cbnz_to(9, "contended");
-    a.emit(asm::stlxr(false, 10, 19, 20)).cbnz_to(10, "lock").b_to("locked");
+    a.emit(asm::stlxr(false, 10, 19, 20))
+        .cbnz_to(10, "lock")
+        .b_to("locked");
     a.label("contended");
-    a.emit(asm::logical_imm(false, 1, 11, 9, 0, HAS_WAITERS.0, HAS_WAITERS.1));
+    a.emit(asm::logical_imm(
+        false,
+        1,
+        11,
+        9,
+        0,
+        HAS_WAITERS.0,
+        HAS_WAITERS.1,
+    ));
     a.emit(asm::stlxr(false, 10, 11, 20)).cbnz_to(10, "lock");
-    a.emit(asm::logical_imm(false, 0, 0, 11, 0, OWNER_MASK.0, OWNER_MASK.1));
-    a.emit(asm::mov_reg(1, 20)).emit(asm::mov_reg(2, 19)).emit(asm::svc(SVC_ARBITRATE_LOCK));
+    a.emit(asm::logical_imm(
+        false,
+        0,
+        0,
+        11,
+        0,
+        OWNER_MASK.0,
+        OWNER_MASK.1,
+    ));
+    a.emit(asm::mov_reg(1, 20))
+        .emit(asm::mov_reg(2, 19))
+        .emit(asm::svc(SVC_ARBITRATE_LOCK));
     a.emit(asm::ldst_uimm(2, 1, 9, 20, 0));
-    a.emit(asm::logical_imm(false, 0, 9, 9, 0, OWNER_MASK.0, OWNER_MASK.1));
-    a.emit(asm::addsub_reg(false, true, true, XZR, 9, 19, 0, 0)).bcond_to(cond::NE, "lock");
+    a.emit(asm::logical_imm(
+        false,
+        0,
+        9,
+        9,
+        0,
+        OWNER_MASK.0,
+        OWNER_MASK.1,
+    ));
+    a.emit(asm::addsub_reg(false, true, true, XZR, 9, 19, 0, 0))
+        .bcond_to(cond::NE, "lock");
     a.label("locked");
     a.emit(asm::ldst_uimm(2, 1, 24, 21, 0));
-    a.emit(asm::movz(true, 0, 0, 0)).emit(asm::svc(SVC_SLEEP_THREAD));
-    a.emit(asm::add_imm(24, 24, 1)).emit(asm::ldst_uimm(2, 0, 24, 21, 0));
+    a.emit(asm::movz(true, 0, 0, 0))
+        .emit(asm::svc(SVC_SLEEP_THREAD));
+    a.emit(asm::add_imm(24, 24, 1))
+        .emit(asm::ldst_uimm(2, 0, 24, 21, 0));
     a.label("unlock");
     a.emit(asm::ldaxr(false, 9, 20));
-    a.emit(asm::addsub_reg(false, true, true, XZR, 9, 19, 0, 0)).bcond_to(cond::NE, "unlock_slow");
-    a.emit(asm::stlxr(false, 10, XZR, 20)).cbnz_to(10, "unlock").b_to("unlocked");
+    a.emit(asm::addsub_reg(false, true, true, XZR, 9, 19, 0, 0))
+        .bcond_to(cond::NE, "unlock_slow");
+    a.emit(asm::stlxr(false, 10, XZR, 20))
+        .cbnz_to(10, "unlock")
+        .b_to("unlocked");
     a.label("unlock_slow");
-    a.emit(asm::mov_reg(0, 20)).emit(asm::svc(SVC_ARBITRATE_UNLOCK));
+    a.emit(asm::mov_reg(0, 20))
+        .emit(asm::svc(SVC_ARBITRATE_UNLOCK));
     a.label("unlocked");
-    a.emit(asm::subs_imm(22, 22, 1)).bcond_to(cond::NE, "iteration");
+    a.emit(asm::subs_imm(22, 22, 1))
+        .bcond_to(cond::NE, "iteration");
     a.label("bump_done");
-    a.emit(asm::ldaxr(false, 9, 23)).emit(asm::addsub_imm(false, false, false, 9, 9, 1, false));
-    a.emit(asm::stlxr(false, 10, 9, 23)).cbnz_to(10, "bump_done");
-    a.emit(asm::mov_reg(0, 23)).emit(asm::movz(true, 1, 0, 0)).emit(asm::movz(true, 2, 0, 0)).emit(asm::movn(true, 3, 0, 0));
+    a.emit(asm::ldaxr(false, 9, 23))
+        .emit(asm::addsub_imm(false, false, false, 9, 9, 1, false));
+    a.emit(asm::stlxr(false, 10, 9, 23))
+        .cbnz_to(10, "bump_done");
+    a.emit(asm::mov_reg(0, 23))
+        .emit(asm::movz(true, 1, 0, 0))
+        .emit(asm::movz(true, 2, 0, 0))
+        .emit(asm::movn(true, 3, 0, 0));
     a.emit(asm::svc(SVC_SIGNAL_TO_ADDRESS));
     a.emit(asm::svc(SVC_EXIT_THREAD));
 
@@ -320,7 +525,8 @@ fn threads_program(cores: Option<[u32; 2]>) -> Vec<u8> {
 pub fn deadlock_nro() -> Vec<u8> {
     let mut p = Program::new();
     p.a.label("start");
-    p.a.emit(asm::movz(true, 2, 0, 0)).emit(asm::movn(true, 3, 0, 0));
+    p.a.emit(asm::movz(true, 2, 0, 0))
+        .emit(asm::movn(true, 3, 0, 0));
     p.a.emit(asm::svc(SVC_WAIT_SYNCHRONIZATION));
     p.a.emit(asm::svc(SVC_EXIT_PROCESS));
     p.finish(PAGE)

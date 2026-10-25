@@ -29,15 +29,15 @@
 //! A capture buffer is the same block with only the send side used.
 //!
 //! The block carries its own sample rate, but the DSP does not resample the
-//! auxiliary bus. The rings are a raw sample exchange with the application:
-//! both sides advance their pointers by `channels * sample_count` samples per
-//! command, and the application derives its own timing from the renderer
-//! sample rate. Inserting a resampler here would change the number of samples
-//! per command and desynchronise the guest pointers, so a block whose rate
-//! differs from the sink is exchanged 1:1 and reported once. On the console
-//! the two rates must match; when they do not, the application's own producer
-//! or consumer is the source of the mismatch, and this module keeps the ring
-//! bounded instead of inventing samples.
+//! auxiliary bus. [`AuxClock`] makes that decision explicit at the API: a block
+//! whose rate differs from the sink is still exchanged 1:1, [`AuxClock::exchange`]
+//! returns the block size unchanged for both variants, and both sides advance
+//! their pointers by `channels * sample_count` samples per command. The
+//! application owns the producer/consumer clock; the runtime neither inserts a
+//! resampler (which would change the sample count per command and desynchronise
+//! the guest pointers) nor invents samples. On the console the two rates match;
+//! when they do not, the mismatch is the application's, and this module keeps
+//! the ring bounded and reports it once.
 
 use super::{MAX_CHANNELS, MAX_MIXES, Route, trace_once, u32_at, u64_at};
 use crate::services::audio::mixer::Mem;
@@ -82,6 +82,41 @@ impl AuxParams {
             && self.storage > 0
             && self.send_info != 0
             && (self.capture || self.return_info != 0)
+    }
+}
+
+/// How the auxiliary ring is clocked relative to the mix.
+///
+/// This is a decision, not an error: the DSP never resamples here. The variant
+/// is computed once per processing pass and the exchange size is always the
+/// renderer block size, so the guest pointers advance identically whatever the
+/// declared rates are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AuxClock {
+    /// The block declares no rate, or it matches the sink.
+    Matched,
+    /// The block declares another rate; exchanged 1:1 anyway.
+    Mismatched { effect: u32, sink: u32 },
+}
+
+impl AuxClock {
+    pub(crate) fn of(params: &AuxParams, sink_rate: u32) -> AuxClock {
+        if params.sample_rate == 0 || sink_rate == 0 || params.sample_rate == sink_rate {
+            AuxClock::Matched
+        } else {
+            AuxClock::Mismatched {
+                effect: params.sample_rate,
+                sink: sink_rate,
+            }
+        }
+    }
+
+    /// Samples exchanged per command. The aux bus never resamples, so this is
+    /// the renderer block size in both variants.
+    pub(crate) fn exchange(self, block: usize) -> usize {
+        match self {
+            AuxClock::Matched | AuxClock::Mismatched { .. } => block,
+        }
     }
 }
 
@@ -217,20 +252,20 @@ pub(crate) fn process(
     mem: &dyn Mem,
     input: &[Vec<f32>],
     output: &mut [Vec<f32>],
-    n: usize,
+    block: usize,
     enabled: bool,
-    sink_rate: u32,
+    clock: AuxClock,
 ) {
     let channels = params.route.channels.min(input.len()).min(output.len());
     if channels == 0 {
         return;
     }
-    if params.sample_rate != 0 && sink_rate != 0 && params.sample_rate != sink_rate {
+    if let AuxClock::Mismatched { effect, sink } = clock {
         trace_once(format!(
-            "audio: auxiliary bus is configured at {} Hz but the mix runs at {} Hz; exchanging the ring 1:1 without resampling",
-            params.sample_rate, sink_rate
+            "audio: auxiliary bus is configured at {effect} Hz but the mix runs at {sink} Hz; exchanging the ring 1:1 without resampling"
         ));
     }
+    let n = clock.exchange(block);
     if !enabled || !params.routable() {
         reset(mem, params.send_info);
         reset(mem, params.return_info);
@@ -290,5 +325,40 @@ mod tests {
         assert!(p.capture);
         assert!(p.routable());
         assert_eq!(p.route.input[0], 0);
+    }
+
+    #[test]
+    fn the_exchange_size_is_the_block_size_whatever_the_rate() {
+        let mut d = [0u8; 0xA0];
+        d[0x30..0x34].copy_from_slice(&2u32.to_le_bytes());
+        d[0x34..0x38].copy_from_slice(&44_100u32.to_le_bytes());
+        d[0x38..0x3C].copy_from_slice(&1024u32.to_le_bytes());
+        d[0x40..0x48].copy_from_slice(&0x1000u64.to_le_bytes());
+        d[0x50..0x58].copy_from_slice(&0x2000u64.to_le_bytes());
+        let p = AuxParams::parse(&d, false);
+
+        let clock = AuxClock::of(&p, 48_000);
+        assert_eq!(
+            clock,
+            AuxClock::Mismatched {
+                effect: 44_100,
+                sink: 48_000
+            }
+        );
+        assert!(!matches!(clock, AuxClock::Matched));
+        assert_eq!(clock.exchange(240), 240, "the block size never changes");
+        assert_eq!(clock.exchange(1), 1);
+
+        assert_eq!(AuxClock::of(&p, 44_100), AuxClock::Matched);
+        assert_eq!(AuxClock::of(&p, 0), AuxClock::Matched);
+        assert!(matches!(
+            AuxClock::of(&p, 48_000),
+            AuxClock::Mismatched { .. }
+        ));
+
+        // An unspecified effect rate is not a mismatch.
+        d[0x34..0x38].fill(0);
+        let p = AuxParams::parse(&d, false);
+        assert_eq!(AuxClock::of(&p, 48_000), AuxClock::Matched);
     }
 }

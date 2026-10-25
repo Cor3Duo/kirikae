@@ -34,6 +34,9 @@ impl Renderer {
         flip_h: bool,
         flip_v: bool,
     ) -> Presented {
+        if self.lost() {
+            return Presented::NoSwapchain;
+        }
         if self.swapchain_fn.is_none() || self.present_failed {
             return Presented::NoSwapchain;
         }
@@ -67,6 +70,9 @@ impl Renderer {
     }
 
     pub fn present_pixels(&mut self, width: u32, height: u32, pixels: &[u32]) -> Presented {
+        if self.lost() {
+            return Presented::NoSwapchain;
+        }
         if self.swapchain_fn.is_none()
             || self.present_failed
             || pixels.len() != (width * height) as usize
@@ -261,29 +267,36 @@ impl Renderer {
         self.submit_wait = Some(self.batches[self.current].acquired);
         self.submit_signal = Some(done);
         self.flush();
-        let sc = self.swapchain.as_mut().unwrap();
-        let (waits, swapchains, indices) = ([done], [sc.handle], [index]);
+        let handle = self.swapchain.as_ref().unwrap().handle;
+        let (waits, swapchains, indices) = ([done], [handle], [index]);
         let info = vk::PresentInfoKHR::default()
             .wait_semaphores(&waits)
             .swapchains(&swapchains)
             .image_indices(&indices);
-        match unsafe {
+        let result = unsafe {
             self.swapchain_fn
                 .as_ref()
                 .unwrap()
                 .queue_present(self.queue, &info)
-        } {
-            Ok(false) => {}
-            Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => sc.stale = true,
+        };
+        let stale = match result {
+            Ok(false) => false,
+            Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => true,
             Err(e) => {
+                self.note_lost("vkQueuePresentKHR", e);
                 eprintln!("kirikae: presenting failed ({e:?}); the swapchain is made again");
-                sc.stale = true;
+                true
             }
-        }
+        };
+        let sc = self.swapchain.as_mut().unwrap();
+        sc.stale |= stale;
         let format = sc.format;
         self.stats.presents += 1;
         if readback.is_some() {
             self.finish();
+            if self.lost() {
+                return Presented::Shown;
+            }
             if let Some((_, memory, _, ptr)) = self.readback {
                 if !self.readback_coherent {
                     let range = [vk::MappedMemoryRange::default()
@@ -338,7 +351,10 @@ impl Renderer {
                 Err(vk::Result::ERROR_SURFACE_LOST_KHR) => {
                     self.drop_swapchain(true);
                 }
-                Err(_) => return None,
+                Err(e) => {
+                    self.note_lost("vkAcquireNextImageKHR", e);
+                    return None;
+                }
             }
         }
         None
@@ -410,7 +426,10 @@ impl Renderer {
             return None;
         }
         self.finish();
-        unsafe { self.device.device_wait_idle().ok()? };
+        if let Err(e) = unsafe { self.device.device_wait_idle() } {
+            self.note_lost("vkDeviceWaitIdle", e);
+            return None;
+        }
         let formats =
             unsafe { surface_fn.get_physical_device_surface_formats(self.physical, surface) }
                 .ok()?;
@@ -495,15 +514,33 @@ impl Renderer {
             }
         };
         self.drop_swapchain(false);
-        let images = unsafe { swapchain_fn.get_swapchain_images(handle) }.ok()?;
-        let done = images
-            .iter()
-            .map(|_| unsafe {
+        let images = match unsafe { swapchain_fn.get_swapchain_images(handle) } {
+            Ok(images) => images,
+            Err(e) => {
+                unsafe { swapchain_fn.destroy_swapchain(handle, None) };
+                self.note_lost("vkGetSwapchainImagesKHR", e);
+                return None;
+            }
+        };
+        let mut done = Vec::with_capacity(images.len());
+        for _ in &images {
+            match unsafe {
                 self.device
                     .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
-                    .unwrap()
-            })
-            .collect();
+            } {
+                Ok(s) => done.push(s),
+                Err(e) => {
+                    unsafe {
+                        for s in done {
+                            self.device.destroy_semaphore(s, None);
+                        }
+                        swapchain_fn.destroy_swapchain(handle, None);
+                    }
+                    self.note_lost("vkCreateSemaphore", e);
+                    return None;
+                }
+            }
+        }
         let sc = self.swapchain.as_mut()?;
         *sc = Swapchain {
             surface,

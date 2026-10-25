@@ -180,6 +180,10 @@ pub struct Submit {
     /// Guest address of the texture and sampler descriptor tables the submit's pools name.
     pub texture_pool: u64,
     pub sampler_pool: u64,
+    /// Window textures the host knows about, by guest `NVNtexture*` address. A `SetRenderTargets` that names one of
+    /// these is the pass a title composes its frame into (`docs/nvn/CONTRACT.md` §8); the walker reports it so the
+    /// sink can remember the image it must compose from when the title never issues the draw itself.
+    pub windows: HashSet<u64>,
     /// The recorder's generation at the end of recording (`docs/nvn/CONTRACT.md` §7).
     pub mark: u64,
 }
@@ -297,6 +301,18 @@ pub trait Sink {
         Ok(())
     }
     fn draw(&mut self, state: &State, draw: &DrawCall) -> Result<(), String>;
+    /// A `SetRenderTargets` named a window texture, in the shape a title that lets the driver compose leaves it:
+    /// `source` is the last colour target the submit drew into, before the window target was set. A title that draws
+    /// into the window itself needs no composition; the sink decides from the records, not from a guess.
+    fn window_target(&mut self, window: u64, source: Option<u64>) {
+        let _ = (window, source);
+    }
+    /// A texture binding outside a draw. A title that composes its window through a full-screen draw records the
+    /// texture that draw would sample right after setting the window target; the sink uses it as the composition
+    /// source when the draw is missing.
+    fn texture_bound(&mut self, stage: usize, index: usize, handle: u32) {
+        let _ = (stage, index, handle);
+    }
     fn dispatch(&mut self, grid: [u32; 3]) -> Result<(), String> {
         let _ = grid;
         Ok(())
@@ -351,6 +367,11 @@ pub struct Walker {
     logged: HashSet<String>,
     /// Lists currently being walked, so a malformed chain or call cannot recurse forever.
     walking: HashSet<u64>,
+    /// The window textures this submit knows, copied so the record walk does not borrow the submit.
+    submit_windows: HashSet<u64>,
+    /// The last colour target a draw rendered into in this submit. When a `SetRenderTargets` names a window texture,
+    /// that image is what the title's composition would have sampled if it had issued the final draw.
+    last_drawn: Option<u64>,
     pub log: Vec<String>,
 }
 
@@ -364,6 +385,8 @@ impl Walker {
             stats: Stats::default(),
             logged: HashSet::new(),
             walking: HashSet::new(),
+            submit_windows: submit.windows.clone(),
+            last_drawn: None,
             log: Vec::new(),
         }
     }
@@ -409,6 +432,17 @@ impl Walker {
             .cloned()
             .unwrap_or_default();
         self.command_buffer = Some(command_buffer);
+    }
+
+    /// The guest texture a colour attachment index names, if that target exists.
+    fn colour_target(&self, index: usize) -> Option<u64> {
+        self.state
+            .targets
+            .colors
+            .get(index)
+            .copied()
+            .flatten()
+            .map(|color| color.texture)
     }
 
     fn walk(
@@ -471,6 +505,13 @@ impl Walker {
                     if let Err(why) = sink.targets(&targets) {
                         self.skip(format!("targets: {why}"));
                     }
+                    // A window target is the composition the title leaves to the driver: report the image it would
+                    // have sampled so the sink can blit it when the title never draws into the window itself.
+                    for color in targets.colors.iter().flatten() {
+                        if self.submit_windows.contains(&color.texture) {
+                            sink.window_target(color.texture, self.last_drawn);
+                        }
+                    }
                 }
                 Op::ClearColor => {
                     let index = record.ints[0].max(0) as u32;
@@ -505,7 +546,9 @@ impl Walker {
                 Op::BindTexture => {
                     let stage = record.ints[0].clamp(0, 1) as usize;
                     let index = record.ints[1].clamp(0, 31) as usize;
-                    self.state.textures[stage][index] = record.words[0] as u32;
+                    let handle = record.words[0] as u32;
+                    self.state.textures[stage][index] = handle;
+                    sink.texture_bound(stage, index, handle);
                 }
                 Op::BindUniformBuffer => {
                     let stage = record.ints[0].clamp(0, 1) as usize;
@@ -558,6 +601,8 @@ impl Walker {
                     };
                     if let Err(why) = sink.draw(&self.state, &draw) {
                         self.skip(&why);
+                    } else {
+                        self.last_drawn = self.colour_target(0);
                     }
                 }
                 Op::DrawElements => {
@@ -577,6 +622,8 @@ impl Walker {
                     };
                     if let Err(why) = sink.draw(&self.state, &draw) {
                         self.skip(&why);
+                    } else {
+                        self.last_drawn = self.colour_target(0);
                     }
                 }
                 Op::DispatchCompute => {
@@ -1094,6 +1141,8 @@ mod tests {
         clear_colors: Vec<(u32, [f32; 4], u32)>,
         clears: Vec<(Option<f32>, Option<i32>)>,
         draws: u32,
+        window_targets: Vec<(u64, Option<u64>)>,
+        texture_binds: Vec<(usize, usize, u32)>,
     }
 
     impl Sink for Recording {
@@ -1130,6 +1179,12 @@ mod tests {
         }
         fn barrier(&mut self, _: u64) {
             self.events.push("barrier".into());
+        }
+        fn window_target(&mut self, window: u64, source: Option<u64>) {
+            self.window_targets.push((window, source));
+        }
+        fn texture_bound(&mut self, stage: usize, index: usize, handle: u32) {
+            self.texture_binds.push((stage, index, handle));
         }
     }
 
@@ -1725,6 +1780,79 @@ mod tests {
             sink.states[0].targets.colors.is_empty(),
             "the second buffer did not inherit the first one's targets"
         );
+    }
+
+    #[test]
+    fn a_window_target_without_a_draw_reports_the_last_drawn_target() {
+        let mem = FakeMemory::new(BASE, 0x2000);
+        let mut recorder = Recorder::default();
+        recorder.begin(&mem, CMD, BASE, 0x800).expect("list");
+        let pairs = |texture: u64| {
+            [texture, 0u64, 0, 0]
+                .into_iter()
+                .flat_map(u64::to_le_bytes)
+                .collect::<Vec<u8>>()
+        };
+        let mut targets = Record::new(Op::SetRenderTargets);
+        targets.count = 1;
+        recorder
+            .emit_blob(&mem, CMD, targets, &pairs(0x1111))
+            .expect("scene targets");
+        let mut draw = Record::new(Op::DrawArrays);
+        draw.set_int(0, 4);
+        draw.set_word(0, 0);
+        draw.set_word(1, 3);
+        recorder.emit(&mem, CMD, draw).expect("scene draw");
+        // The title sets the window target and records the composition state, but never issues its draw.
+        let mut targets = Record::new(Op::SetRenderTargets);
+        targets.count = 1;
+        recorder
+            .emit_blob(&mem, CMD, targets, &pairs(0x2222))
+            .expect("window targets");
+        let mut texture = Record::new(Op::BindTexture);
+        texture.set_int(0, 1);
+        texture.set_int(1, 0);
+        texture.set_word(0, 0xdead);
+        recorder
+            .emit(&mem, CMD, texture)
+            .expect("composition texture");
+        let handle = recorder.end(&mem, CMD).expect("end");
+        let submit = Submit {
+            roots: vec![snapshot(&mem, &recorder, handle)],
+            windows: HashSet::from([0x2222]),
+            ..Submit::default()
+        };
+        let mut sink = Recording::default();
+        let stats = replay(&submit, &mut sink);
+        assert_eq!(sink.draws, 1);
+        assert_eq!(stats.skipped, 0);
+        assert_eq!(sink.window_targets, [(0x2222, Some(0x1111))]);
+        assert_eq!(sink.texture_binds, [(1, 0, 0xdead)]);
+    }
+
+    #[test]
+    fn a_window_target_before_any_draw_has_no_composition_source() {
+        let mem = FakeMemory::new(BASE, 0x2000);
+        let mut recorder = Recorder::default();
+        recorder.begin(&mem, CMD, BASE, 0x800).expect("list");
+        let blob: Vec<u8> = [0x2222u64, 0, 0, 0]
+            .into_iter()
+            .flat_map(u64::to_le_bytes)
+            .collect();
+        let mut targets = Record::new(Op::SetRenderTargets);
+        targets.count = 1;
+        recorder
+            .emit_blob(&mem, CMD, targets, &blob)
+            .expect("window targets");
+        let handle = recorder.end(&mem, CMD).expect("end");
+        let submit = Submit {
+            roots: vec![snapshot(&mem, &recorder, handle)],
+            windows: HashSet::from([0x2222]),
+            ..Submit::default()
+        };
+        let mut sink = Recording::default();
+        replay(&submit, &mut sink);
+        assert_eq!(sink.window_targets, [(0x2222, None)]);
     }
 
     #[test]

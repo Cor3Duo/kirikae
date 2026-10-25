@@ -2233,6 +2233,7 @@ dependencies = [
  "miniz_oxide 0.8.9",
  "openh264",
  "opus",
+ "opusic-sys",
  "serde_json",
  "softbuffer",
  "vp9dec",

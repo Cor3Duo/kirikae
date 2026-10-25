@@ -12,7 +12,8 @@
 //! names something outside that set (a storage buffer, a storage image, a compute dispatch, an instanced stream)
 //! makes the walker skip only that draw with a logged reason.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 
 use ash::vk;
 use kirikae_maxwell::{Kind, Stage as MaxwellStage};
@@ -60,6 +61,12 @@ pub struct NvnSink<'a> {
     logged: HashSet<String>,
     draws: u64,
     cleared: u64,
+    /// The exact image the last successful draw rendered into, for the window composition.
+    last_drawn: Option<ImageKey>,
+    /// Windows this submit set as a target, with the last drawn image as the fallback source.
+    pending_windows: Vec<(u64, Option<ImageKey>)>,
+    /// The fragment texture binding 0, the texture a title's full-window composition draw samples.
+    composition_texture: Option<u32>,
 }
 
 /// Replays one submit against the process's renderer. Called on the replay worker with no other lock held.
@@ -76,6 +83,14 @@ pub fn replay_submit(p: &'static Process, submit: &Submit) -> replay::Stats {
         return stats;
     };
     stats
+}
+
+/// Window texture CPU address -> the image the submit last drew into before the window target, or the texture the
+/// title's missing composition draw bound. The driver's own composition would sample that image; the present path
+/// blits it when the title leaves the window target without a draw (`nvn/window.rs`, `docs/nvn/CONTRACT.md` §8).
+fn window_sources() -> &'static Mutex<HashMap<u64, ImageKey>> {
+    static SOURCES: OnceLock<Mutex<HashMap<u64, ImageKey>>> = OnceLock::new();
+    SOURCES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 impl<'a> NvnSink<'a> {
@@ -95,6 +110,9 @@ impl<'a> NvnSink<'a> {
             logged: HashSet::new(),
             draws: 0,
             cleared: 0,
+            last_drawn: None,
+            pending_windows: Vec::new(),
+            composition_texture: None,
         }
     }
 
@@ -207,6 +225,34 @@ impl<'a> NvnSink<'a> {
         // One command buffer per submit, even when it only cleared: `flush` submits or polls.
         self.renderer.flush();
     }
+
+    /// The image a texture handle names, read from the descriptor pool the submit bound. This is the texture a
+    /// missing full-window composition draw would have sampled.
+    fn bound_image(&self, handle: u32) -> Option<ImageKey> {
+        let index = u64::from(handle & 0xfffff);
+        if self.submit.texture_pool == 0 {
+            return None;
+        }
+        let bytes = self.mem.read(self.submit.texture_pool + index * 32, 32)?;
+        let tic = tic::words(&bytes)?;
+        let header = tic::texture_header(&tic);
+        let cpu = self.gpu.translate(header.address)?;
+        self.renderer
+            .at(cpu)
+            .iter()
+            .copied()
+            .filter(|key| {
+                self.renderer.images[key].gpu_dirty
+                    && aspect_of(key.format) == vk::ImageAspectFlags::COLOR
+            })
+            .max_by_key(|key| {
+                (
+                    key.width == header.width && key.height == header.height,
+                    key.width * key.height,
+                    self.renderer.images[key].stamp,
+                )
+            })
+    }
 }
 
 impl Sink for NvnSink<'_> {
@@ -250,6 +296,47 @@ impl Sink for NvnSink<'_> {
             extent,
         });
         Ok(())
+    }
+
+    /// A window target was set. Remember the last image this submit rendered into, so the present path can compose the
+    /// frame the title would have sampled if it had issued its final draw (`nvn/window.rs`).
+    fn window_target(&mut self, window: u64, source: Option<u64>) {
+        let Some(source) = source else { return };
+        if source == window {
+            return;
+        }
+        let Some(window) = self.submit.textures.get(&window).copied() else {
+            return;
+        };
+        let cpu = |texture: &TextureInfo| {
+            if texture.host != 0 {
+                Some(texture.host)
+            } else {
+                self.gpu.translate(texture.gpu)
+            }
+        };
+        let Some(window_cpu) = cpu(&window) else {
+            return;
+        };
+        if self
+            .last_drawn
+            .is_some_and(|source| source.cpu == window_cpu)
+        {
+            return;
+        }
+        if !self
+            .pending_windows
+            .iter()
+            .any(|(pending, _)| *pending == window_cpu)
+        {
+            self.pending_windows.push((window_cpu, self.last_drawn));
+        }
+    }
+
+    fn texture_bound(&mut self, stage: usize, index: usize, handle: u32) {
+        if stage == 1 && index == 0 && !self.pending_windows.is_empty() {
+            self.composition_texture = Some(handle);
+        }
     }
 
     fn clear_color(&mut self, index: u32, color: [f32; 4], mask: u32) -> Result<(), String> {
@@ -344,6 +431,12 @@ impl Sink for NvnSink<'_> {
             .draws
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.draws += 1;
+        self.last_drawn = targets
+            .colors
+            .first()
+            .copied()
+            .flatten()
+            .map(|color| color.key);
         Ok(())
     }
 
@@ -358,6 +451,20 @@ impl Sink for NvnSink<'_> {
     }
 
     fn finish(&mut self) -> Result<(), String> {
+        if !self.pending_windows.is_empty() {
+            let bound = self
+                .composition_texture
+                .and_then(|handle| self.bound_image(handle));
+            if let Ok(mut sources) = window_sources().lock() {
+                for (window, fallback) in &self.pending_windows {
+                    if let Some(source) = bound.or(*fallback)
+                        && source.cpu != *window
+                    {
+                        sources.insert(*window, source);
+                    }
+                }
+            }
+        }
         self.end_pass();
         Ok(())
     }
@@ -1260,29 +1367,33 @@ impl Renderer {
         width: u32,
         height: u32,
         crop: Option<Rect>,
+        frame: u64,
+        capture: Option<&'static crate::gpu::capture::Capture>,
     ) -> Presented {
-        if self.swapchain_fn.is_none() || self.present_failed {
+        // An image this frame rendered into is the title's own window draw: present it unchanged. Only when the title
+        // left the window target without a draw (the driver composes it in a normal run) is the last target blitted
+        // into the window. A title that draws the window never gets the reconstruction.
+        let key = self
+            .window_drawn(cpu, width, height, frame)
+            .or_else(|| self.compose_window(cpu, width, height, frame));
+        if let Some(capture) = capture {
+            // The host reserved the slot before the driver's present, so write the composed image here: it is the
+            // frame the replay owns, and the driver's path would have read the stale swapchain.
+            self.capture_replayed(key, width, height, capture);
+        }
+        if self.present_failed {
             return Presented::NoSwapchain;
         }
-        let mut candidates: Vec<ImageKey> = self
-            .at(cpu)
-            .iter()
-            .copied()
-            .filter(|key| {
-                self.images[key].gpu_dirty && aspect_of(key.format) == vk::ImageAspectFlags::COLOR
-            })
-            .collect();
-        // The window texture's own level-0 image first, then the largest colour image at the same address: a view
-        // may have made the target a smaller or differently typed image, and the blit scales it anyway.
-        candidates.sort_by_key(|key| {
-            (
-                key.width != width || key.height != height,
-                std::cmp::Reverse(key.width * key.height),
-            )
-        });
-        let Some(key) = candidates.first().copied() else {
-            return Presented::NoImage;
+        let Some(key) = key else {
+            return if self.swapchain_fn.is_none() {
+                Presented::NoSwapchain
+            } else {
+                Presented::NoImage
+            };
         };
+        if self.swapchain_fn.is_none() {
+            return Presented::NoSwapchain;
+        }
         let srgb = matches!(
             key.format,
             vk::Format::R8G8B8A8_SRGB
@@ -1414,6 +1525,191 @@ impl Renderer {
         }
         self.stats.presents += 1;
         Presented::Shown
+    }
+
+    /// The window image this frame rendered into, if the title drew the window itself. An image from an older frame
+    /// does not count: presenting it would show a stale frame instead of composing the current one.
+    fn window_drawn(&self, cpu: u64, width: u32, height: u32, frame: u64) -> Option<ImageKey> {
+        let mut candidates: Vec<ImageKey> = self
+            .at(cpu)
+            .iter()
+            .copied()
+            .filter(|key| {
+                let image = &self.images[key];
+                image.gpu_dirty
+                    && aspect_of(key.format) == vk::ImageAspectFlags::COLOR
+                    && (image.drawn == Some(frame) || image.cleared == Some(frame))
+            })
+            .collect();
+        // The window texture's own level-0 image first, then the largest colour image at the same address.
+        candidates.sort_by_key(|key| {
+            (
+                key.width != width || key.height != height,
+                std::cmp::Reverse(key.width * key.height),
+            )
+        });
+        candidates.first().copied()
+    }
+
+    /// Writes the frame the replay composed for a capture slot the host already reserved. The image is the window
+    /// target itself (crop is applied by the present), so bars from the swapchain do not hide the replayed content.
+    fn capture_replayed(
+        &mut self,
+        key: Option<ImageKey>,
+        width: u32,
+        height: u32,
+        capture: &crate::gpu::capture::Capture,
+    ) {
+        let frame = capture.frame();
+        let Some(key) = key else {
+            eprintln!(
+                "kirikae: capture: the replay has no image for the window texture; writing black"
+            );
+            let _ = capture.write_black(frame, width.max(1), height.max(1));
+            return;
+        };
+        let Some(pixels) = self.read_image(key) else {
+            eprintln!("kirikae: capture: cannot read the replayed window image; writing black");
+            let _ = capture.write_black(frame, width.max(1), height.max(1));
+            return;
+        };
+        let (w, h) = (key.width.min(width.max(1)), key.height.min(height.max(1)));
+        let cropped: Vec<u32> = if (w, h) == (key.width, key.height) {
+            pixels
+        } else {
+            let mut out = Vec::with_capacity((w * h) as usize);
+            for y in 0..h {
+                out.extend_from_slice(&pixels[(y * key.width) as usize..][..w as usize]);
+            }
+            out
+        };
+        let _ = capture.write(frame, w, h, &cropped);
+    }
+
+    /// Reconstructs the composition a title leaves to the driver: after setting the window target it records the
+    /// program, texture and vertex state of a full-window draw and then never issues the draw. The last colour target
+    /// the submit rendered into is the image that draw would have sampled, so blit it into the window texture the
+    /// title presented. This is a reconstruction, not a replayed command: it runs only when the records leave the
+    /// window target undrawn, and the present reports it in the `composed` counter.
+    fn compose_window(
+        &mut self,
+        cpu: u64,
+        width: u32,
+        height: u32,
+        frame: u64,
+    ) -> Option<ImageKey> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let source = window_sources().lock().ok()?.get(&cpu).copied()?;
+        if source.cpu == cpu {
+            return None;
+        }
+        if !self.images.contains_key(&source) {
+            return None;
+        }
+        // Keep the window texture's own format when it already has an image (a title may present through sRGB), and
+        // fall back to the source's format when it does not. Both formats are blittable as colour targets.
+        let format = self
+            .at(cpu)
+            .iter()
+            .copied()
+            .find(|key| {
+                aspect_of(key.format) == vk::ImageAspectFlags::COLOR
+                    && key.width >= width
+                    && key.height >= height
+            })
+            .map_or(source.format, |key| key.format);
+        let (dest, _) = self.target_image(cpu, format, width, height)?;
+        if dest == source {
+            return None;
+        }
+        let range = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        let sub = vk::ImageSubresourceLayers {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            mip_level: 0,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        let region = [vk::ImageBlit::default()
+            .src_subresource(sub)
+            .src_offsets([
+                vk::Offset3D { x: 0, y: 0, z: 0 },
+                vk::Offset3D {
+                    x: source.width as i32,
+                    y: source.height as i32,
+                    z: 1,
+                },
+            ])
+            .dst_subresource(sub)
+            .dst_offsets([
+                vk::Offset3D { x: 0, y: 0, z: 0 },
+                vk::Offset3D {
+                    x: width as i32,
+                    y: height as i32,
+                    z: 1,
+                },
+            ])];
+        self.begin();
+        self.end_rendering();
+        self.barrier();
+        let to_dst = [vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .image(self.images[&dest].image)
+            .subresource_range(range)];
+        let to_general = [vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::GENERAL)
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ)
+            .image(self.images[&dest].image)
+            .subresource_range(range)];
+        unsafe {
+            let d = &self.device;
+            d.cmd_pipeline_barrier(
+                self.cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &to_dst,
+            );
+            d.cmd_blit_image(
+                self.cmd,
+                self.images[&source].image,
+                vk::ImageLayout::GENERAL,
+                self.images[&dest].image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &region,
+                vk::Filter::LINEAR,
+            );
+            d.cmd_pipeline_barrier(
+                self.cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::ALL_GRAPHICS,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &to_general,
+            );
+        }
+        self.touch(dest);
+        let frame_marker = frame;
+        if let Some(image) = self.images.get_mut(&dest) {
+            image.drawn = Some(frame_marker);
+        }
+        self.flush();
+        crate::nvn::window::COMPOSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(dest)
     }
 }
 

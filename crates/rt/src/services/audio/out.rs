@@ -227,6 +227,8 @@ fn start_playback(p: &'static Process, out: Arc<AudioOut>) {
             };
             let mut next = Instant::now();
             let mut frames: Vec<output::Frame> = Vec::new();
+            let stats = std::env::var_os("KIRIKAE_STATS").is_some();
+            let mut next_stats = Instant::now() + Duration::from_secs(5);
             loop {
                 if p.sched.exiting.load(Ordering::Relaxed) {
                     return;
@@ -240,8 +242,12 @@ fn start_playback(p: &'static Process, out: Arc<AudioOut>) {
                     }
                 };
                 let Some(b) = buffer else {
+                    let position = match &output {
+                        Some(o) => o.played_frames(),
+                        None => out.state.lock().unwrap().played,
+                    };
                     crate::host1x::clock::audio_position(
-                        out.state.lock().unwrap().played,
+                        position,
                         SAMPLE_RATE,
                         false,
                         crate::host1x::clock::AudioSource::AudOut,
@@ -266,9 +272,10 @@ fn start_playback(p: &'static Process, out: Arc<AudioOut>) {
                     o.push(&frames, width, output::DEFAULT_DOWNMIX);
                 }
                 next += Duration::from_secs_f64(frames.len() as f64 / f64::from(SAMPLE_RATE));
-                let played = out.state.lock().unwrap().played + frames.len() as u64;
+                let produced = out.state.lock().unwrap().played + frames.len() as u64;
+                let position = output.as_ref().map_or(produced, |o| o.played_frames());
                 crate::host1x::clock::audio_position(
-                    played,
+                    position,
                     SAMPLE_RATE,
                     output.is_some(),
                     crate::host1x::clock::AudioSource::AudOut,
@@ -282,6 +289,17 @@ fn start_playback(p: &'static Process, out: Arc<AudioOut>) {
                 }
                 drop(s);
                 p.set_event(out.event, true);
+                if stats && Instant::now() >= next_stats {
+                    next_stats = Instant::now() + Duration::from_secs(5);
+                    let (played, queued) = {
+                        let s = out.state.lock().unwrap();
+                        (s.played, output.as_ref().map_or(0, |o| o.queued()))
+                    };
+                    eprintln!(
+                        "audio: audout {played} frames played, {queued} frames queued for the device ({:.1} ms lead)",
+                        queued as f32 * 1000.0 / f64::from(SAMPLE_RATE) as f32
+                    );
+                }
             }
         });
 }

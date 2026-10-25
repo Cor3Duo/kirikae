@@ -291,7 +291,14 @@ pub fn wait_synchronization(c: &mut Cpu) {
 
 fn wait_for_objects(c: &mut Cpu) {
     let p = c.process();
-    let (list, count, timeout) = (c.x[1], c.x[2].min(64), c.x[3] as i64);
+    // SVC page, WaitSynchronization: `HandlesNum <= 0x40`; above that (or
+    // negative) is 0xee01 and no wait happens.
+    let count = c.x[2] as i64;
+    if !(0..=0x40).contains(&count) {
+        c.x[0] = crate::horizon::RESULT_TOO_MANY_HANDLES;
+        return;
+    }
+    let (list, count, timeout) = (c.x[1], count as u64, c.x[3] as i64);
     let raw = p.memory.read(list, count * 4).unwrap_or_default();
     let handles: Vec<u32> = raw
         .as_chunks::<4>()
@@ -344,7 +351,11 @@ fn wait_for_objects(c: &mut Cpu) {
             KObject::TransferMemory(_)
             | KObject::CodeMemory(_)
             | KObject::SharedMemory(_)
-            | KObject::ResourceLimit(_) => false,
+            | KObject::ResourceLimit(_)
+            // Device and IO objects are not waitable.
+            | KObject::IoPool(_)
+            | KObject::IoRegion(_)
+            | KObject::DeviceAddressSpace(_) => false,
         });
         if signaled.is_some() {
             return signaled.map(Ok);

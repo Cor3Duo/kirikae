@@ -1,6 +1,6 @@
 use super::{Env, bits, lane, set_lane, sized};
 
-pub fn exec(e: &mut dyn Env, w: u32) -> bool {
+pub fn exec<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     if w & 0xbfbf_0000 == 0x0c00_0000 || w & 0xbfa0_0000 == 0x0c80_0000 {
         return multiple(e, w);
     }
@@ -10,11 +10,11 @@ pub fn exec(e: &mut dyn Env, w: u32) -> bool {
     false
 }
 
-fn base(e: &dyn Env, rn: u32) -> u64 {
+fn base<E: Env + ?Sized>(e: &E, rn: u32) -> u64 {
     if rn == 31 { e.sp() } else { e.x(rn) }
 }
 
-fn writeback(e: &mut dyn Env, rn: u32, rm: u32, addr: u64, imm: u64) {
+fn writeback<E: Env + ?Sized>(e: &mut E, rn: u32, rm: u32, addr: u64, imm: u64) {
     let off = if rm == 31 { imm } else { e.x(rm) };
     let v = addr.wrapping_add(off);
     if rn == 31 {
@@ -24,7 +24,7 @@ fn writeback(e: &mut dyn Env, rn: u32, rm: u32, addr: u64, imm: u64) {
     }
 }
 
-fn multiple(e: &mut dyn Env, w: u32) -> bool {
+fn multiple<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     let q = bits(w, 30, 1);
     let load = bits(w, 22, 1) == 1;
     let post = bits(w, 23, 1) == 1;
@@ -82,7 +82,7 @@ fn multiple(e: &mut dyn Env, w: u32) -> bool {
     true
 }
 
-fn single(e: &mut dyn Env, w: u32) -> bool {
+fn single<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     let q = bits(w, 30, 1);
     let load = bits(w, 22, 1) == 1;
     let post = bits(w, 23, 1) == 1;

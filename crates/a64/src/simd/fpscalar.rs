@@ -13,7 +13,7 @@ fn width(ty: u32) -> u32 {
     }
 }
 
-fn rd(e: &dyn Env, n: u32, ty: u32) -> u64 {
+fn rd<E: Env + ?Sized>(e: &E, n: u32, ty: u32) -> u64 {
     let v = e.v(n);
     match ty {
         SINGLE => v as u32 as u64,
@@ -22,11 +22,11 @@ fn rd(e: &dyn Env, n: u32, ty: u32) -> u64 {
     }
 }
 
-fn wr(e: &mut dyn Env, n: u32, x: u64) {
+fn wr<E: Env + ?Sized>(e: &mut E, n: u32, x: u64) {
     e.set_v(n, x as u128);
 }
 
-fn fpcr(e: &dyn Env) -> Fpcr {
+fn fpcr<E: Env + ?Sized>(e: &E) -> Fpcr {
     Fpcr::from_bits(e.fpcr())
 }
 
@@ -45,7 +45,7 @@ macro_rules! by_type {
     };
 }
 
-pub fn exec(e: &mut dyn Env, w: u32) -> bool {
+pub fn exec<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     if w & 0x7f20_0000 == 0x1e00_0000 {
         return fixed_conv(e, w);
     }
@@ -76,7 +76,7 @@ pub fn exec(e: &mut dyn Env, w: u32) -> bool {
     false
 }
 
-fn dp1(e: &mut dyn Env, w: u32) -> bool {
+fn dp1<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     let ty = bits(w, 22, 2);
     let opcode = bits(w, 15, 6);
     let (rn, rd_) = (bits(w, 5, 5), bits(w, 0, 5));
@@ -124,7 +124,7 @@ fn dp1(e: &mut dyn Env, w: u32) -> bool {
     true
 }
 
-fn dp2(e: &mut dyn Env, w: u32) -> bool {
+fn dp2<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     let ty = bits(w, 22, 2);
     if ty > DOUBLE {
         return false;
@@ -148,7 +148,7 @@ fn dp2(e: &mut dyn Env, w: u32) -> bool {
     true
 }
 
-fn dp3(e: &mut dyn Env, w: u32) -> bool {
+fn dp3<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     let ty = bits(w, 22, 2);
     if ty > DOUBLE {
         return false;
@@ -171,7 +171,7 @@ fn dp3(e: &mut dyn Env, w: u32) -> bool {
     true
 }
 
-fn compare(e: &mut dyn Env, w: u32) -> bool {
+fn compare<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     let ty = bits(w, 22, 2);
     if ty > DOUBLE || bits(w, 0, 3) != 0 || bits(w, 14, 2) != 0 {
         return false;
@@ -186,7 +186,7 @@ fn compare(e: &mut dyn Env, w: u32) -> bool {
     true
 }
 
-fn cond_compare(e: &mut dyn Env, w: u32) -> bool {
+fn cond_compare<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     let ty = bits(w, 22, 2);
     if ty > DOUBLE {
         return false;
@@ -204,7 +204,7 @@ fn cond_compare(e: &mut dyn Env, w: u32) -> bool {
     true
 }
 
-fn cond_select(e: &mut dyn Env, w: u32) -> bool {
+fn cond_select<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     let ty = bits(w, 22, 2);
     if ty > DOUBLE {
         return false;
@@ -220,7 +220,7 @@ fn cond_select(e: &mut dyn Env, w: u32) -> bool {
     true
 }
 
-fn immediate(e: &mut dyn Env, w: u32) -> bool {
+fn immediate<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     let ty = bits(w, 22, 2);
     if ty > DOUBLE || bits(w, 5, 5) != 0 {
         return false;
@@ -233,7 +233,7 @@ fn rounding(rmode: u32) -> Round {
     [Round::Nearest, Round::PlusInf, Round::MinusInf, Round::Zero][rmode as usize]
 }
 
-fn int_conv(e: &mut dyn Env, w: u32) -> bool {
+fn int_conv<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     let sf = bits(w, 31, 1) == 1;
     let ty = bits(w, 22, 2);
     let rmode = bits(w, 19, 2);
@@ -294,7 +294,7 @@ fn int_conv(e: &mut dyn Env, w: u32) -> bool {
     }
 }
 
-fn fixed_conv(e: &mut dyn Env, w: u32) -> bool {
+fn fixed_conv<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     let sf = bits(w, 31, 1) == 1;
     let ty = bits(w, 22, 2);
     let scale = bits(w, 10, 6);

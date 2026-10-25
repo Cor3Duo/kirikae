@@ -36,7 +36,7 @@ mod line;
 mod reverb;
 mod reverb3d;
 
-pub(crate) use aux_bus::{AuxParams, process as process_aux};
+pub(crate) use aux_bus::{AuxClock, AuxParams, process as process_aux};
 pub(crate) use biquad::{Biquad, BiquadParams};
 pub(crate) use compressor::{Compressor, CompressorParams};
 pub(crate) use delay::{DelayEffect, DelayParams};

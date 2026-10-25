@@ -21,7 +21,7 @@ pub trait Env {
     fn store(&mut self, addr: u64, size: u8, v: u64);
 }
 
-pub fn exec(e: &mut dyn Env, w: u32) -> bool {
+pub fn exec<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     if crypto::supported(w) {
         return crypto::exec(e, w);
     }
@@ -34,6 +34,14 @@ pub fn exec(e: &mut dyn Env, w: u32) -> bool {
     } else {
         ldst::exec(e, w)
     }
+}
+
+/// Runs a run of consecutive SIMD/FP words in order and returns how many it executed,
+/// stopping at the first word the helper rejects. A caller that batches consecutive
+/// instructions (the interpreter over a block, a JIT over a run) drives the helper
+/// through one entry instead of one per word; `words.len()` means the whole run ran.
+pub fn exec_run<E: Env + ?Sized>(e: &mut E, words: &[u32]) -> usize {
+    words.iter().take_while(|&&w| exec(e, w)).count()
 }
 
 pub fn supported(w: u32) -> bool {
@@ -102,7 +110,7 @@ pub(crate) fn sx(x: u64, esize: u32) -> i64 {
     }
 }
 
-pub(crate) fn set_qc(e: &mut dyn Env) {
+pub(crate) fn set_qc<E: Env + ?Sized>(e: &mut E) {
     let f = e.fpsr();
     e.set_fpsr(f | 1 << 27);
 }

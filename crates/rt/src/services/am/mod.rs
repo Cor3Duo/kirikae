@@ -58,7 +58,9 @@ const SAVE_DATA_SIZE: u64 = 0x200_0000;
 const SAVE_JOURNAL_SIZE: u64 = 0x100_0000;
 /// `nn::ncm::StorageId::BuiltInUser`: the title is not launched from an NCM
 /// storage, but the built-in user partition is the closest non-removable answer.
-const STORAGE_ID_BUILT_IN_USER: u8 = 1;
+/// The enum is `None 0, Host 1, GameCard 2, BuiltInSystem 3, BuiltInUser 4,
+/// SdCard 5, Any 6`.
+const STORAGE_ID_BUILT_IN_USER: u8 = 4;
 const DEFAULT_PSEUDO_DEVICE_ID: [u8; 16] = [
     0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44,
 ];

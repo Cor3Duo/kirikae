@@ -60,6 +60,9 @@ pub struct DiscoveryStats {
     pub promoted_cases: u64,
     /// Entries another entry's body would have run into by falling through.
     pub interior: u64,
+    /// Entries named by an absolute code pointer in constant data, which a `blr` through a
+    /// function pointer loaded from memory reaches and no `bl` edge does.
+    pub data_pointers: u64,
     /// Reachable `blr`. Its targets only become entries through a reference or a profile.
     pub indirect_calls: u64,
     /// Reachable `br`, and how many of them had a recognised jump table.
@@ -145,15 +148,49 @@ impl<'a> CodeSpace<'a> {
     /// `.data` is read as it sits in the image. Absolute pointers there are the loader's
     /// business (see `loader::dynamic`), so a relocated slot may read as zero; a relative offset
     /// table reads correctly and is what most titles use.
+    ///
+    /// `.text` is readable too: a compiler may put a `switch` table of byte or word offsets in the
+    /// middle of a function, right after the `br` that reads it, and refusing to read code left
+    /// every such table unresolved. A value read from code is still only a table entry when it
+    /// lands in code.
     pub(crate) fn read_const(&self, addr: u64, size: u8) -> Option<u64> {
         let last = addr.checked_add(size as u64 - 1)?;
         let m = self.images.iter().find(|m| {
             (m.ro.contains(&addr) && m.ro.contains(&last))
                 || (m.data.contains(&addr) && m.data.contains(&last))
+                || (m.text.contains(&addr) && m.text.contains(&last))
         })?;
         let at = (addr - m.base) as usize;
         let bytes = m.memory.get(at..at + size as usize)?;
         Some(bytes.iter().rev().fold(0, |v, &b| v << 8 | b as u64))
+    }
+
+    /// Code addresses stored as absolute 8-byte pointers in constant data.
+    ///
+    /// A `blr` through a function pointer loaded from `.rodata` or `.data` (a vtable, an
+    /// allocator hook table) leaves no `bl` edge, so discovery cannot see the target unless the
+    /// slot is read. Relocated slots are already roots (`loader::dynamic::code_pointers`); this
+    /// finds the absolute ones.
+    ///
+    /// A word that happens to land inside `.text` is a pointer with overwhelming probability: in
+    /// Brilliant Diamond, 935 slots in constant data hold 14 distinct values and all 14 are
+    /// function entries. A wrong guess only compiles code that is already code.
+    pub fn data_pointers(&self) -> BTreeSet<u64> {
+        let mut out = BTreeSet::new();
+        for m in &self.images {
+            for range in [&m.ro, &m.data] {
+                let mut addr = range.start.div_ceil(8) * 8;
+                while addr + 8 <= range.end {
+                    if let Some(v) = self.read_const(addr, 8)
+                        && self.is_code(v)
+                    {
+                        out.insert(v);
+                    }
+                    addr += 8;
+                }
+            }
+        }
+        out
     }
 }
 
@@ -293,10 +330,16 @@ pub fn find_entries_measured(
     space: &CodeSpace,
     seeds: &[u64],
 ) -> (BTreeSet<u64>, u64, DiscoveryStats) {
-    let mut entries: BTreeSet<u64> = seeds
+    let pointers = space.data_pointers();
+    let seed_entries: BTreeSet<u64> = seeds
         .iter()
         .copied()
         .filter(|a| space.is_code(*a))
+        .collect();
+    let mut entries: BTreeSet<u64> = seed_entries
+        .iter()
+        .copied()
+        .chain(pointers.iter().copied())
         .collect();
     let seeded = entries.clone();
     let (mut calls, mut cases, mut refs) =
@@ -391,6 +434,7 @@ pub fn find_entries_measured(
     }
     entries.retain(|e| seeded.contains(e) || calls.contains(e) || !cases.contains(e));
     let reachable = seen.count();
+    let data_pointers = pointers.iter().filter(|a| entries.contains(*a)).count() as u64;
     let (promoted, promoted_cases, rounds) = promote(&mut entries, &reach);
     // Counted over the final entry set: a promoted entry can also be one that another body runs
     // into, and it is an entry all the same.
@@ -398,12 +442,13 @@ pub fn find_entries_measured(
     let count = |set: &BTreeSet<u64>| set.iter().filter(|a| entries.contains(a)).count() as u64;
     let stats = DiscoveryStats {
         reachable,
-        seeds: count(&seeded),
+        seeds: count(&seed_entries),
         calls: count(&calls),
         references: count(&refs),
         promoted,
         promoted_cases,
         interior,
+        data_pointers,
         indirect_calls,
         indirect_jumps,
         tables,
@@ -547,6 +592,68 @@ mod tests {
         let jump = f.blocks.last().unwrap();
         assert_eq!(jump.last().control(), Control::JumpIndirect);
         assert!(!f.has_block(jump.next), "{f:x?}");
+    }
+
+    #[test]
+    fn a_function_pointer_in_constant_data_is_an_entry() {
+        let (nro, callee) = kirikae_testkit::pointer_callee();
+        let image = kirikae_loader::load(&nro, LOAD_BASE).unwrap();
+        let space = CodeSpace::new(vec![&image]);
+        let prog = discover(&image);
+        assert!(prog.entries.contains(&callee), "{:x?}", prog.entries);
+        assert_eq!(prog.entries.len(), 2, "{:x?}", prog.entries);
+        let (_, _, stats) = find_entries_measured(&space, &[image.entry]);
+        assert_eq!(stats.data_pointers, 1);
+    }
+
+    #[test]
+    fn a_byte_offset_table_in_text_resolves() {
+        let image = kirikae_loader::load(&kirikae_testkit::text_table_nro(), LOAD_BASE).unwrap();
+        let space = CodeSpace::new(vec![&image]);
+        let (entries, _, stats) = find_entries_measured(&space, &[image.entry]);
+        assert_eq!(stats.tables, 1, "the table is in .text: {entries:x?}");
+        assert_eq!(stats.unresolved_jumps, 0);
+        // The four cases stay in the entry's own segment, so they are blocks of it, not entries.
+        let prog = discover(&image);
+        let f = &prog.functions[0];
+        assert_eq!(
+            f.insn_count(),
+            18,
+            "the module entry, the switch, the dispatch, four cases and the default: {f:x?}"
+        );
+        assert_eq!(f.blocks.len(), 8, "{f:x?}");
+    }
+
+    #[test]
+    fn a_table_base_held_before_the_run_is_folded() {
+        let image = kirikae_loader::load(&kirikae_testkit::lookup_table_nro(), LOAD_BASE).unwrap();
+        let space = CodeSpace::new(vec![&image]);
+        let (entries, _, stats) = find_entries_measured(&space, &[image.entry]);
+        assert_eq!(
+            stats.tables, 1,
+            "the lookup table is in a register: {entries:x?}"
+        );
+        assert_eq!(stats.unresolved_jumps, 0);
+        let prog = discover(&image);
+        let f = &prog.functions[0];
+        assert_eq!(
+            f.insn_count(),
+            20,
+            "the module entry, nine instructions, four cases and the default: {f:x?}"
+        );
+    }
+
+    #[test]
+    fn a_table_base_before_a_forward_branch_is_still_folded() {
+        let image =
+            kirikae_loader::load(&kirikae_testkit::branched_lookup_nro(), LOAD_BASE).unwrap();
+        let space = CodeSpace::new(vec![&image]);
+        let (entries, _, stats) = find_entries_measured(&space, &[image.entry]);
+        assert_eq!(
+            stats.tables, 1,
+            "the base is set before the branch: {entries:x?}"
+        );
+        assert_eq!(stats.unresolved_jumps, 0);
     }
 
     #[test]

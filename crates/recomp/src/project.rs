@@ -8,7 +8,7 @@ use kirikae_loader::package::{Source, from_source, pack};
 use kirikae_loader::{Executable, dynamic};
 
 use crate::clif::{self, Calls};
-use crate::discover::{CodeSpace, discover, find_entries};
+use crate::discover::{CodeSpace, discover, find_entries_measured};
 use crate::rust_backend::emit_program;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -574,6 +574,7 @@ pub fn build(source: &Source, opts: &BuildOptions) -> Result<BuildReport, String
                 .profile
                 .clone()
                 .unwrap_or_else(|| out_dir.join(format!("{name}.profile")));
+            crate::profile::check_title(&profile, exe.title_id)?;
             match fs::read_to_string(&profile) {
                 Ok(text) => {
                     let extra: Vec<u64> = kirikae_rt::coverage::parse(&text)
@@ -587,18 +588,24 @@ pub fn build(source: &Source, opts: &BuildOptions) -> Result<BuildReport, String
                         profile.display()
                     );
                     roots.extend(extra);
+                    // Tag the profile so a later build with another title can refuse it.
+                    if let Some(title) = exe.title_id {
+                        crate::profile::write_title(&profile, title)?;
+                    }
                 }
                 Err(e) if opts.profile.is_some() => {
                     return Err(format!("{}: {e}", profile.display()));
                 }
                 Err(_) => {}
             }
-            let (entries, reachable) = find_entries(&space, &roots);
+            let (entries, reachable, stats) = find_entries_measured(&space, &roots);
             eprintln!(
-                "kirikae: {} functions, {reachable} of {} instructions reachable ({:.1}s)",
+                "kirikae: {} functions, {reachable} of {} instructions reachable ({:.1}s; {} jump tables, {} data pointers)",
                 entries.len(),
                 space.words(),
-                t0.elapsed().as_secs_f64()
+                t0.elapsed().as_secs_f64(),
+                stats.tables,
+                stats.data_pointers,
             );
             let lifted = clif::estimate(&space, &entries);
             let estimate = lifted * BYTES_PER_INSTRUCTION;

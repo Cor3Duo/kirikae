@@ -16,7 +16,8 @@ pub enum Interpolation {
 impl Header {
     pub fn parse(bytes: &[u8]) -> Option<Header> {
         let b = bytes.get(..SIZE)?;
-        let words = std::array::from_fn(|i| u32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().unwrap()));
+        let words =
+            std::array::from_fn(|i| u32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().unwrap()));
         Some(Header { words })
     }
 

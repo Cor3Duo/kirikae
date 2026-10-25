@@ -1084,12 +1084,46 @@ mod tests {
     fn subform_labels_mark_the_mnemonic_missing() {
         assert!(is_missing("tex", &["tex"]));
         assert!(is_missing("tex", &["tex (bindless lod)"]));
+        assert!(is_missing("tex", &["tex (bindless handle or)"]));
+        assert!(is_missing("tex", &["tex (bindless dynamic handle)"]));
         assert!(is_missing("tld", &["tld (multisample)"]));
         assert!(is_missing("tld4", &["tld4 (per-texel offsets)"]));
         assert!(!is_missing("tld4", &["tex (bindless)"]));
         assert!(!is_missing("tex", &["texs (unknown target)"]));
         assert!(!is_missing("tex", &["tld (multisample)"]));
         assert!(!is_missing("imad", &[]));
+    }
+
+    /// The labels the surface, atomic and control-flow gaps carry name the
+    /// instruction they belong to, so the coverage map still attributes them.
+    #[test]
+    fn blocked_forms_keep_the_mnemonic_they_belong_to() {
+        assert!(is_missing(
+            "suld",
+            &["suld (surface read of an unknown-format image)"]
+        ));
+        assert!(is_missing(
+            "sured",
+            &["sured (surface atomic of an unknown-format image)"]
+        ));
+        assert!(is_missing(
+            "suatom",
+            &["suatom (surface atomic of an unknown-format image)"]
+        ));
+        assert!(is_missing("sust", &["sust (physical address)"]));
+        assert!(is_missing("atoms", &["atoms (cas)"]));
+        assert!(is_missing("atoms", &["atoms (no shared memory)"]));
+        assert!(is_missing("vote", &["vote (vtg)"]));
+        assert!(is_missing("vote", &["vote (type 3)"]));
+        assert!(is_missing(
+            "txa",
+            &["txa (texture descriptor is not a shader input)"]
+        ));
+        assert!(is_missing("b2r", &["b2r (barrier register)"]));
+        // The stop-mask condition is not a mnemonic of its own, so it is
+        // reported as a variant and no instruction claims it.
+        assert!(!is_missing("exit", &["conditional stop mask"]));
+        assert!(!is_missing("atoms", &["red/atom (inc/dec)"]));
     }
 
     fn temp(name: &str) -> PathBuf {

@@ -486,6 +486,12 @@ pub struct State {
     src: Vec<Vec<f32>>,
     voice_out: Vec<Vec<f32>>,
     pub elapsed_frames: u64,
+    /// Renderer frames the host device callback has consumed, when a host
+    /// output exists. The presentation clock follows this monotonic media
+    /// position instead of the frames just mixed, so the queue ahead of the
+    /// device is not counted as already heard. `None` falls back to the mix
+    /// rate (muted, headless or no device).
+    output_played: Option<u64>,
     trace: bool,
 }
 
@@ -508,6 +514,7 @@ impl State {
             src: vec![Vec::new(); MAX_CHANNELS],
             voice_out: vec![vec![0.0; sizes.sample_count]; MAX_CHANNELS],
             elapsed_frames: 0,
+            output_played: None,
             trace,
         }
     }
@@ -794,7 +801,7 @@ impl State {
             sink.used = byte_at(p, 1) != 0;
             sink.device = byte_at(p, 0) == SINK_DEVICE;
             if sink.device {
-                let n = (u32_at(p, 0x120) as usize).min(MAX_CHANNELS);
+                let n = (u32_at(p, 0x120) as usize).min(MAX_OUTPUT_CHANNELS);
                 sink.inputs = p[0x124..0x124 + n]
                     .iter()
                     .map(|&b| usize::from(b))
@@ -811,11 +818,28 @@ impl State {
         }
     }
 
+    /// Report the frames the host device callback has consumed, or `None`
+    /// when no host device is playing. The value is monotonic on the device
+    /// side, so the presentation clock never sees the audio position move
+    /// backwards when the queue depth changes.
+    pub fn set_output_played(&mut self, frames: Option<u64>) {
+        self.output_played = frames;
+    }
+
+    /// Media frames the presentation clock should follow: the device position
+    /// when there is one, otherwise the mixer's own count (the historical
+    /// behaviour for muted or headless runs). Split out so the arithmetic is
+    /// testable without a clock.
+    fn presentation_frames(&self, block: usize) -> u64 {
+        self.output_played
+            .unwrap_or_else(|| self.elapsed_frames.saturating_mul(block as u64))
+    }
+
     pub fn render(&mut self, mem: &dyn Mem, out: &mut Vec<Frame>) {
         let n = self.sizes.sample_count;
         self.elapsed_frames += 1;
         crate::host1x::clock::audio_position(
-            self.elapsed_frames * n as u64,
+            self.presentation_frames(n),
             self.sizes.sample_rate,
             true,
             crate::host1x::clock::AudioSource::AudRen,
@@ -1088,7 +1112,7 @@ impl State {
                             &mut effect_out[..channels],
                             n,
                             slot.enabled,
-                            sink_rate,
+                            effect::AuxClock::of(aux, sink_rate),
                         );
                         for c in 0..channels {
                             let at = (offset + usize::from(sinks[c])) * n;
@@ -1465,11 +1489,15 @@ mod tests {
     }
 
     fn graph(s: &mut State) {
+        graph_with_buffers(s, 2);
+    }
+
+    fn graph_with_buffers(s: &mut State, buffers: usize) {
         let mut mixes = vec![0u8; 0x20 + MIX_IN];
         put_u32(&mut mixes, 4, 1);
         let m = &mut mixes[0x20..];
         put_u32(m, 0, 1.0f32.to_bits());
-        put_u32(m, 8, 2);
+        put_u32(m, 8, buffers as u32);
         m[0x0c] = 1;
         put_u32(m, 0x924, UNUSED_MIX as u32);
         put_u32(m, 0x928, UNUSED_SPLITTER);
@@ -1807,6 +1835,139 @@ mod tests {
         let read = u32::from_le_bytes(mem.read(RETURN + 0x40, 4).unwrap().try_into().unwrap());
         assert_eq!(write as usize, (5 * n) % STORAGE);
         assert_eq!(read as usize, (5 * n) % STORAGE);
+    }
+
+    #[test]
+    fn a_44k1_aux_block_in_a_48k_mix_does_not_drift_or_click() {
+        const SEND: u64 = 0x1000;
+        const RETURN: u64 = 0x4000;
+        const CHANNELS: usize = 2;
+        let mut s = State::new(sizes());
+        graph_with_buffers(&mut s, 3);
+        let n = s.sizes.sample_count;
+        // Four blocks fit in the ring, like a real application's storage.
+        let storage = CHANNELS * n * 4;
+        let mut e = aux_effect(SEND, RETURN);
+        e[0x20 + 1] = 1; // channel 1 reads mix buffer 1
+        e[0x20 + 24 + 1] = 2; // and writes mix buffer 2
+        put_u32(&mut e, 0x20 + 0x30, CHANNELS as u32);
+        put_u32(&mut e, 0x20 + 0x34, 44_100);
+        put_u32(&mut e, 0x20 + 0x38, storage as u32);
+        s.update_effects(&e, 1);
+
+        // The application's return ring holds a continuous waveform. Its
+        // layout is channel-major per block (`block, channel, sample`), the
+        // same order the DSP reads, and it is periodic with the ring so the
+        // wrap continues the waveform exactly as an application that keeps up
+        // would have rewritten it.
+        let period = (storage / CHANNELS) as f64;
+        let amplitudes = [16_000.0f32, 8_000.0];
+        let reference = |index: usize, channel: usize| {
+            let block = index / n;
+            let within = index % n;
+            (std::f64::consts::TAU * (block * n + within) as f64 / period).sin() as f32
+                * amplitudes[channel]
+        };
+        let mut ring = Vec::with_capacity(storage * 4);
+        for index in 0..storage {
+            let block = index / (CHANNELS * n);
+            let at = index % (CHANNELS * n);
+            let channel = at / n;
+            let within = at % n;
+            let value = reference(block * n + within, channel);
+            ring.extend_from_slice(&(value as i32).to_le_bytes());
+        }
+        let mem = Ram::new(0x10_000);
+        assert!(mem.write(RETURN + 0x80, &ring));
+
+        let mut last: [Option<f32>; CHANNELS] = [None; CHANNELS];
+        let mut max_step = [0.0f32; CHANNELS];
+        for block in 0..7 {
+            s.buffers = vec![0.0; 3 * n];
+            let sent: Vec<f32> = (0..CHANNELS * n)
+                .map(|i| ((block * CHANNELS * n + i) % 1000) as f32 - 500.0)
+                .collect();
+            s.buffers[..CHANNELS * n].copy_from_slice(&sent);
+            s.apply_mix_effects(FINAL_MIX, &mem);
+
+            for channel in 0..CHANNELS {
+                for i in 0..n {
+                    let want = reference(block * n + i, channel) as i32 as f32;
+                    let got = s.buffers[(channel + 1) * n + i];
+                    assert!(
+                        got.is_finite(),
+                        "block {block} channel {channel} sample {i}"
+                    );
+                    assert!(
+                        (got - want).abs() < 1e-6,
+                        "block {block} channel {channel} sample {i}: {got} vs {want}"
+                    );
+                    assert!(
+                        got.abs() <= amplitudes[channel] + 1.0,
+                        "sample out of the ring's range: {got}"
+                    );
+                    if let Some(previous) = last[channel] {
+                        max_step[channel] = max_step[channel].max((got - previous).abs());
+                    }
+                    last[channel] = Some(got);
+                }
+            }
+
+            // The send side is a 1:1 copy at the same advancing offset.
+            let offset = (block * CHANNELS * n) % storage;
+            for channel in 0..CHANNELS {
+                let bytes = mem
+                    .read(
+                        SEND + 0x80 + ((offset + channel * n) * 4) as u64,
+                        n as u64 * 4,
+                    )
+                    .unwrap();
+                for (i, sample) in bytes.as_chunks::<4>().0.iter().enumerate() {
+                    let value = i32::from_le_bytes(*sample) as f32;
+                    assert!(
+                        (value - sent[channel * n + i]).abs() < 1e-6,
+                        "send block {block} channel {channel} sample {i}"
+                    );
+                }
+            }
+        }
+
+        // No resampler, so the output never jumps more than the waveform's own
+        // step: no click at a block boundary and no accumulated drift.
+        for channel in 0..CHANNELS {
+            let step = amplitudes[channel] as f64 * std::f64::consts::TAU / period;
+            assert!(
+                max_step[channel] as f64 <= step + 2.0,
+                "channel {channel} jumps {} per sample, waveform step is {step}",
+                max_step[channel]
+            );
+        }
+        let advanced = (7 * CHANNELS * n) % storage;
+        let write = u32::from_le_bytes(mem.read(SEND + 0x44, 4).unwrap().try_into().unwrap());
+        let read = u32::from_le_bytes(mem.read(RETURN + 0x40, 4).unwrap().try_into().unwrap());
+        assert_eq!(write as usize, advanced);
+        assert_eq!(read as usize, advanced);
+    }
+
+    #[test]
+    fn the_presentation_position_follows_the_device_when_it_exists() {
+        let mut s = State::new(sizes());
+        graph(&mut s);
+        let n = s.sizes.sample_count;
+        // No host output: the position is the historical mixing rate.
+        s.elapsed_frames = 10;
+        assert_eq!(s.presentation_frames(n), 10 * n as u64);
+        // The device has consumed seven blocks; the three queued blocks have
+        // not reached the speakers and are not part of the media position.
+        s.set_output_played(Some(7 * n as u64));
+        assert_eq!(s.presentation_frames(n), 7 * n as u64);
+        // Muted, headless or no device: back to the mixing rate.
+        s.set_output_played(None);
+        assert_eq!(s.presentation_frames(n), 10 * n as u64);
+        // A device that has consumed nothing reports zero, not a negative or
+        // wrapped count.
+        s.set_output_played(Some(0));
+        assert_eq!(s.presentation_frames(n), 0);
     }
 
     #[test]

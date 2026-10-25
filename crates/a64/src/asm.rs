@@ -324,6 +324,20 @@ pub fn neon_two_misc(q: bool, u: bool, size: u32, opcode: u32, rn: u32, rd: u32)
         | rd
 }
 
+/// Advanced SIMD across-vector reduction: `opcode` `0b11011` is `ADDV` with `u = false`,
+/// `0b00011` is `SADDLV` with `u = false` and `UADDLV` with `u = true`.
+pub fn neon_across(q: bool, u: bool, size: u32, opcode: u32, rn: u32, rd: u32) -> u32 {
+    (q as u32) << 30
+        | (u as u32) << 29
+        | 0b01110 << 24
+        | (size & 3) << 22
+        | 0b11000 << 17
+        | (opcode & 0x1f) << 12
+        | 0b10 << 10
+        | rn << 5
+        | rd
+}
+
 /// Advanced SIMD shift by immediate, vector form. `immhb` is `immh:immb`: 0 gives
 /// `SHL #es`, `2*es - n` gives USHR/SSHR `#n`.
 pub fn neon_shift_imm(q: bool, u: bool, immhb: u32, opcode: u32, rn: u32, rd: u32) -> u32 {

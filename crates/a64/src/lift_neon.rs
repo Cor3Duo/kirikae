@@ -22,11 +22,18 @@
 //!   the cumulative `QC` bit of `FPSR`, which the lifting writes explicitly;
 //! - `ABS`/`NEG` from the two-register miscellaneous group (`opcode` = `0b01011`,
 //!   `U` = 0/1) and the saturating `SQABS`/`SQNEG` (`0b00111`, `U` = 0/1), 8/16/32-bit
-//!   lanes and 64-bit lanes with `Q` = 1.
+//!   lanes and 64-bit lanes with `Q` = 1;
+//! - the byte-wise `CNT`/`MVN` (`opcode` = `0b00101`, `size` = 0) and the unsigned
+//!   pairwise widening `UADDLP` (`opcode` = `0b00010`, `U` = 1), the form a byte
+//!   checksum is made of;
+//! - the horizontal `ADDV` (`opcode` = `0b11011`, `U` = 0) and `UADDLV` (`0b00011`,
+//!   `U` = 1), which reduce every lane of the register into lane 0. `SADDLP`/`SADDLV`
+//!   sign the lanes before adding and stay on the helper.
 //!
-//! Everything else (`SRI`/`SLI`, the polynomial `PMUL`, the 64-bit `MUL`/`MAX`/`MIN`
-//! encodings the architecture does not define, the 64-bit `MAXP`/`MINP` the helper does
-//! not implement, the scalar `Q` = 1 forms, `DUP`/`INS` from or to a general register,
+//! Everything else (`SRI`/`SLI`, `SADDLP`/`SADDLV`, `RBIT`, the polynomial `PMUL`, the
+//! 64-bit `MUL`/`MAX`/`MIN` encodings the architecture does not define, the 64-bit
+//! `MAXP`/`MINP` the helper does not implement, the scalar `Q` = 1 forms,
+//! `DUP`/`INS` from or to a general register,
 //! 64-bit `DUP` into a `D` register, `SMOV`/`UMOV`, ...) keeps going through
 //! `Stmt::Simd`, exactly as before.
 //!
@@ -64,6 +71,9 @@ pub fn lift(w: u32) -> Option<Vec<Stmt>> {
     }
     if w & 0x9f20_0400 == 0x0e20_0400 {
         return three_same(w);
+    }
+    if w & 0x9f3e_0c00 == 0x0e30_0800 {
+        return across(w);
     }
     if w & 0x9f3e_0c00 == 0x0e20_0800 {
         return two_reg_misc(w);
@@ -295,14 +305,76 @@ fn pairwise(q: bool, rd: u32, rn: u32, rm: u32, es: u32, kind: Op, signed: u64) 
     out
 }
 
+/// `ADDV` (`opcode` = `0b11011`, `U` = 0) and `UADDLV` (`0b00011`, `U` = 1): the sum of
+/// every lane of the register in lane 0, zero-extended to twice the lane width for the
+/// widening form. `SADDLV` signs the lanes before adding and stays on the helper.
+fn across(w: u32) -> Option<Vec<Stmt>> {
+    let q = bits(w, 30, 1) == 1;
+    let u = bits(w, 29, 1) == 1;
+    let size = bits(w, 22, 2);
+    let opcode = bits(w, 12, 5);
+    let (rn, rd) = (bits(w, 5, 5), bits(w, 0, 5));
+    if size == 3 || (size == 2 && !q) {
+        return None;
+    }
+    let wide = match (opcode, u) {
+        (0b00011, true) => true,
+        (0b11011, false) => false,
+        _ => return None,
+    };
+    let es = 8 << size;
+    let sum = |hi: bool| op2(Op::Vaddv, v(rn, hi), c(es as u64));
+    let total = if q {
+        op2(Op::Add, sum(false), sum(true))
+    } else {
+        sum(false)
+    };
+    let width = if wide { 2 * es } else { es };
+    let value = if width >= 64 {
+        total
+    } else {
+        op2(Op::And, total, c(mask(width)))
+    };
+    Some(vec![
+        Stmt::SetV {
+            reg: rd as u8,
+            hi: false,
+            value,
+        },
+        Stmt::SetV {
+            reg: rd as u8,
+            hi: true,
+            value: c(0),
+        },
+    ])
+}
+
 /// `ABS` (`U` = 0) and `NEG` (`U` = 1) from the two-register miscellaneous group
-/// (`opcode` = `0b01011`, non-saturating) and `SQABS`/`SQNEG` (`0b00111`).
+/// (`opcode` = `0b01011`, non-saturating) and `SQABS`/`SQNEG` (`0b00111`), plus the
+/// per-byte `CNT`/`MVN` (`opcode` = `0b00101`, `size` = 0) and the unsigned pairwise
+/// widening add `UADDLP` (`opcode` = `0b00010`, `U` = 1).
 fn two_reg_misc(w: u32) -> Option<Vec<Stmt>> {
     let q = bits(w, 30, 1) == 1;
     let u = bits(w, 29, 1) == 1;
     let size = bits(w, 22, 2);
     let opcode = bits(w, 12, 5);
     let (rn, rd) = (bits(w, 5, 5), bits(w, 0, 5));
+    if opcode == 0b00101 && size == 0 {
+        // `MVN` inverts every byte, which is the whole 64-bit half inverted. `RBIT`
+        // (`U` = 1, `size` = 1) has no per-byte form and stays on the helper.
+        return Some(both_halves(q, rd, |hi| {
+            if u {
+                op1(Op::Not, v(rn, hi))
+            } else {
+                op2(Op::Vcnt, v(rn, hi), c(8))
+            }
+        }));
+    }
+    if opcode == 0b00010 && u && size < 3 {
+        // `SADDLP` (`U` = 0) sign-extends the lanes before adding; it stays on the helper.
+        let es = 8u64 << size;
+        return Some(both_halves(q, rd, |hi| op2(Op::Vaddlp, v(rn, hi), c(es))));
+    }
     if !matches!(opcode, 0b01011 | 0b00111) || (size == 3 && !q) {
         return None;
     }

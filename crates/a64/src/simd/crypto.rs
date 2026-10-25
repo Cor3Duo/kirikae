@@ -158,7 +158,7 @@ fn aesimc(state: [u8; 16]) -> [u8; 16] {
     inv_mix_columns(state)
 }
 
-pub fn exec(e: &mut dyn Env, w: u32) -> bool {
+pub fn exec<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     let op = w & 0xffff_fc00;
     if !supported(w) {
         return false;

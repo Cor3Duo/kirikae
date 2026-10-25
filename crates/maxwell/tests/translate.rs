@@ -1,4 +1,6 @@
-use kirikae_maxwell::{Options, Stage, translate};
+mod common;
+
+use kirikae_maxwell::{Options, Stage, TexDim, translate};
 
 const PT: u64 = 7 << 16;
 
@@ -10,6 +12,12 @@ fn fragment_header(targets: u32) -> Vec<u8> {
     }
     words[6] = 0b1010;
     words.iter().flat_map(|w| w.to_le_bytes()).collect()
+}
+
+fn fragment_header_with_local_memory(bytes: u32, targets: u32) -> Vec<u8> {
+    let mut header = fragment_header(targets);
+    header[4..8].copy_from_slice(&bytes.to_le_bytes());
+    header
 }
 
 fn vertex_header() -> Vec<u8> {
@@ -55,7 +63,15 @@ fn iadd32i(rd: u64, ra: u64, imm: u32) -> u64 {
     0x1c00_0000_0000_0000 | (imm as u64) << 20 | PT | ra << 8 | rd
 }
 fn texs_2d(rd: u64, ra: u64, rb: u64, handle: u64) -> u64 {
-    0xd800_0000_0000_0000 | 1 << 53 | 4 << 50 | handle << 36 | (rd + 2) << 28 | rb << 20 | PT | ra << 8 | rd
+    0xd800_0000_0000_0000
+        | 1 << 53
+        | 4 << 50
+        | handle << 36
+        | (rd + 2) << 28
+        | rb << 20
+        | PT
+        | ra << 8
+        | rd
 }
 fn ald(rd: u64, attr: u64, words: u64) -> u64 {
     0xefd8_0000_0000_0000 | (words - 1) << 47 | 0xff << 39 | attr << 20 | PT | 0xff << 8 | rd
@@ -66,9 +82,21 @@ fn ast(rs: u64, attr: u64, words: u64) -> u64 {
 fn ldc(rd: u64, slot: u64, offset: u64) -> u64 {
     0xef90_0000_0000_0000 | 4 << 48 | slot << 36 | offset << 20 | PT | 0xff << 8 | rd
 }
+fn mov_cbuf(rd: u64, slot: u64, offset: u64) -> u64 {
+    0x4c98_0000_0000_0000 | slot << 34 | (offset >> 2) << 20 | PT | rd
+}
+fn tex_2d(rd: u64, ra: u64, handle: u64) -> u64 {
+    0xc038_0000_0000_0000 | handle << 36 | 0xf << 31 | 1 << 29 | PT | ra << 8 | rd
+}
+fn tex_bindless(rd: u64, ra: u64, rb: u64, mask: u64, lod: u64) -> u64 {
+    0xdeb8_0000_0000_0000 | rb << 20 | mask << 31 | lod << 37 | 1 << 29 | PT | ra << 8 | rd
+}
 
 fn options(stage: Stage) -> Options {
-    Options { local_size: [8, 8, 1], ..Options::new(stage, 0) }
+    Options {
+        local_size: [8, 8, 1],
+        ..Options::new(stage, 0)
+    }
 }
 
 fn disassemble(spirv: &[u32]) -> String {
@@ -80,19 +108,68 @@ fn disassemble(spirv: &[u32]) -> String {
 
 fn validate(spirv: &[u32]) {
     let bytes: Vec<u8> = spirv.iter().flat_map(|w| w.to_le_bytes()).collect();
-    let module = match naga::front::spv::parse_u8_slice(&bytes, &naga::front::spv::Options::default()) {
-        Ok(m) => m,
-        Err(e) => panic!("SPIR-V does not parse: {e:?}
-{}", disassemble(spirv)),
-    };
-    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&module).expect("SPIR-V validates");
+    let module =
+        match naga::front::spv::parse_u8_slice(&bytes, &naga::front::spv::Options::default()) {
+            Ok(m) => m,
+            Err(e) => panic!(
+                "SPIR-V does not parse: {e:?}
+{}",
+                disassemble(spirv)
+            ),
+        };
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .expect("SPIR-V validates");
+    common::check_structure(spirv);
+}
+
+/// Asserts that the entry block starts with the function-local variables and
+/// that no variable is declared anywhere else, returning their count.
+fn leading_variables(spirv: &[u32]) -> usize {
+    use rspirv::spirv::Op;
+    let mut loader = rspirv::dr::Loader::new();
+    rspirv::binary::parse_words(spirv, &mut loader).unwrap();
+    let module = loader.module();
+    let function = &module.functions[0];
+    let first = &function.blocks[0];
+    let leading = first
+        .instructions
+        .iter()
+        .take_while(|i| i.class.opcode == Op::Variable)
+        .count();
+    assert_eq!(
+        leading,
+        function
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .filter(|i| i.class.opcode == Op::Variable)
+            .count(),
+        "every local variable lives in the entry block's leading run"
+    );
+    assert!(
+        first.instructions[leading..]
+            .iter()
+            .all(|i| i.class.opcode != Op::Variable)
+    );
+    leading
 }
 
 #[test]
 fn straight_line_fragment_shader() {
     let code = program(
         fragment_header(1),
-        &[mov32i(0, 1.0f32.to_bits()), mov32i(1, 0.5f32.to_bits()), fadd(2, 0, 1), ffma(3, 0, 1, 2), ipa(4, 0x80, 0xff), EXIT],
+        &[
+            mov32i(0, 1.0f32.to_bits()),
+            mov32i(1, 0.5f32.to_bits()),
+            fadd(2, 0, 1),
+            ffma(3, 0, 1, 2),
+            ipa(4, 0x80, 0xff),
+            EXIT,
+        ],
     );
     let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
     assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
@@ -119,8 +196,87 @@ fn loop_with_branches() {
 }
 
 #[test]
+fn branchy_shaders_declare_every_local_first() {
+    // The dumped shaders that failed VUID-VkShaderModuleCreateInfo-pCode-08737
+    // had this shape: a branchy program gets the interpreter-style dispatcher,
+    // whose program counter and four call-return stacks used to be declared
+    // after the register clear, and a shader with local memory adds another
+    // function-local array.
+    let code = program(
+        fragment_header_with_local_memory(16, 1),
+        &[
+            mov32i(0, 0),
+            mov32i(1, 4),
+            iadd32i(0, 0, 1),
+            isetp_lt(0, 0, 1),
+            bra(-0x20, 0),
+            EXIT,
+        ],
+    );
+    let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
+    assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
+    // 255 registers, 7 predicates, 4 condition codes, the call-return stack
+    // pointer, the local-memory base, the dispatcher's program counter and its
+    // four two-word stacks, plus the local-memory array.
+    assert_eq!(leading_variables(&shader.spirv), 255 + 7 + 4 + 2 + 9 + 1);
+    validate(&shader.spirv);
+}
+
+#[test]
+fn dead_code_after_kill_is_not_emitted() {
+    let kill = 0xe330_0000_0000_0000 | PT | 0xf;
+    let code = program(
+        fragment_header(1),
+        &[
+            mov32i(0, 1),
+            mov32i(1, 0),
+            isetp_lt(0, 0, 1),
+            bra(0x18, 0),
+            kill,
+            mov32i(2, 3),
+            EXIT,
+        ],
+    );
+    let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
+    assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
+    let text = disassemble(&shader.spirv);
+    assert_eq!(text.matches("OpKill").count(), 1, "{text}");
+    validate(&shader.spirv);
+}
+
+#[test]
+fn two_constant_buffers_share_decorated_types() {
+    // Four slots each build a block type around the same array; rspirv
+    // deduplicates the types, so decorating them per slot repeats ArrayStride,
+    // Block and Offset and validation rejects the module.
+    let code = program(
+        fragment_header(1),
+        &[
+            ldc(0, 0, 0x10),
+            ldc(1, 1, 0x20),
+            ldc(2, 2, 0x30),
+            ldc(3, 3, 0x40),
+            EXIT,
+        ],
+    );
+    let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
+    assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
+    assert_eq!(shader.cbufs, 0b1111);
+    validate(&shader.spirv);
+}
+
+#[test]
 fn texture_and_constant_buffer() {
-    let code = program(fragment_header(1), &[ipa(0, 0x80, 0xff), ipa(1, 0x84, 0xff), texs_2d(4, 0, 1, 3), ldc(8, 1, 0x10), EXIT]);
+    let code = program(
+        fragment_header(1),
+        &[
+            ipa(0, 0x80, 0xff),
+            ipa(1, 0x84, 0xff),
+            texs_2d(4, 0, 1, 3),
+            ldc(8, 1, 0x10),
+            EXIT,
+        ],
+    );
     let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
     assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
     assert_eq!(shader.textures.len(), 1);
@@ -135,14 +291,34 @@ fn tmml_2d_array(rd: u64, ra: u64, handle: u64) -> u64 {
 
 #[test]
 fn texture_lod_query() {
-    let code = program(fragment_header(1), &[mov32i(0, 0), ipa(1, 0x80, 0xff), ipa(2, 0x84, 0xff), tmml_2d_array(4, 0, 5), EXIT]);
+    let code = program(
+        fragment_header(1),
+        &[
+            mov32i(0, 0),
+            ipa(1, 0x80, 0xff),
+            ipa(2, 0x84, 0xff),
+            tmml_2d_array(4, 0, 5),
+            EXIT,
+        ],
+    );
     let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
     assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
     assert_eq!(shader.textures.len(), 1);
     assert_eq!(shader.textures[0].handle, 5);
     let text = disassemble(&shader.spirv);
     assert!(text.contains("OpImageQueryLod"), "{text}");
-    let code = program(vertex_header(), &[mov32i(0, 0), mov32i(1, 0), mov32i(2, 0), tmml_2d_array(4, 0, 5), EXIT]);
+    // naga's frontend does not implement OpImageQueryLod.
+    common::check_structure(&shader.spirv);
+    let code = program(
+        vertex_header(),
+        &[
+            mov32i(0, 0),
+            mov32i(1, 0),
+            mov32i(2, 0),
+            tmml_2d_array(4, 0, 5),
+            EXIT,
+        ],
+    );
     let shader = translate(&code, &options(Stage::Vertex), &kirikae_maxwell::NoEnv).unwrap();
     assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
     assert!(shader.textures.is_empty());
@@ -152,18 +328,166 @@ fn texture_lod_query() {
 #[test]
 fn texture_gathers() {
     let tld4s = 0xdf00_00a0_00a7_0b06;
-    let tld4 = 0xc838_0000_0000_0000u64 | 1 << 56 | 1 << 54 | 1 << 50 | 7 << 36 | 0xf << 31 | 1 << 29 | PT | 2 << 20 | 4;
-    let code = program(fragment_header(1), &[ipa(11, 0x80, 0xff), ipa(10, 0x84, 0xff), tld4s, EXIT]);
+    let tld4 = 0xc838_0000_0000_0000u64
+        | 1 << 56
+        | 1 << 54
+        | 1 << 50
+        | 7 << 36
+        | 0xf << 31
+        | 1 << 29
+        | PT
+        | 2 << 20
+        | 4;
+    let code = program(
+        fragment_header(1),
+        &[ipa(11, 0x80, 0xff), ipa(10, 0x84, 0xff), tld4s, EXIT],
+    );
     let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
     assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
     assert_eq!(shader.textures.len(), 1);
     validate(&shader.spirv);
-    let code = program(fragment_header(1), &[mov32i(0, 0), mov32i(1, 0), mov32i(2, 0x11), mov32i(3, 0), tld4, EXIT]);
+    let code = program(
+        fragment_header(1),
+        &[
+            mov32i(0, 0),
+            mov32i(1, 0),
+            mov32i(2, 0x11),
+            mov32i(3, 0),
+            tld4,
+            EXIT,
+        ],
+    );
     let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
     assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
     assert!(shader.textures.iter().any(|t| t.handle == 7 && t.shadow));
     let text = disassemble(&shader.spirv);
-    assert!(text.contains("OpImageDrefGather") && text.contains("Offset"), "{text}");
+    assert!(
+        text.contains("OpImageDrefGather") && text.contains("Offset"),
+        "{text}"
+    );
+    // naga's frontend does not implement the gather forms with a dref.
+    common::check_structure(&shader.spirv);
+}
+
+#[test]
+fn bindless_texture_from_constant_buffer() {
+    let code = program(
+        fragment_header(1),
+        &[
+            ipa(0, 0x80, 0xff),
+            ipa(1, 0x84, 0xff),
+            mov_cbuf(5, 4, 0xb0),
+            tex_bindless(2, 0, 5, 0xf, 0),
+            EXIT,
+        ],
+    );
+    let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
+    assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
+    assert_eq!(shader.textures.len(), 1);
+    let t = shader.textures[0];
+    assert_eq!((t.slot, t.handle), (Some(4), 0xb0 / 4));
+    assert_eq!((t.dim, t.array, t.shadow), (TexDim::D2, false, false));
+    assert_eq!(shader.cbufs, 1 << 4);
+    assert_eq!(shader.cbuf_used[4], 0xb4);
+    let text = disassemble(&shader.spirv);
+    assert!(text.contains("OpImageSampleImplicitLod"), "{text}");
+    validate(&shader.spirv);
+
+    // LOD zero needs no extra register, so it is safe in the bindless form too.
+    let code = program(
+        fragment_header(1),
+        &[
+            ipa(0, 0x80, 0xff),
+            ipa(1, 0x84, 0xff),
+            mov_cbuf(5, 4, 0xb0),
+            tex_bindless(2, 0, 5, 0xf, 1),
+            EXIT,
+        ],
+    );
+    let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
+    assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
+    let text = disassemble(&shader.spirv);
+    assert!(text.contains("OpImageSampleExplicitLod"), "{text}");
+    validate(&shader.spirv);
+}
+
+#[test]
+fn bindless_texture_needs_a_constant_buffer_source() {
+    let code = program(
+        fragment_header(1),
+        &[
+            ipa(0, 0x80, 0xff),
+            ipa(1, 0x84, 0xff),
+            tex_bindless(2, 0, 9, 0xf, 0),
+            EXIT,
+        ],
+    );
+    let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
+    assert_eq!(shader.unsupported, ["tex (bindless)"]);
+    assert!(shader.textures.is_empty());
+    validate(&shader.spirv);
+
+    // A handle that is not a `mov` from a constant buffer is not guessed.
+    let code = program(
+        fragment_header(1),
+        &[
+            ipa(0, 0x80, 0xff),
+            ipa(1, 0x84, 0xff),
+            mov32i(9, 3),
+            tex_bindless(2, 0, 9, 0xf, 0),
+            EXIT,
+        ],
+    );
+    let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
+    assert_eq!(shader.unsupported, ["tex (bindless)"]);
+    assert!(shader.textures.is_empty());
+    validate(&shader.spirv);
+}
+
+#[test]
+fn bindless_texture_rejects_unknown_subforms() {
+    let cases = [
+        (tex_bindless(2, 0, 5, 0xf, 6), "tex (bindless lba)"),
+        (tex_bindless(2, 0, 5, 0xf, 7), "tex (bindless lla)"),
+    ];
+    for (tex, label) in cases {
+        let code = program(
+            fragment_header(1),
+            &[
+                ipa(0, 0x80, 0xff),
+                ipa(1, 0x84, 0xff),
+                mov_cbuf(5, 4, 0xb0),
+                tex,
+                EXIT,
+            ],
+        );
+        let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
+        assert_eq!(shader.unsupported, [label]);
+        assert!(shader.textures.is_empty(), "{label}");
+        validate(&shader.spirv);
+    }
+}
+
+#[test]
+fn immediate_texture_keeps_the_table_index() {
+    let code = program(
+        fragment_header(1),
+        &[
+            ipa(0, 0x80, 0xff),
+            ipa(1, 0x84, 0xff),
+            tex_2d(2, 0, 7),
+            EXIT,
+        ],
+    );
+    let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
+    assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
+    assert_eq!(shader.textures.len(), 1);
+    assert_eq!(
+        (shader.textures[0].slot, shader.textures[0].handle),
+        (None, 7)
+    );
+    assert_eq!(shader.cbufs, 0);
+    validate(&shader.spirv);
 }
 
 #[test]
@@ -171,18 +495,44 @@ fn compute_shared_memory() {
     let sts = 0xef58_0000_0000_0000u64 | 5 << 48 | 0x10 << 20 | PT | 2;
     let bar = 0xf0a8_1000_0000_0000u64 | PT;
     let lds = 0xef48_0000_0000_0000u64 | 6 << 48 | PT | 4;
-    let code = program(vec![0; kirikae_maxwell::sph::SIZE], &[mov32i(0, 0), mov32i(2, 1), mov32i(3, 2), sts, bar, lds, EXIT]);
-    let opts = Options { shared_memory: 0x100, ..options(Stage::Compute) };
+    let code = program(
+        vec![0; kirikae_maxwell::sph::SIZE],
+        &[
+            mov32i(0, 0),
+            mov32i(2, 1),
+            mov32i(3, 2),
+            sts,
+            bar,
+            lds,
+            EXIT,
+        ],
+    );
+    let opts = Options {
+        shared_memory: 0x100,
+        ..options(Stage::Compute)
+    };
     let shader = translate(&code, &opts, &kirikae_maxwell::NoEnv).unwrap();
     assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
     let text = disassemble(&shader.spirv);
-    assert!(text.contains("Workgroup") && text.contains("OpControlBarrier"), "{text}");
+    assert!(
+        text.contains("Workgroup") && text.contains("OpControlBarrier"),
+        "{text}"
+    );
     validate(&shader.spirv);
 }
 
 #[test]
 fn vertex_shader_passthrough() {
-    let code = program(vertex_header(), &[ald(0, 0x80, 4), ast(0, 0x70, 4), ald(4, 0x90, 4), ast(4, 0x80, 4), EXIT]);
+    let code = program(
+        vertex_header(),
+        &[
+            ald(0, 0x80, 4),
+            ast(0, 0x70, 4),
+            ald(4, 0x90, 4),
+            ast(4, 0x80, 4),
+            EXIT,
+        ],
+    );
     let shader = translate(&code, &options(Stage::Vertex), &kirikae_maxwell::NoEnv).unwrap();
     assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
     assert_eq!((shader.inputs, shader.outputs), (0b11, 0b1));
@@ -191,7 +541,9 @@ fn vertex_shader_passthrough() {
 
 #[test]
 fn dumped_shaders() {
-    let Some(dir) = std::env::var_os("KIRIKAE_SHADER_DIR") else { return };
+    let Some(dir) = std::env::var_os("KIRIKAE_SHADER_DIR") else {
+        return;
+    };
     let mut missing = std::collections::BTreeMap::<&str, usize>::new();
     let (mut total, mut clean) = (0, 0);
     for entry in std::fs::read_dir(dir).unwrap() {
@@ -208,22 +560,44 @@ fn dumped_shaders() {
             Stage::Vertex
         };
         let code = std::fs::read(&path).unwrap();
-        let shader = translate(&code, &options(stage), &kirikae_maxwell::NoEnv).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let shader = translate(&code, &options(stage), &kirikae_maxwell::NoEnv)
+            .unwrap_or_else(|e| panic!("{name}: {e:?}"));
         let bytes: Vec<u8> = shader.spirv.iter().flat_map(|w| w.to_le_bytes()).collect();
-        let module = naga::front::spv::parse_u8_slice(&bytes, &naga::front::spv::Options::default());
-        let valid = module.as_ref().ok().map(|m| naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(m).map(|_| ()).map_err(|e| format!("{e:?}")));
+        let module =
+            naga::front::spv::parse_u8_slice(&bytes, &naga::front::spv::Options::default());
+        let valid = module.as_ref().ok().map(|m| {
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(m)
+            .map(|_| ())
+            .map_err(|e| format!("{e:?}"))
+        });
         match (&module, &valid) {
-            (Err(naga::front::spv::Error::UnsupportedCapability(_) | naga::front::spv::Error::UnsupportedInstruction(..)), _) => {}
-            (Err(e), _) => println!("{name}: parse error {e:?}"),
-            (_, Some(Err(e))) => println!("{name}: invalid {e:?}"),
+            (
+                Err(
+                    naga::front::spv::Error::UnsupportedCapability(_)
+                    | naga::front::spv::Error::UnsupportedInstruction(..),
+                ),
+                _,
+            ) => {}
+            (Err(e), _) => panic!("{name}: SPIR-V does not parse: {e:?}"),
+            (_, Some(Err(e))) => panic!("{name}: SPIR-V is invalid: {e}"),
             _ => {}
         }
+        common::check_structure(&shader.spirv);
         let program = kirikae_maxwell::cfg::scan(&code[kirikae_maxwell::sph::SIZE..]);
         for (pc, w) in &program.unknown {
             println!("{name}: unknown word {w:#018x} at {pc:#x}");
         }
         total += 1;
-        let checked_ok = matches!(valid, Some(Ok(_))) || matches!(module, Err(naga::front::spv::Error::UnsupportedCapability(_) | naga::front::spv::Error::UnsupportedInstruction(..)));
+        let checked_ok = matches!(valid, Some(Ok(_)))
+            || matches!(
+                module,
+                Err(naga::front::spv::Error::UnsupportedCapability(_)
+                    | naga::front::spv::Error::UnsupportedInstruction(..))
+            );
         if shader.unsupported.is_empty() && checked_ok {
             clean += 1;
         }
@@ -240,24 +614,60 @@ fn dumped_shaders() {
 #[test]
 fn half_pair_operands() {
     use kirikae_maxwell::decode::{HalfOperand, HalfSrc, Insn};
-    let reg = |reg, swizzle, neg| HalfOperand { src: HalfSrc::Reg { reg, swizzle }, neg, abs: false };
-    let cbuf = |slot, offset, neg| HalfOperand { src: HalfSrc::Cbuf { slot, offset }, neg, abs: false };
+    let reg = |reg, swizzle, neg| HalfOperand {
+        src: HalfSrc::Reg { reg, swizzle },
+        neg,
+        abs: false,
+    };
+    let cbuf = |slot, offset, neg| HalfOperand {
+        src: HalfSrc::Cbuf { slot, offset },
+        neg,
+        abs: false,
+    };
     let ops = |w: u64| Insn::decode(w).unwrap().half_operands();
 
     let o = ops(0x61a2_8484_0007_090f);
-    assert_eq!((o.a, o.b, o.c), (reg(9, 1, false), reg(9, 1, true), Some(cbuf(1, 0, false))));
+    assert_eq!(
+        (o.a, o.b, o.c),
+        (reg(9, 1, false), reg(9, 1, true), Some(cbuf(1, 0, false)))
+    );
     assert_eq!((o.mode, o.sat), (1, false));
     let o = ops(0x71c2_8b04_0047_190e);
-    assert_eq!((o.a, o.b, o.c), (reg(25, 1, false), cbuf(1, 0x10, true), Some(reg(22, 2, false))));
+    assert_eq!(
+        (o.a, o.b, o.c),
+        (
+            reg(25, 1, false),
+            cbuf(1, 0x10, true),
+            Some(reg(22, 2, false))
+        )
+    );
     let o = ops(0x5d06_8b10_90b7_0601);
-    assert_eq!((o.a, o.b, o.c), (reg(6, 1, false), reg(11, 1, true), Some(reg(22, 2, false))));
+    assert_eq!(
+        (o.a, o.b, o.c),
+        (reg(6, 1, false), reg(11, 1, true), Some(reg(22, 2, false)))
+    );
     assert_eq!(o.mode, 3);
     let o = ops(0x7a85_0804_0047_ff16);
-    assert_eq!((o.a, o.b, o.c), (reg(255, 2, true), cbuf(1, 0x10, false), None));
+    assert_eq!(
+        (o.a, o.b, o.c),
+        (reg(255, 2, true), cbuf(1, 0x10, false), None)
+    );
     let o = ops(0x5d0a_8000_11c7_0909);
-    assert_eq!((o.a, o.b, o.c, o.mode), (reg(9, 1, false), reg(28, 1, false), None, 1));
+    assert_eq!(
+        (o.a, o.b, o.c, o.mode),
+        (reg(9, 1, false), reg(28, 1, false), None, 1)
+    );
 
-    let code = program(fragment_header(1), &[0x61a2_8484_0007_090f, 0x71c2_8b04_0047_190e, 0x5d06_8b10_90b7_0601, 0x7a85_0804_0047_ff16, EXIT]);
+    let code = program(
+        fragment_header(1),
+        &[
+            0x61a2_8484_0007_090f,
+            0x71c2_8b04_0047_190e,
+            0x5d06_8b10_90b7_0601,
+            0x7a85_0804_0047_ff16,
+            EXIT,
+        ],
+    );
     let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
     assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
     validate(&shader.spirv);

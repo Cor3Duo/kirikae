@@ -280,6 +280,28 @@ fn covered() -> Vec<(u32, &'static str)> {
             }
         }
     }
+    // CNT/MVN, UADDLP and the horizontal reductions: every lane width, `Q`, and an
+    // aliasing pattern.
+    for q in [false, true] {
+        for size in 0..3 {
+            for (rn, rd) in [(1, 0), (31, 15), (5, 5)] {
+                words.push((asm::neon_two_misc(q, true, size, 0b00010, rn, rd), "uaddlp"));
+            }
+        }
+        for (rn, rd) in [(1, 0), (31, 15), (5, 5)] {
+            words.push((asm::neon_two_misc(q, false, 0, 0b00101, rn, rd), "cnt"));
+            words.push((asm::neon_two_misc(q, true, 0, 0b00101, rn, rd), "mvn"));
+        }
+        for size in 0..3 {
+            if size == 2 && !q {
+                continue;
+            }
+            for (rn, rd) in [(1, 0), (31, 15), (5, 5)] {
+                words.push((asm::neon_across(q, false, size, 0b11011, rn, rd), "addv"));
+                words.push((asm::neon_across(q, true, size, 0b00011, rn, rd), "uaddlv"));
+            }
+        }
+    }
     words
 }
 
@@ -371,6 +393,14 @@ fn known_encodings_are_lifted() {
         0x4ea2_9420,
         0x4e62_a420,
         0x4ea0_7820,
+        0x4e20_5a31, // cnt v17.16b, v17.16b
+        0x0e20_5a31, // cnt v17.8b, v17.8b
+        0x6e20_5822, // mvn v2.16b, v1.16b
+        0x6e20_2800, // uaddlp v0.8h, v0.16b
+        0x6e60_2800, // uaddlp v0.4s, v0.8h
+        0x6ea0_2800, // uaddlp v0.2d, v0.4s
+        0x2e30_3a31, // uaddlv h17, v17.8b
+        0x4eb1_b8e7, // addv s7, v7.4s
     ] {
         assert!(lifted(w), "{w:#010x} should be lifted");
     }
@@ -531,6 +561,50 @@ fn helper_count_report() {
         "random NEON sample: {} words, helper before {sample_before}, after {sample_after}",
         sample.len()
     );
+}
+
+/// A run of consecutive words goes through one entry (`exec_run`) exactly like one call
+/// per word: the whole register file, `nzcv` and `fpsr` (including the cumulative `QC`
+/// bit) must end up the same.
+#[test]
+fn runs_match_one_by_one_calls() {
+    use kirikae_a64::simd::{exec, exec_run};
+
+    // The byte-checksum loop Brilliant Diamond spends its startup in, followed by words
+    // from several other families so the run covers plain lanes, a saturating form (QC)
+    // and a pair of aliasing registers.
+    let words = [
+        0x0e20_5a31u32, // cnt v17.8b, v17.8b
+        0x2e30_3a31,    // uaddlv h17, v17.8b
+        0x4e20_5a31,    // cnt v17.16b, v17.16b
+        0x6e20_2a31,    // uaddlp v17.8h, v17.16b
+        0x6e60_2a31,    // uaddlp v17.4s, v17.8h
+        0x6ea0_2a31,    // uaddlp v17.2d, v17.4s
+        0x4eb1_b8e7,    // addv s7, v7.4s
+        0x6e20_5822,    // mvn v2.16b, v1.16b
+        0x4e22_0c20,    // sqadd v0.16b, v1.16b, v2.16b
+        0x4e20_b820,    // abs v0.16b, v1.16b
+        0x4f0b_5420,    // shl v0.16b, v1.16b, #3
+        0x4ea2_9c20,    // mul v0.4s, v1.4s, v2.4s
+    ];
+    let mut rng = Rng(0x9e37_0000_0000_0f17);
+    for _ in 0..64 {
+        let start = rng.state();
+        let mut want = start.clone();
+        assert_eq!(
+            exec_run(&mut want, &words),
+            words.len(),
+            "the run was rejected"
+        );
+        let mut got = start;
+        for &w in &words {
+            assert!(exec(&mut got, w), "{w:#010x} rejected by the helper");
+        }
+        assert_eq!(got.v, want.v, "registers differ after the run");
+        assert_eq!(got.nzcv, want.nzcv, "nzcv differs after the run");
+        assert_eq!(got.fpsr, want.fpsr, "fpsr differs after the run");
+        assert_eq!(got.x, want.x, "general registers differ after the run");
+    }
 }
 
 #[test]

@@ -6,10 +6,12 @@ pub mod acc;
 pub mod am;
 pub mod aoc;
 pub mod apm;
+pub mod arp;
 pub mod audio;
 pub mod bcat;
 pub mod bsd;
 pub mod csrng;
+pub mod ectx;
 pub mod friend;
 pub mod fs;
 pub mod hid;
@@ -17,11 +19,17 @@ pub mod hwopus;
 pub mod irs;
 pub mod ldr;
 pub mod lm;
+pub mod mii;
 pub mod mm;
+pub mod nfc;
 pub mod nfp;
+pub mod ngc;
 pub mod nifm;
+pub mod ns;
 pub mod nvdrv;
+pub mod omm;
 pub mod pctl;
+pub mod pdm;
 pub mod pl;
 pub mod prepo;
 pub mod ro;
@@ -226,11 +234,21 @@ pub fn host_object(name: &str) -> Option<Arc<dyn Service>> {
         "vi:m" => Arc::new(vi::Vi { name: "vi:m" }),
         "vi:s" => Arc::new(vi::Vi { name: "vi:s" }),
         "vi:u" => Arc::new(vi::Vi { name: "vi:u" }),
-        // Names the runtime knows about but does not implement yet. They are
-        // stubbed explicitly so a guest gets the same "service exists, command
-        // unknown" answer it got before the service table became explicit.
-        "ectx:aw" | "ectx:r" | "ectx:w" => Arc::new(stub::Stub::new(name)),
-        "ngc:u" => Arc::new(stub::Stub::new(name)),
+        "omm" => Arc::new(omm::Omm),
+        "ns:am" => Arc::new(ns::Ns::new("ns:am")),
+        "ns:am2" => Arc::new(ns::Ns::new("ns:am2")),
+        "pdm:qry" => Arc::new(pdm::PdmQry),
+        "mii:u" => Arc::new(mii::Mii::new("mii:u")),
+        "mii:e" => Arc::new(mii::Mii::new("mii:e")),
+        "nfc:user" => Arc::new(nfc::Nfc::user()),
+        "nfc:sys" => Arc::new(nfc::Nfc::system()),
+        "nfc:mf:u" => Arc::new(nfc::Nfc::mifare()),
+        "arp:r" => Arc::new(arp::Arp::new("arp:r")),
+        "arp:w" => Arc::new(arp::Arp::new("arp:w")),
+        "ectx:aw" => Arc::new(ectx::Ectx::new("ectx:aw")),
+        "ectx:r" => Arc::new(ectx::Ectx::new("ectx:r")),
+        "ectx:w" => Arc::new(ectx::Ectx::new("ectx:w")),
+        "ngc:u" => Arc::new(ngc::Ngc),
         _ => return None,
     };
     Some(service)
@@ -260,7 +278,8 @@ pub mod result {
 /// the real IPC path from an entry point.
 #[cfg(test)]
 pub(crate) mod harness {
-    use std::sync::Arc;
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
 
     use super::Service;
     use crate::abi::Entry;
@@ -271,15 +290,37 @@ pub(crate) mod harness {
     pub const ENTRY: u64 = 0x1000_0000;
     pub const MESSAGE_SIZE: u64 = 0x100;
 
+    static RECORDED: Mutex<BTreeMap<&'static str, Vec<u64>>> = Mutex::new(BTreeMap::new());
+
+    /// Records one observation from inside the guest entry.
+    pub fn record(key: &'static str, values: &[u64]) {
+        RECORDED.lock().unwrap().insert(key, values.to_vec());
+    }
+
+    /// Reads an observation produced by the last [`run`].
+    pub fn observed(key: &str) -> Vec<u64> {
+        RECORDED
+            .lock()
+            .unwrap()
+            .get(key)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// Runs `entries` in a guest process. Every entry halts itself; a non-zero
     /// exit code fails the test.
     pub fn run(entries: Vec<Entry>) {
+        run_with_title(entries, None);
+    }
+
+    /// [`run`] with an explicit title id, for services that answer per title.
+    pub fn run_with_title(entries: Vec<Entry>, title_id: Option<u64>) {
         let entries: &'static [Entry] = Box::leak(entries.into_boxed_slice());
         let exe = kirikae_loader::Executable {
             modules: Vec::new(),
             entry: entries[0].addr,
             arch: kirikae_loader::Arch::A64,
-            title_id: None,
+            title_id,
             main_stack_size: None,
             system_resource_size: 0,
             romfs: None,

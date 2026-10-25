@@ -15,7 +15,7 @@ macro_rules! by_esize {
     };
 }
 
-fn fpcr(e: &dyn Env) -> Fpcr {
+fn fpcr<E: Env + ?Sized>(e: &E) -> Fpcr {
     Fpcr::from_bits(e.fpcr())
 }
 
@@ -35,8 +35,8 @@ impl Shape {
     }
 }
 
-fn map3(
-    e: &mut dyn Env,
+fn map3<E: Env + ?Sized>(
+    e: &mut E,
     rd: u32,
     rn: u32,
     rm: u32,
@@ -59,8 +59,8 @@ fn map3(
     true
 }
 
-fn pairwise(
-    e: &mut dyn Env,
+fn pairwise<E: Env + ?Sized>(
+    e: &mut E,
     rd: u32,
     rn: u32,
     rm: u32,
@@ -238,7 +238,7 @@ fn fp_pair_op(a_bit: u32, opcode: u32, es: u32, c: Fpcr) -> Option<impl Fn(u64, 
     })
 }
 
-fn three_same(e: &mut dyn Env, w: u32) -> bool {
+fn three_same<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     let q = bits(w, 30, 1);
     let u = bits(w, 29, 1);
     let size = bits(w, 22, 2);
@@ -333,7 +333,7 @@ fn narrow(x: u64, es: u32, kind: u32, sat: &mut bool) -> u64 {
     }
 }
 
-fn write_narrow(e: &mut dyn Env, rd: u32, q: u32, es: u32, vals: &[u64]) {
+fn write_narrow<E: Env + ?Sized>(e: &mut E, rd: u32, q: u32, es: u32, vals: &[u64]) {
     let mut out = if q == 1 {
         e.v(rd) & u64::MAX as u128
     } else {
@@ -346,7 +346,7 @@ fn write_narrow(e: &mut dyn Env, rd: u32, q: u32, es: u32, vals: &[u64]) {
     e.set_v(rd, out);
 }
 
-fn misc(e: &mut dyn Env, w: u32, scalar: bool) -> bool {
+fn misc<E: Env + ?Sized>(e: &mut E, w: u32, scalar: bool) -> bool {
     let q = bits(w, 30, 1);
     let u = bits(w, 29, 1);
     let size = bits(w, 22, 2);
@@ -646,7 +646,7 @@ fn reduce(vals: &[u64], f: &dyn Fn(u64, u64) -> u64) -> u64 {
     f(reduce(&vals[..half], f), reduce(&vals[half..], f))
 }
 
-fn across(e: &mut dyn Env, w: u32) -> bool {
+fn across<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     let q = bits(w, 30, 1);
     let u = bits(w, 29, 1);
     let size = bits(w, 22, 2);
@@ -693,7 +693,7 @@ fn across(e: &mut dyn Env, w: u32) -> bool {
     true
 }
 
-fn shift_imm(e: &mut dyn Env, w: u32, scalar: bool) -> bool {
+fn shift_imm<E: Env + ?Sized>(e: &mut E, w: u32, scalar: bool) -> bool {
     let q = bits(w, 30, 1);
     let u = bits(w, 29, 1);
     let immh = bits(w, 19, 4);
@@ -833,7 +833,7 @@ fn shift_imm(e: &mut dyn Env, w: u32, scalar: bool) -> bool {
     true
 }
 
-fn three_diff(e: &mut dyn Env, w: u32, scalar: bool) -> bool {
+fn three_diff<E: Env + ?Sized>(e: &mut E, w: u32, scalar: bool) -> bool {
     let q = bits(w, 30, 1);
     let u = bits(w, 29, 1);
     let size = bits(w, 22, 2);
@@ -941,7 +941,7 @@ fn pmull64(a: u64, b: u64) -> u128 {
     r
 }
 
-fn indexed(e: &mut dyn Env, w: u32, scalar: bool) -> bool {
+fn indexed<E: Env + ?Sized>(e: &mut E, w: u32, scalar: bool) -> bool {
     let q = bits(w, 30, 1);
     let u = bits(w, 29, 1);
     let size = bits(w, 22, 2);
@@ -1043,7 +1043,7 @@ fn indexed(e: &mut dyn Env, w: u32, scalar: bool) -> bool {
     ok
 }
 
-fn permute(e: &mut dyn Env, w: u32) -> bool {
+fn permute<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     let q = bits(w, 30, 1);
     let size = bits(w, 22, 2);
     let (rm, opcode, rn, rd) = (bits(w, 16, 5), bits(w, 12, 3), bits(w, 5, 5), bits(w, 0, 5));
@@ -1090,7 +1090,7 @@ fn permute(e: &mut dyn Env, w: u32) -> bool {
     true
 }
 
-fn ext(e: &mut dyn Env, w: u32) -> bool {
+fn ext<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     let q = bits(w, 30, 1);
     let imm4 = bits(w, 11, 4);
     let (rm, rn, rd) = (bits(w, 16, 5), bits(w, 5, 5), bits(w, 0, 5));
@@ -1113,7 +1113,7 @@ fn ext(e: &mut dyn Env, w: u32) -> bool {
     true
 }
 
-fn tbl(e: &mut dyn Env, w: u32) -> bool {
+fn tbl<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     let q = bits(w, 30, 1);
     if bits(w, 22, 2) != 0 {
         return false;
@@ -1150,7 +1150,7 @@ fn imm5_elem(imm5: u32) -> Option<(u32, u32)> {
     (size <= 3).then(|| (8 << size, imm5 >> (size + 1)))
 }
 
-fn copy(e: &mut dyn Env, w: u32) -> bool {
+fn copy<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     let q = bits(w, 30, 1);
     let op = bits(w, 29, 1);
     let imm5 = bits(w, 16, 5);
@@ -1212,7 +1212,7 @@ fn copy(e: &mut dyn Env, w: u32) -> bool {
     true
 }
 
-fn modified_imm(e: &mut dyn Env, w: u32) -> bool {
+fn modified_imm<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     let q = bits(w, 30, 1);
     let op = bits(w, 29, 1);
     let cmode = bits(w, 12, 4);
@@ -1258,7 +1258,7 @@ fn modified_imm(e: &mut dyn Env, w: u32) -> bool {
     true
 }
 
-fn scalar_copy(e: &mut dyn Env, w: u32) -> bool {
+fn scalar_copy<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     if bits(w, 29, 1) != 0 || bits(w, 11, 4) != 0 {
         return false;
     }
@@ -1270,7 +1270,7 @@ fn scalar_copy(e: &mut dyn Env, w: u32) -> bool {
     true
 }
 
-fn scalar_pairwise(e: &mut dyn Env, w: u32) -> bool {
+fn scalar_pairwise<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     let u = bits(w, 29, 1);
     let size = bits(w, 22, 2);
     let opcode = bits(w, 12, 5);
@@ -1298,7 +1298,7 @@ fn scalar_pairwise(e: &mut dyn Env, w: u32) -> bool {
     true
 }
 
-fn scalar_three_same(e: &mut dyn Env, w: u32) -> bool {
+fn scalar_three_same<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     let u = bits(w, 29, 1);
     let size = bits(w, 22, 2);
     let (rm, opcode, rn, rd) = (bits(w, 16, 5), bits(w, 11, 5), bits(w, 5, 5), bits(w, 0, 5));
@@ -1366,7 +1366,7 @@ fn scalar_three_same(e: &mut dyn Env, w: u32) -> bool {
     true
 }
 
-pub fn exec(e: &mut dyn Env, w: u32) -> bool {
+pub fn exec<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     if w & 0xdfe0_8400 == 0x5e00_0400 {
         return scalar_copy(e, w);
     }

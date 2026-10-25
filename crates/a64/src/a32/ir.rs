@@ -224,6 +224,350 @@ impl Cond {
     }
 }
 
+/// Type pair of a `vcvt` instruction, printed as the mnemonic suffix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Convert {
+    F64FromF32,
+    F32FromF64,
+    F32FromU32,
+    F32FromS32,
+    U32FromF32,
+    S32FromF32,
+    F64FromU32,
+    F64FromS32,
+    U32FromF64,
+    S32FromF64,
+}
+
+impl Convert {
+    pub const fn suffix(self) -> &'static str {
+        match self {
+            Convert::F64FromF32 => "f64.f32",
+            Convert::F32FromF64 => "f32.f64",
+            Convert::F32FromU32 => "f32.u32",
+            Convert::F32FromS32 => "f32.s32",
+            Convert::U32FromF32 => "u32.f32",
+            Convert::S32FromF32 => "s32.f32",
+            Convert::F64FromU32 => "f64.u32",
+            Convert::F64FromS32 => "f64.s32",
+            Convert::U32FromF64 => "u32.f64",
+            Convert::S32FromF64 => "s32.f64",
+        }
+    }
+}
+
+impl fmt::Display for Convert {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.suffix())
+    }
+}
+
+/// One of the 32 64-bit VFP/Advanced SIMD registers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DReg(u8);
+
+impl DReg {
+    /// Returns `None` for `number > 31`.
+    pub const fn new(number: u8) -> Option<DReg> {
+        if number < 32 {
+            Some(DReg(number))
+        } else {
+            None
+        }
+    }
+
+    /// Builds the register named by a four-bit encoding field and its extension bit,
+    /// which is the high bit of the number.
+    pub const fn from_parts(field: u8, high: bool) -> DReg {
+        DReg((field & 0xf) | (high as u8) << 4)
+    }
+
+    pub const fn number(self) -> u8 {
+        self.0
+    }
+}
+
+impl fmt::Display for DReg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "d{}", self.0)
+    }
+}
+
+/// One of the 32 32-bit single-precision registers.
+///
+/// `S(2n)` is the low word of `D(n)` and `S(2n + 1)` its high word, so writing a
+/// single register only touches half of the double register it aliases.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SReg(u8);
+
+impl SReg {
+    /// Returns `None` for `number > 31`.
+    pub const fn new(number: u8) -> Option<SReg> {
+        if number < 32 {
+            Some(SReg(number))
+        } else {
+            None
+        }
+    }
+
+    /// Builds the register named by a four-bit encoding field and its extension bit,
+    /// which is the low bit of the number.
+    pub const fn from_parts(field: u8, high: bool) -> SReg {
+        SReg(((field & 0xf) << 1) | high as u8)
+    }
+
+    pub const fn number(self) -> u8 {
+        self.0
+    }
+
+    /// The double register this one aliases.
+    pub const fn d(self) -> DReg {
+        DReg(self.0 / 2)
+    }
+
+    /// Whether this is the high word of [`SReg::d`].
+    pub const fn high(self) -> bool {
+        self.0 & 1 == 1
+    }
+}
+
+impl fmt::Display for SReg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "s{}", self.0)
+    }
+}
+
+/// Element size and register width of an Advanced SIMD data-processing instruction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct VecShape {
+    /// Element size in bits: 8, 16, 32 or 64.
+    pub esize: u8,
+    /// The `Q` bit of the encoding: the operands are 128-bit registers (`q`), which
+    /// the IR names by the first of their two `d` halves.
+    pub q: bool,
+}
+
+impl VecShape {
+    /// Lanes per register.
+    pub const fn lanes(self) -> u8 {
+        (if self.q { 128 } else { 64 }) / self.esize
+    }
+
+    /// Bytes per register.
+    pub const fn bytes(self) -> u8 {
+        if self.q { 16 } else { 8 }
+    }
+}
+
+/// System register of the `cp15` transfers the slice models.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum A32SysReg {
+    /// `TPIDRURW`: the thread pointer, user read/write.
+    Tpidrurw,
+    /// `TPIDRURO`: the thread pointer, user read-only.
+    Tpidruro,
+    /// `CNTPCT`: the 64-bit physical counter, `c14` with opcode 0.
+    Cntpct,
+    /// `CNTVCT`: the 64-bit virtual counter, `c14` with opcode 1.
+    Cntvct,
+}
+
+impl A32SysReg {
+    pub const fn name(self) -> &'static str {
+        match self {
+            A32SysReg::Tpidrurw => "tpidrurw",
+            A32SysReg::Tpidruro => "tpidruro",
+            A32SysReg::Cntpct => "cntpct",
+            A32SysReg::Cntvct => "cntvct",
+        }
+    }
+}
+
+impl fmt::Display for A32SysReg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// System register named by `vmrs`/`vmsr`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum VfpSys {
+    /// `fpsid`: read-only identification register.
+    Fpsid,
+    /// `fpscr`: the status and control register modelled by the interpreter.
+    Fpscr,
+    /// `fpexc`: the exception-control register.
+    Fpexc,
+    Mvfr0,
+    Mvfr1,
+    Mvfr2,
+}
+
+impl VfpSys {
+    /// Returns `None` for the media registers and the reserved encodings.
+    pub const fn from_field(field: u32) -> Option<VfpSys> {
+        match field & 0xf {
+            0 => Some(VfpSys::Fpsid),
+            1 => Some(VfpSys::Fpscr),
+            2 => Some(VfpSys::Fpexc),
+            5 => Some(VfpSys::Mvfr2),
+            6 => Some(VfpSys::Mvfr1),
+            7 => Some(VfpSys::Mvfr0),
+            _ => None,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            VfpSys::Fpsid => "fpsid",
+            VfpSys::Fpscr => "fpscr",
+            VfpSys::Fpexc => "fpexc",
+            VfpSys::Mvfr0 => "mvfr0",
+            VfpSys::Mvfr1 => "mvfr1",
+            VfpSys::Mvfr2 => "mvfr2",
+        }
+    }
+}
+
+impl fmt::Display for VfpSys {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Destination of `vmrs`: a core register, or the condition flags.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum VfpDest {
+    Core(Reg),
+    /// `APSR_nzcv`: the four flags are written from FPSCR bits 31:28.
+    Apsr,
+}
+
+impl fmt::Display for VfpDest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VfpDest::Core(reg) => write!(f, "{reg}"),
+            VfpDest::Apsr => f.write_str("apsr_nzcv"),
+        }
+    }
+}
+
+/// A contiguous run of registers transferred by `vldm`/`vstm`/`vpush`/`vpop`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct VBlock {
+    /// `d` register the list starts at. A 32-bit list starts at `s(2 * first)`.
+    pub first: DReg,
+    /// `imm8`: registers in 32-bit words. A doubleword list covers `words / 2` `d`
+    /// registers, which is why `vpush {d8-d15}` encodes `words = 16`.
+    pub words: u8,
+    /// `sz`: the list is written as `d` registers rather than `s` registers.
+    pub double: bool,
+    pub base: Reg,
+    pub mode: BlockMode,
+    pub writeback: bool,
+    /// `vpush`/`vpop` name `sp` implicitly, so the base is not printed.
+    pub implicit_base: bool,
+}
+
+impl VBlock {
+    /// Bytes moved by the transfer.
+    pub const fn bytes(self) -> u32 {
+        self.words as u32 * 4
+    }
+}
+
+impl fmt::Display for VBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if !self.implicit_base {
+            write!(f, "{}", self.base)?;
+            if self.writeback {
+                f.write_str("!")?;
+            }
+            f.write_str(", ")?;
+        }
+        let prefix = if self.double { 'd' } else { 's' };
+        // `words` counts 32-bit registers, so a doubleword list covers half as many.
+        let count = if self.double {
+            self.words / 2
+        } else {
+            self.words
+        };
+        let first = if self.double {
+            self.first.number()
+        } else {
+            self.first.number() * 2
+        };
+        let last = first + count - 1;
+        match count {
+            1 => write!(f, "{{{prefix}{first}}}"),
+            2 => write!(f, "{{{prefix}{first}, {prefix}{last}}}"),
+            _ => write!(f, "{{{prefix}{first}-{prefix}{last}}}"),
+        }
+    }
+}
+
+/// Update applied to the base register of an Advanced SIMD structure transfer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PostUpdate {
+    /// `[r0]`: the base is left alone.
+    None,
+    /// `[r0]!`: the base is advanced by the size of the transfer.
+    Immediate,
+    /// `[r0], r1`: the base is advanced by a register after the access.
+    Register(Reg),
+}
+
+/// Address operand of `vld1`…`vld4` and `vst1`…`vst4`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NeonMem {
+    pub base: Reg,
+    /// First register of the list.
+    pub first: DReg,
+    /// Registers in the list, 1 to 4.
+    pub count: u8,
+    /// Distance between the registers of the list: 1, or 2 for the encodings that
+    /// name every other register.
+    pub stride: u8,
+    /// Element size in bits: 8, 16, 32 or 64.
+    pub esize: u8,
+    /// Interleaved streams in memory: 1 for `vld1`/`vst1`, otherwise the number of
+    /// registers.
+    pub interleave: u8,
+    /// Alignment in bytes the encoding promises, or `None` for unaligned accesses.
+    pub align: Option<u8>,
+    pub update: PostUpdate,
+}
+
+impl NeonMem {
+    /// Bytes moved by the transfer.
+    pub const fn bytes(&self) -> u32 {
+        self.count as u32 * 8
+    }
+
+    /// Register number of slot `slot` of the list.
+    pub const fn register_number(&self, slot: u8) -> u8 {
+        self.first.number() + slot * self.stride
+    }
+}
+
+impl fmt::Display for NeonMem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("{")?;
+        for slot in 0..self.count {
+            if slot != 0 {
+                f.write_str(", ")?;
+            }
+            write!(f, "d{}", self.register_number(slot))?;
+        }
+        write!(f, "}}, [{}]", self.base)?;
+        match self.update {
+            PostUpdate::None => Ok(()),
+            PostUpdate::Immediate => f.write_str("!"),
+            PostUpdate::Register(reg) => write!(f, ", {reg}"),
+        }
+    }
+}
+
 /// Shift applied to the second operand of a data-processing instruction or to the index
 /// register of a load/store.
 ///
@@ -455,9 +799,25 @@ impl fmt::Display for Block {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Operand {
     Reg(Reg),
+    /// A `d` register, or the first half of the `q` register of a NEON instruction.
+    D(DReg),
+    /// One element of a `d` register, `d0[3]`.
+    Lane {
+        reg: DReg,
+        index: u8,
+    },
+    /// An `s` register.
+    S(SReg),
     /// Immediate. For data-processing instructions this is the rotated 32-bit value;
-    /// for `movw`/`movt` a 16-bit value; for `svc`/`bkpt` the comment field.
+    /// for `movw`/`movt` a 16-bit value; for `svc`/`bkpt` the comment field; for the
+    /// lane and shift amounts of a NEON instruction the encoded index.
     Imm(u32),
+    /// A `vmov.f32` immediate, already expanded from its eight encoded bits.
+    ImmFloat32(u32),
+    /// A `vmov.f64` immediate, already expanded from its eight encoded bits.
+    ImmFloat64(u64),
+    /// A 64-bit integer immediate, the expansion of a NEON modified immediate.
+    Imm64(u64),
     /// Register with a shift, the `<op2>` of a data-processing instruction.
     Shifted {
         reg: Reg,
@@ -471,6 +831,18 @@ pub enum Operand {
     },
     Mem(Mem),
     Block(Block),
+    /// Register list of a VFP block transfer.
+    VBlock(VBlock),
+    /// Address operand of an Advanced SIMD structure transfer.
+    NeonMem(NeonMem),
+    /// System register of `vmrs`/`vmsr`.
+    VfpSys(VfpSys),
+    /// Destination of `vmrs`.
+    VfpDest(VfpDest),
+    /// Type pair of a `vcvt`.
+    Convert(Convert),
+    /// System register of an `mrc`/`mcr`.
+    SysReg(A32SysReg),
     Target(Target),
 }
 
@@ -478,7 +850,13 @@ impl fmt::Display for Operand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Operand::Reg(reg) => write!(f, "{reg}"),
+            Operand::D(reg) => write!(f, "{reg}"),
+            Operand::Lane { reg, index } => write!(f, "{reg}[{index}]"),
+            Operand::S(reg) => write!(f, "{reg}"),
             Operand::Imm(imm) => write!(f, "#{imm:#x}"),
+            Operand::ImmFloat32(bits) => write!(f, "#{}", f32::from_bits(*bits)),
+            Operand::ImmFloat64(bits) => write!(f, "#{}", f64::from_bits(*bits)),
+            Operand::Imm64(value) => write!(f, "#{value:#x}"),
             Operand::Shifted { reg, shift } => {
                 write!(f, "{reg}")?;
                 if shift.is_noop() {
@@ -490,6 +868,12 @@ impl fmt::Display for Operand {
             Operand::Regs { lo, hi } => write!(f, "{lo}, {hi}"),
             Operand::Mem(mem) => write!(f, "{mem}"),
             Operand::Block(block) => write!(f, "{block}"),
+            Operand::VBlock(block) => write!(f, "{block}"),
+            Operand::NeonMem(mem) => write!(f, "{mem}"),
+            Operand::VfpSys(sys) => write!(f, "{sys}"),
+            Operand::VfpDest(dest) => write!(f, "{dest}"),
+            Operand::Convert(convert) => write!(f, "{convert}"),
+            Operand::SysReg(reg) => write!(f, "{reg}"),
             Operand::Target(target) => write!(f, "#{:#x}", target.addr),
         }
     }
@@ -507,6 +891,9 @@ pub struct Insn {
     /// `S` bit of a data-processing instruction, or an implicit flag update for
     /// `tst`/`teq`/`cmp`/`cmn`.
     pub sets_flags: bool,
+    /// Element size and width of an Advanced SIMD data-processing instruction; `None`
+    /// for the ARM and VFP classes.
+    pub shape: Option<VecShape>,
     pub operands: Vec<Operand>,
 }
 
@@ -514,7 +901,7 @@ impl Insn {
     /// Mnemonic including the width, flag and addressing-mode suffixes the assembly
     /// syntax uses (`ldrbne`, `adds`, `ldmiane`, `stmdb`).
     pub fn mnemonic(&self) -> String {
-        let mut name = String::from(self.opcode.name());
+        let mut name = String::from(self.opcode.mnemonic());
         if matches!(self.opcode, Opcode::Ldr | Opcode::Str)
             && let Some(Operand::Mem(mem)) = self.operands.last()
             && mem.size == MemSize::Byte
@@ -526,6 +913,15 @@ impl Insn {
         }
         if let Some(Operand::Block(block)) = self.operands.first() {
             name.push_str(block.mode.suffix());
+        }
+        if matches!(self.opcode, Opcode::Vldm | Opcode::Vstm)
+            && let Some(Operand::VBlock(block)) = self.operands.first()
+        {
+            name.push_str(block.mode.suffix());
+        }
+        if let Some(suffix) = self.opcode.mnemonic_suffix(self) {
+            name.push('.');
+            name.push_str(suffix);
         }
         name.push_str(self.cond.suffix());
         name
@@ -547,9 +943,44 @@ impl Insn {
 impl fmt::Display for Insn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.mnemonic())?;
-        for (index, operand) in self.operands.iter().enumerate() {
-            f.write_str(if index == 0 { " " } else { ", " })?;
-            write!(f, "{operand}")?;
+        let quad = self.shape.is_some_and(|shape| shape.q);
+        let mut first = true;
+        for operand in self.operands.iter() {
+            // The conversion type of a `vcvt` is printed as the mnemonic suffix.
+            if matches!(operand, Operand::Convert(_)) {
+                continue;
+            }
+            f.write_str(if first { " " } else { ", " })?;
+            first = false;
+            match operand {
+                // A 128-bit form names the quadword even though the IR stores the first
+                // of its two `d` halves.
+                Operand::D(reg) if quad => write!(f, "q{}", reg.number() / 2)?,
+                // A modified immediate prints one lane; the IR keeps the value that
+                // fills the register.
+                Operand::Imm64(value)
+                    if matches!(
+                        self.opcode,
+                        Opcode::VmovImm | Opcode::VorrImm | Opcode::VmvnImm | Opcode::VbicImm
+                    ) && self.shape.is_some() =>
+                {
+                    let esize = u32::from(
+                        self.shape
+                            .unwrap_or(VecShape {
+                                esize: 64,
+                                q: false,
+                            })
+                            .esize,
+                    );
+                    let mask = if esize >= 64 {
+                        u64::MAX
+                    } else {
+                        (1u64 << esize) - 1
+                    };
+                    write!(f, "#{:#x}", value & mask)?
+                }
+                other => write!(f, "{other}")?,
+            }
         }
         Ok(())
     }

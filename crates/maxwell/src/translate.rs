@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, HashMap};
 use rspirv::binary::Assemble;
 use rspirv::dr::{Builder, Operand};
 use rspirv::spirv::{
-    AddressingModel, BuiltIn, Capability, Decoration, Dim, ExecutionMode, ExecutionModel, FunctionControl, ImageFormat, ImageOperands, LoopControl,
-    MemoryModel, SelectionControl, StorageClass, Word,
+    AddressingModel, BuiltIn, Capability, Decoration, Dim, ExecutionMode, ExecutionModel,
+    FunctionControl, ImageFormat, ImageOperands, LoopControl, MemoryModel, SelectionControl,
+    StorageClass, Word,
 };
 
 use crate::cfg::{self, Program};
@@ -36,13 +37,101 @@ pub trait Env {
 pub struct NoEnv;
 impl Env for NoEnv {}
 
+/// NVN keeps texture handles in the driver's constant bank `c[2]`.
+const TEXTURE_BANK: u32 = 2;
+
+/// NVN's 128-slot layout holds separate texture and sampler handles in two
+/// eight-byte tables of the texture bank instead of one packed word.
+const TEXTURE_TABLE: u32 = 0x168;
+const SAMPLER_TABLE: u32 = 0x568;
+const TABLE_SLOTS: u32 = 128;
+const TABLE_STRIDE: u32 = 8;
+
+/// The two words as (texture-table, sampler-table) offsets when they are one
+/// entry of each table, in either order: NVN's 128-slot layout, which the
+/// packed form of the register handle cannot express.
+fn separate_handle_layout(a: u32, b: u32) -> Option<(u32, u32)> {
+    let in_table = |offset: u32, base: u32| {
+        offset
+            .checked_sub(base)
+            .is_some_and(|d| d % TABLE_STRIDE == 0 && d / TABLE_STRIDE < TABLE_SLOTS)
+    };
+    if in_table(a, TEXTURE_TABLE) && in_table(b, SAMPLER_TABLE) {
+        Some((a, b))
+    } else if in_table(b, TEXTURE_TABLE) && in_table(a, SAMPLER_TABLE) {
+        Some((b, a))
+    } else {
+        None
+    }
+}
+
+/// Where the register form of `tex` reads its handle: one word of a constant
+/// bank, or NVN's texture and sampler tables in the same bank.
+#[derive(Clone, Copy)]
+struct BindlessHandle {
+    slot: u32,
+    /// Word index of the packed handle, or of the texture-table entry.
+    word: u32,
+    /// Word index of the sampler-table entry when the halves are separate.
+    sampler: Option<u32>,
+}
+
 pub const STORAGE_DESCRIPTORS: u32 = 0x110;
 pub const STORAGE_SLOTS: u32 = 16;
+
+/// Instructions that write no destination register, so a backward scan for the
+/// value of a register must step over them.
+const NO_DEST: &[&str] = &[
+    "st", "stg", "sts", "stl", "sust", "red", "exit", "bra", "brx", "sync", "ssy", "pbk", "brk",
+    "kil", "depbar", "bar", "membar", "nop", "isetp", "fsetp", "psetp", "hsetp2", "csetp", "dsetp",
+];
+
+/// Mnemonics this translator leaves out whole because one of their inputs is
+/// state the shader does not carry, with the reason the coverage map shows.
+/// They have no dispatcher arm because none of them emits an operation.
+const UNAVAILABLE: &[(&str, &str)] = &[
+    // A surface descriptor names a texture, and `sust` writes through it as a
+    // storage image with an unknown format. Reading one (`suld`) or making it
+    // an atomic target (`sured`, `suatom`) needs `StorageImageReadWithoutFormat`
+    // or a known numeric format, and the runtime enables neither feature at
+    // device creation, so the binding is not equivalent.
+    ("suld", "suld (surface read of an unknown-format image)"),
+    ("sured", "sured (surface atomic of an unknown-format image)"),
+    (
+        "suatom",
+        "suatom (surface atomic of an unknown-format image)",
+    ),
+    // The descriptor word, the coverage mask, the per-attribute address and the
+    // primitive attribute stream live in driver state the shader interface does
+    // not carry.
+    ("txa", "txa (texture descriptor is not a shader input)"),
+    ("pixld", "pixld (rasteriser coverage is not a shader input)"),
+    ("al2p", "al2p (attribute address is not a shader input)"),
+    ("isberd", "isberd (primitive attribute stream)"),
+    // The barrier register is a scoreboard the warp uses around `bar`; SPIR-V
+    // has only memory and control barriers, and guessing an order would hang
+    // or race instead of reporting the gap.
+    ("b2r", "b2r (barrier register)"),
+    ("r2b", "r2b (barrier register)"),
+    // `jmx` adds a register to its target, so the address is outside the
+    // program the scan resolves; `out` emits into the geometry output stream.
+    ("jmx", "jmx (computed target outside the scanned program)"),
+    ("out", "out (geometry output stream)"),
+];
+
+fn unavailable_reason(name: &'static str) -> &'static str {
+    UNAVAILABLE
+        .iter()
+        .find(|(mnemonic, _)| *mnemonic == name)
+        .map_or(name, |(_, reason)| *reason)
+}
 
 pub fn storage_window(stage: Stage) -> std::ops::Range<u32> {
     match stage {
         Stage::Vertex => STORAGE_DESCRIPTORS..STORAGE_DESCRIPTORS + 16 * STORAGE_SLOTS,
-        Stage::Fragment => STORAGE_DESCRIPTORS + 0x400..STORAGE_DESCRIPTORS + 0x400 + 16 * STORAGE_SLOTS,
+        Stage::Fragment => {
+            STORAGE_DESCRIPTORS + 0x400..STORAGE_DESCRIPTORS + 0x400 + 16 * STORAGE_SLOTS
+        }
         Stage::Compute => 0x260..0x410,
     }
 }
@@ -103,7 +192,13 @@ pub enum TexDim {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TextureUse {
     pub slot: Option<u32>,
+    /// Word index of the packed handle, or of NVN's texture-table entry when
+    /// [`TextureUse::sampler`] is set.
     pub handle: u32,
+    /// Word index of NVN's sampler-table entry when the handle's halves live
+    /// in two words of the same bank (`c[2][0x168 + 8r] | c[2][0x568 + 8s]`);
+    /// `None` when `handle` is the packed word for both halves.
+    pub sampler: Option<u32>,
     pub dim: TexDim,
     pub array: bool,
     pub shadow: bool,
@@ -177,6 +272,8 @@ struct Types {
     v2u: Word,
     v3u: Word,
     v4u: Word,
+    v2i: Word,
+    v3i: Word,
     v4i: Word,
     fn_u32: Word,
     fn_bool: Word,
@@ -185,6 +282,16 @@ struct Types {
 struct Io {
     var: Word,
     kind: Kind,
+}
+
+/// The dispatcher's function-local state: the program counter and one
+/// call-return stack per flow-stack instruction.
+struct Dispatch {
+    pc: Word,
+    ssy: (Word, Word),
+    pbk: (Word, Word),
+    pcnt: (Word, Word),
+    call: (Word, Word),
 }
 
 struct Translator<'a> {
@@ -200,6 +307,7 @@ struct Translator<'a> {
     derivative_control: bool,
     sampled_1d: bool,
     gather_extended: bool,
+    int64: Option<(Word, Word)>,
     regs: Vec<Word>,
     preds: Vec<Word>,
     inputs: BTreeMap<u32, Io>,
@@ -208,6 +316,10 @@ struct Translator<'a> {
     builtins: HashMap<u32, Word>,
     interface: Vec<Word>,
     cbufs: BTreeMap<u32, Word>,
+    /// Pointer type of the constant-buffer block, built and decorated once.
+    cbuf_type: Option<Word>,
+    /// Pointer type of the storage-buffer block, built and decorated once.
+    storage_type: Option<Word>,
     textures: Vec<(TextureUse, Word)>,
     images: Vec<(ImageUse, Word)>,
     local: Option<Word>,
@@ -221,6 +333,10 @@ struct Translator<'a> {
     pc_var: Option<Word>,
     ssy: Option<(Word, Word)>,
     pbk: Option<(Word, Word)>,
+    pcnt: Option<(Word, Word)>,
+    call: Option<(Word, Word)>,
+    crs: Option<Word>,
+    lmembase: Option<Word>,
     block_ids: HashMap<u32, u32>,
     dispatch_merge: Option<Word>,
     ended: bool,
@@ -238,13 +354,21 @@ pub fn translate(code_with_header: &[u8], opts: &Options, env: &dyn Env) -> Resu
     t.brx = program.brx.clone();
     t.program(&program)?;
     for &(_, w) in &program.unknown {
-        t.unsupported.push(if w == 0 { "(zero word)" } else { "(unknown encoding)" });
+        t.unsupported.push(if w == 0 {
+            "(zero word)"
+        } else {
+            "(unknown encoding)"
+        });
     }
     let mut shader = std::mem::take(&mut t.shader);
     shader.textures = t.textures.iter().map(|(u, _)| *u).collect();
     shader.images = t.images.iter().map(|(u, _)| *u).collect();
     shader.cbufs = t.cbufs.keys().fold(0, |m, s| m | 1 << s);
-    shader.storage = t.storage.keys().filter(|&&s| s < STORAGE_SLOTS).fold(0, |m, s| m | 1 << s);
+    shader.storage = t
+        .storage
+        .keys()
+        .filter(|&&s| s < STORAGE_SLOTS)
+        .fold(0, |m, s| m | 1 << s);
     shader.storage_offsets = std::mem::take(&mut t.storage_descs);
     shader.storage_written = t.storage_written.iter().fold(0, |m, s| m | 1 << s);
     t.unsupported.sort_unstable();
@@ -278,10 +402,28 @@ impl<'a> Translator<'a> {
         let v2u = b.type_vector(u32_, 2);
         let v3u = b.type_vector(u32_, 3);
         let v4u = b.type_vector(u32_, 4);
+        let v2i = b.type_vector(i32_, 2);
+        let v3i = b.type_vector(i32_, 3);
         let v4i = b.type_vector(i32_, 4);
         let fn_u32 = b.type_pointer(None, StorageClass::Function, u32_);
         let fn_bool = b.type_pointer(None, StorageClass::Function, bool_);
-        let t = Types { void, bool: bool_, u32: u32_, i32: i32_, f32: f32_, v2f, v4f, v2u, v3u, v4u, v4i, fn_u32, fn_bool };
+        let t = Types {
+            void,
+            bool: bool_,
+            u32: u32_,
+            i32: i32_,
+            f32: f32_,
+            v2f,
+            v4f,
+            v2u,
+            v3u,
+            v4u,
+            v2i,
+            v3i,
+            v4i,
+            fn_u32,
+            fn_bool,
+        };
         Translator {
             b,
             opts,
@@ -295,6 +437,7 @@ impl<'a> Translator<'a> {
             derivative_control: false,
             sampled_1d: false,
             gather_extended: false,
+            int64: None,
             regs: Vec::new(),
             preds: Vec::new(),
             inputs: BTreeMap::new(),
@@ -303,6 +446,8 @@ impl<'a> Translator<'a> {
             builtins: HashMap::new(),
             interface: Vec::new(),
             cbufs: BTreeMap::new(),
+            cbuf_type: None,
+            storage_type: None,
             textures: Vec::new(),
             images: Vec::new(),
             storage_images: false,
@@ -317,6 +462,10 @@ impl<'a> Translator<'a> {
             pc_var: None,
             ssy: None,
             pbk: None,
+            pcnt: None,
+            call: None,
+            crs: None,
+            lmembase: None,
             block_ids: HashMap::new(),
             dispatch_merge: None,
             ended: false,
@@ -336,8 +485,14 @@ impl<'a> Translator<'a> {
 
     fn global(&mut self, ptr: Word, class: StorageClass) -> Word {
         let id = self.b.id();
-        let inst = rspirv::dr::Instruction::new(rspirv::spirv::Op::Variable, Some(ptr), Some(id), vec![Operand::StorageClass(class)]);
-        self.b.insert_types_global_values(rspirv::dr::InsertPoint::End, inst);
+        let inst = rspirv::dr::Instruction::new(
+            rspirv::spirv::Op::Variable,
+            Some(ptr),
+            Some(id),
+            vec![Operand::StorageClass(class)],
+        );
+        self.b
+            .insert_types_global_values(rspirv::dr::InsertPoint::End, inst);
         id
     }
 
@@ -357,7 +512,9 @@ impl<'a> Translator<'a> {
         if reg == RZ {
             return Ok(self.u(0));
         }
-        Ok(self.b.load(self.t.u32, None, self.regs[reg as usize], None, [])?)
+        Ok(self
+            .b
+            .load(self.t.u32, None, self.regs[reg as usize], None, [])?)
     }
 
     fn rf(&mut self, reg: u8) -> R<Word> {
@@ -378,8 +535,17 @@ impl<'a> Translator<'a> {
     }
 
     fn p(&mut self, idx: u8, not: bool) -> R<Word> {
-        let v = if idx == PT { self.btrue() } else { self.b.load(self.t.bool, None, self.preds[idx as usize], None, [])? };
-        Ok(if not { self.b.logical_not(self.t.bool, None, v)? } else { v })
+        let v = if idx == PT {
+            self.btrue()
+        } else {
+            self.b
+                .load(self.t.bool, None, self.preds[idx as usize], None, [])?
+        };
+        Ok(if not {
+            self.b.logical_not(self.t.bool, None, v)?
+        } else {
+            v
+        })
     }
 
     fn setp(&mut self, idx: u8, v: Word) -> R {
@@ -448,16 +614,30 @@ impl<'a> Translator<'a> {
         if let Some(&v) = self.cbufs.get(&slot) {
             return v;
         }
-        let len = self.u(CBUF_VEC4S);
-        let arr = self.b.type_array(self.t.v4u, len);
-        self.b.decorate(arr, Decoration::ArrayStride, [Operand::LiteralBit32(16)]);
-        let st = self.b.type_struct([arr]);
-        self.b.decorate(st, Decoration::Block, []);
-        self.b.member_decorate(st, 0, Decoration::Offset, [Operand::LiteralBit32(0)]);
-        let ptr = self.b.type_pointer(None, StorageClass::Uniform, st);
-        let var = self.global(ptr, StorageClass::Uniform);
-        self.b.decorate(var, Decoration::DescriptorSet, [Operand::LiteralBit32(0)]);
-        self.b.decorate(var, Decoration::Binding, [Operand::LiteralBit32(self.opts.cbuf_binding + slot)]);
+        let ty = match self.cbuf_type {
+            Some(ty) => ty,
+            None => {
+                let len = self.u(CBUF_VEC4S);
+                let arr = self.b.type_array(self.t.v4u, len);
+                self.b
+                    .decorate(arr, Decoration::ArrayStride, [Operand::LiteralBit32(16)]);
+                let st = self.b.type_struct([arr]);
+                self.b.decorate(st, Decoration::Block, []);
+                self.b
+                    .member_decorate(st, 0, Decoration::Offset, [Operand::LiteralBit32(0)]);
+                let ptr = self.b.type_pointer(None, StorageClass::Uniform, st);
+                self.cbuf_type = Some(ptr);
+                ptr
+            }
+        };
+        let var = self.global(ty, StorageClass::Uniform);
+        self.b
+            .decorate(var, Decoration::DescriptorSet, [Operand::LiteralBit32(0)]);
+        self.b.decorate(
+            var,
+            Decoration::Binding,
+            [Operand::LiteralBit32(self.opts.cbuf_binding + slot)],
+        );
         self.cbufs.insert(slot, var);
         var
     }
@@ -510,6 +690,55 @@ impl<'a> Translator<'a> {
         Ok(self.b.bitcast(self.t.i32, None, v)?)
     }
 
+    /// Declares every function-local variable. SPIR-V requires all of them to
+    /// be the first instructions of the entry block, so this runs before any
+    /// other instruction is emitted; the variables are initialised afterwards.
+    fn declare_locals(&mut self, dispatch: bool, local_words: u32) -> Option<Dispatch> {
+        for _ in 0..255 {
+            let v = self.local_var(self.t.fn_u32);
+            self.regs.push(v);
+        }
+        for _ in 0..7 {
+            let v = self.local_var(self.t.fn_bool);
+            self.preds.push(v);
+        }
+        for k in 0..4 {
+            self.cc[k] = self.local_var(self.t.fn_bool);
+        }
+        self.crs = Some(self.local_var(self.t.fn_u32));
+        self.lmembase = Some(self.local_var(self.t.fn_u32));
+        if self.opts.debug_probe.is_some() {
+            self.probe = Some([(); 6].map(|_| self.local_var(self.t.fn_u32)));
+        }
+        if local_words > 0 {
+            let len = self.u(local_words);
+            let arr = self.b.type_array(self.t.u32, len);
+            let ptr = self.b.type_pointer(None, StorageClass::Function, arr);
+            self.local = Some(self.local_var(ptr));
+        }
+        if !dispatch {
+            return None;
+        }
+        let pc = self.local_var(self.t.fn_u32);
+        self.pc_var = Some(pc);
+        let len = self.u(STACK_DEPTH);
+        let arr = self.b.type_array(self.t.u32, len);
+        let arr_ptr = self.b.type_pointer(None, StorageClass::Function, arr);
+        let u32_ptr = self.t.fn_u32;
+        let stack = |t: &mut Self| (t.local_var(arr_ptr), t.local_var(u32_ptr));
+        Some(Dispatch {
+            pc,
+            ssy: stack(self),
+            pbk: stack(self),
+            pcnt: stack(self),
+            call: stack(self),
+        })
+    }
+
+    fn local_var(&mut self, ptr: Word) -> Word {
+        self.b.variable(ptr, None, StorageClass::Function, None)
+    }
+
     fn program(&mut self, program: &Program) -> R {
         let model = match self.opts.stage {
             Stage::Vertex => ExecutionModel::Vertex,
@@ -517,19 +746,20 @@ impl<'a> Translator<'a> {
             Stage::Compute => ExecutionModel::GLCompute,
         };
         let fn_ty = self.b.type_function(self.t.void, []);
-        let main = self.b.begin_function(self.t.void, None, FunctionControl::NONE, fn_ty)?;
+        let main = self
+            .b
+            .begin_function(self.t.void, None, FunctionControl::NONE, fn_ty)?;
         self.b.begin_block(None)?;
-        for _ in 0..255 {
-            let v = self.b.variable(self.t.fn_u32, None, StorageClass::Function, None);
-            self.regs.push(v);
-        }
-        for _ in 0..7 {
-            let v = self.b.variable(self.t.fn_bool, None, StorageClass::Function, None);
-            self.preds.push(v);
-        }
-        for k in 0..4 {
-            self.cc[k] = self.b.variable(self.t.fn_bool, None, StorageClass::Function, None);
-        }
+        let local_size = if self.opts.stage == Stage::Compute {
+            self.opts.local_memory
+        } else {
+            self.header.local_memory_size()
+        };
+        let local_words = local_size.div_ceil(4).min(0x4000);
+        // Every function-local variable belongs at the start of the entry
+        // block, before any other instruction, so they are all declared here
+        // and only initialised below.
+        let dispatch = self.declare_locals(program.branches(), local_words);
         let f = self.b.constant_false(self.t.bool);
         for k in 0..4 {
             let v = self.cc[k];
@@ -538,6 +768,14 @@ impl<'a> Translator<'a> {
         let zero = self.u(0);
         for k in 0..255 {
             let v = self.regs[k];
+            self.b.store(v, zero, None, [])?;
+        }
+        // Opaque pointers the shader may save and restore: the call-return
+        // stack pointer and the local-memory base. They carry no data the
+        // translator can interpret, so a private word per invocation is
+        // enough; both start at zero like the local-memory offset base.
+        for slot in [self.crs, self.lmembase] {
+            let Some(v) = slot else { continue };
             self.b.store(v, zero, None, [])?;
         }
         if self.opts.stage == Stage::Vertex {
@@ -553,32 +791,24 @@ impl<'a> Translator<'a> {
                 }
             }
         }
-        if self.opts.debug_probe.is_some() {
-            let vars = [(); 6].map(|_| self.b.variable(self.t.fn_u32, None, StorageClass::Function, None));
+        if let Some(vars) = self.probe {
             for var in vars {
                 self.b.store(var, zero, None, [])?;
             }
-            self.probe = Some(vars);
-        }
-        let local_size = if self.opts.stage == Stage::Compute { self.opts.local_memory } else { self.header.local_memory_size() };
-        let local_words = local_size.div_ceil(4).min(0x4000);
-        if local_words > 0 {
-            let len = self.u(local_words);
-            let arr = self.b.type_array(self.t.u32, len);
-            let ptr = self.b.type_pointer(None, StorageClass::Function, arr);
-            self.local = Some(self.b.variable(ptr, None, StorageClass::Function, None));
         }
         let shared_words = self.opts.shared_memory.div_ceil(4).min(0x4000);
         if self.opts.stage == Stage::Compute && shared_words > 0 {
             let len = self.u(shared_words);
             let arr = self.b.type_array(self.t.u32, len);
             let ptr = self.b.type_pointer(None, StorageClass::Workgroup, arr);
-            let elem = self.b.type_pointer(None, StorageClass::Workgroup, self.t.u32);
+            let elem = self
+                .b
+                .type_pointer(None, StorageClass::Workgroup, self.t.u32);
             self.shared = Some((self.global(ptr, StorageClass::Workgroup), elem));
         }
 
-        if program.branches() {
-            self.dispatcher(program)?;
+        if let Some(dispatch) = dispatch {
+            self.dispatcher(program, dispatch)?;
         } else {
             for (_, block) in program.blocks() {
                 for (pc, i) in block {
@@ -589,7 +819,9 @@ impl<'a> Translator<'a> {
         if self.opts.stage == Stage::Fragment {
             self.fragment_outputs()?;
         }
-        if self.opts.stage == Stage::Vertex && (self.opts.depth_transform.is_some() || self.opts.depth_unorm16) {
+        if self.opts.stage == Stage::Vertex
+            && (self.opts.depth_transform.is_some() || self.opts.depth_unorm16)
+        {
             let v4f = self.t.v4f;
             let position = self.builtin(BuiltIn::Position, v4f, true);
             let f32_ = self.t.f32;
@@ -622,34 +854,41 @@ impl<'a> Translator<'a> {
         self.b.entry_point(model, main, "main", interface);
         if self.opts.stage == Stage::Compute {
             let [x, y, z] = self.opts.local_size.map(|n| n.max(1));
-            self.b.execution_mode(main, ExecutionMode::LocalSize, [x, y, z]);
+            self.b
+                .execution_mode(main, ExecutionMode::LocalSize, [x, y, z]);
         }
         if self.opts.stage == Stage::Fragment {
-            self.b.execution_mode(main, ExecutionMode::OriginUpperLeft, []);
+            self.b
+                .execution_mode(main, ExecutionMode::OriginUpperLeft, []);
             if self.header.ps_writes_depth() {
-                self.b.execution_mode(main, ExecutionMode::DepthReplacing, []);
+                self.b
+                    .execution_mode(main, ExecutionMode::DepthReplacing, []);
             }
         }
         Ok(())
     }
 
-    fn dispatcher(&mut self, program: &Program) -> R {
+    fn dispatcher(&mut self, program: &Program, dispatch: Dispatch) -> R {
         let blocks = program.blocks();
         for (k, (leader, _)) in blocks.iter().enumerate() {
             self.block_ids.insert(*leader, k as u32);
         }
-        let pc_var = self.b.variable(self.t.fn_u32, None, StorageClass::Function, None);
-        self.pc_var = Some(pc_var);
-        let len = self.u(STACK_DEPTH);
-        let arr = self.b.type_array(self.t.u32, len);
-        let arr_ptr = self.b.type_pointer(None, StorageClass::Function, arr);
-        let ssy = (self.b.variable(arr_ptr, None, StorageClass::Function, None), self.b.variable(self.t.fn_u32, None, StorageClass::Function, None));
-        let pbk = (self.b.variable(arr_ptr, None, StorageClass::Function, None), self.b.variable(self.t.fn_u32, None, StorageClass::Function, None));
+        let Dispatch {
+            pc: pc_var,
+            ssy,
+            pbk,
+            pcnt,
+            call,
+        } = dispatch;
         let zero = self.u(0);
         self.b.store(ssy.1, zero, None, [])?;
         self.b.store(pbk.1, zero, None, [])?;
+        self.b.store(pcnt.1, zero, None, [])?;
+        self.b.store(call.1, zero, None, [])?;
         self.ssy = Some(ssy);
         self.pbk = Some(pbk);
+        self.pcnt = Some(pcnt);
+        self.call = Some(call);
         let entry = self.block_ids[&program.leaders.first().copied().unwrap_or(cfg::ENTRY)];
         let entry_c = self.u(entry);
         self.b.store(pc_var, entry_c, None, [])?;
@@ -664,7 +903,11 @@ impl<'a> Translator<'a> {
         let sw_merge = self.b.id();
         let labels: Vec<Word> = blocks.iter().map(|_| self.b.id()).collect();
         self.b.selection_merge(sw_merge, SelectionControl::NONE)?;
-        let targets: Vec<(Operand, Word)> = labels.iter().enumerate().map(|(k, &l)| (Operand::LiteralBit32(k as u32), l)).collect();
+        let targets: Vec<(Operand, Word)> = labels
+            .iter()
+            .enumerate()
+            .map(|(k, &l)| (Operand::LiteralBit32(k as u32), l))
+            .collect();
         self.b.switch(pc, sw_merge, targets)?;
         self.dispatch_merge = Some(sw_merge);
         for (k, (_, insns)) in blocks.iter().enumerate() {
@@ -699,6 +942,16 @@ impl<'a> Translator<'a> {
 
     fn block_number(&self, addr: u32) -> u32 {
         self.block_ids.get(&addr).copied().unwrap_or(EXIT_BLOCK)
+    }
+
+    /// Resolves an absolute instruction address (`jmp`, `jcal`). A bundle
+    /// address denotes its first slot, the same way a relative branch target
+    /// does, so the aligned and the raw forms are both accepted.
+    fn absolute_block(&self, addr: u32) -> Option<u32> {
+        let aligned = cfg::absolute_target(addr);
+        [aligned, addr, addr.wrapping_add(8)]
+            .into_iter()
+            .find(|a| self.block_ids.contains_key(a))
     }
 
     fn guarded(&mut self, i: &Insn, body: impl FnOnce(&mut Self) -> R) -> R {
@@ -763,37 +1016,78 @@ impl<'a> Translator<'a> {
 
     fn cc_test(&mut self, test: u64) -> R<Word> {
         let bt = self.t.bool;
-        let (z, s, c, o) = (self.cc_flag(0)?, self.cc_flag(1)?, self.cc_flag(2)?, self.cc_flag(3)?);
-        let lt = self.b.logical_not_equal(bt, None, s, o)?;
+        let (z, s, c, o) = (
+            self.cc_flag(0)?,
+            self.cc_flag(1)?,
+            self.cc_flag(2)?,
+            self.cc_flag(3)?,
+        );
+        // The 5-bit condition code of `cset`/`csetp` and of the flow
+        // instructions (envydis' `cc` table, values 0x00..0x1f). The flags
+        // are the usual Z, S(N), C and O(V) set by an instruction's `.cc`
+        // flag. Conditions 0x18..0x1f name the warp's conditional stop mask,
+        // which this translator has no state for.
+        let (not_s, not_z) = (
+            self.b.logical_not(bt, None, s)?,
+            self.b.logical_not(bt, None, z)?,
+        );
+        let sx = self.b.logical_not_equal(bt, None, s, o)?;
         let not = |t: &mut Self, v: Word| -> R<Word> { Ok(t.b.logical_not(bt, None, v)?) };
         Ok(match test {
-            0 | 0x10 => self.b.constant_false(bt),
-            1 | 9 => lt,
-            2 | 10 => z,
-            3 | 11 => self.b.logical_or(bt, None, lt, z)?,
-            4 | 12 => {
-                let le = self.b.logical_or(bt, None, lt, z)?;
+            0x00 => self.b.constant_false(bt),
+            0x01 => {
+                let nz = self.b.logical_and(bt, None, s, not_z)?;
+                self.b.logical_not_equal(bt, None, nz, o)?
+            }
+            0x02 => self.b.logical_and(bt, None, not_s, z)?,
+            0x03 => {
+                let le = self.b.logical_or(bt, None, z, o)?;
+                self.b.logical_not_equal(bt, None, s, le)?
+            }
+            0x04 => {
+                let le = self.b.logical_or(bt, None, sx, z)?;
                 not(self, le)?
             }
-            5 | 13 => not(self, z)?,
-            6 | 14 => not(self, lt)?,
-            7 => not(self, o)?,
-            8 => o,
+            0x05 => not_z,
+            0x06 => not(self, sx)?,
+            0x07 => {
+                let nz = self.b.logical_and(bt, None, s, z)?;
+                not(self, nz)?
+            }
+            0x08 => self.b.logical_and(bt, None, s, z)?,
+            0x09 => sx,
+            0x0a => z,
+            0x0b => self.b.logical_or(bt, None, sx, z)?,
+            0x0c => {
+                let m = self.b.logical_or(bt, None, o, z)?;
+                self.b.logical_not_equal(bt, None, not_s, m)?
+            }
+            0x0d => self.b.logical_or(bt, None, s, not_z)?,
+            0x0e => {
+                let g = self.b.logical_or(bt, None, not_s, z)?;
+                self.b.logical_not_equal(bt, None, g, o)?
+            }
+            0x0f => self.btrue(),
+            0x10 => not(self, o)?,
             0x11 => not(self, c)?,
-            0x12 => not(self, s)?,
+            0x12 => not_s,
             0x13 => {
                 let nc = not(self, c)?;
                 self.b.logical_or(bt, None, nc, z)?
             }
             0x14 => {
-                let nz = not(self, z)?;
+                let nz = not_z;
                 self.b.logical_and(bt, None, c, nz)?
             }
             0x15 => s,
             0x16 => c,
             0x17 => o,
             _ => {
-                self.unsupported.push("condition code test");
+                // 0x18..0x1f name the warp's conditional stop mask (envydis'
+                // `csm_*`, `fcsm_*`, `rle` and `rgt`), not a flag test. It is
+                // what `vote.vtg` and `r2b` set, and this translator models
+                // neither, so the condition has no value to test.
+                self.unsupported.push("conditional stop mask");
                 self.btrue()
             }
         })
@@ -851,8 +1145,12 @@ impl<'a> Translator<'a> {
             }
         }
         match i.name() {
-            "nop" | "depbar" | "membar" | "bar" | "sync" | "brk" | "ssy" | "pbk" | "bra" | "exit" | "kil" => self.flow(pc, i),
+            "nop" | "depbar" | "membar" | "bar" | "sync" | "brk" | "ssy" | "pbk" | "bra"
+            | "exit" | "kil" | "pcnt" | "cont" | "cal" | "jcal" | "ret" | "jmp" => self.flow(pc, i),
             "brx" => self.brx(pc, i),
+            // These four have no guard field in their encoding, so bits 16-19
+            // are not a predicate and must not condition the operation.
+            "getcrsptr" | "setcrsptr" | "getlmembase" | "setlmembase" => self.op(pc, i),
             _ => self.guarded(i, |t| t.op(pc, i)),
         }
     }
@@ -867,13 +1165,21 @@ impl<'a> Translator<'a> {
                 Ok(())
             }
             "nop" | "depbar" | "membar" | "bar" => Ok(()),
-            "ssy" | "pbk" => {
+            "ssy" | "pbk" | "pcnt" => {
                 if i.bit(5) {
-                    self.unsupported.push("ssy/pbk from constant buffer");
+                    self.unsupported.push(match i.name() {
+                        "ssy" => "ssy (constant buffer target)",
+                        "pbk" => "pbk (constant buffer target)",
+                        _ => "pcnt (constant buffer target)",
+                    });
                     return Ok(());
                 }
                 let target = self.block_number(i.branch_target(pc));
-                let stack = if i.name() == "ssy" { self.ssy } else { self.pbk };
+                let stack = match i.name() {
+                    "ssy" => self.ssy,
+                    "pbk" => self.pbk,
+                    _ => self.pcnt,
+                };
                 match stack {
                     Some(s) => self.push(s, target),
                     None => Ok(()),
@@ -892,8 +1198,83 @@ impl<'a> Translator<'a> {
                 let t = self.u(target);
                 self.jump(cond, t, fall)
             }
-            "sync" | "brk" => {
-                let Some(stack) = (if i.name() == "sync" { self.ssy } else { self.pbk }) else { return Ok(()) };
+            "cal" | "jcal" => {
+                if i.bit(5) {
+                    self.unsupported.push(if i.name() == "cal" {
+                        "cal (constant buffer target)"
+                    } else {
+                        "jcal (constant buffer target)"
+                    });
+                    return Ok(());
+                }
+                // `.NOINC` keeps the return address on the cal instruction
+                // itself; the meaning of that form is not documented.
+                if i.bit(6) {
+                    self.unsupported.push(if i.name() == "cal" {
+                        "cal (noinc)"
+                    } else {
+                        "jcal (noinc)"
+                    });
+                    return Ok(());
+                }
+                if self.pc_var.is_none() {
+                    self.unsupported.push(if i.name() == "cal" {
+                        "cal (no dispatcher)"
+                    } else {
+                        "jcal (no dispatcher)"
+                    });
+                    return Ok(());
+                }
+                let target = if i.name() == "cal" {
+                    self.block_number(i.branch_target(pc))
+                } else {
+                    match self.absolute_block(i.imm32()) {
+                        Some(t) => t,
+                        None => {
+                            self.unsupported.push("jcal (target outside the program)");
+                            return Ok(());
+                        }
+                    }
+                };
+                let ret = self.block_number(fall);
+                if ret == EXIT_BLOCK {
+                    self.unsupported.push("cal (return address)");
+                    return Ok(());
+                }
+                let Some(stack) = self.call else {
+                    return Ok(());
+                };
+                self.push(stack, ret)?;
+                let t = self.u(target);
+                self.jump(None, t, fall)
+            }
+            "jmp" => {
+                if i.bit(5) {
+                    self.unsupported.push("jmp (constant buffer target)");
+                    return Ok(());
+                }
+                if self.pc_var.is_none() {
+                    self.unsupported.push("jmp (no dispatcher)");
+                    return Ok(());
+                }
+                let Some(target) = self.absolute_block(i.imm32()) else {
+                    self.unsupported.push("jmp (target outside the program)");
+                    return Ok(());
+                };
+                let cond = self.flow_condition(i)?;
+                let t = self.u(target);
+                self.jump(cond, t, fall)
+            }
+            "sync" | "brk" | "cont" | "ret" => {
+                let stack = match i.name() {
+                    "sync" => self.ssy,
+                    "brk" => self.pbk,
+                    "cont" => self.pcnt,
+                    _ => self.call,
+                };
+                let Some(stack) = stack else {
+                    return Ok(());
+                };
                 let cond = self.flow_condition(i)?;
                 match cond {
                     None => {
@@ -934,7 +1315,14 @@ impl<'a> Translator<'a> {
                 match cond {
                     None => {
                         self.b.kill()?;
-                        self.b.begin_block(None)?;
+                        if self.pc_var.is_some() {
+                            // The rest of the dispatcher block is unreachable;
+                            // a detached block would branch into the switch's
+                            // merge from outside the construct.
+                            self.ended = true;
+                        } else {
+                            self.b.begin_block(None)?;
+                        }
                         Ok(())
                     }
                     Some(c) => {
@@ -957,52 +1345,23 @@ impl<'a> Translator<'a> {
         let u = self.t.u32;
         match i.name() {
             "mov" if i.op.value == 0xf0c8000000000000 => {
-                let v = match i.bits(20, 8) {
-                    0x00 => self.lane_id()?,
-                    0x12 => self.u(1.0f32.to_bits()),
-                    0x13 => {
-                        if self.opts.stage == Stage::Fragment {
-                            let var = self.builtin(BuiltIn::HelperInvocation, self.t.bool, false);
-                            let helper = self.b.load(self.t.bool, None, var, None, [])?;
-                            self.b2u(helper, 1, 0)?
-                        } else {
-                            self.u(0)
-                        }
-                    }
-                    0x20 => {
-                        let id = self.compute_id(BuiltIn::LocalInvocationId)?;
-                        let (x, y, z) = (self.b.composite_extract(u, None, id, [0])?, self.b.composite_extract(u, None, id, [1])?, self.b.composite_extract(u, None, id, [2])?);
-                        let (s16, s26) = (self.u(16), self.u(26));
-                        let y = self.b.shift_left_logical(u, None, y, s16)?;
-                        let z = self.b.shift_left_logical(u, None, z, s26)?;
-                        let xy = self.b.bitwise_or(u, None, x, y)?;
-                        self.b.bitwise_or(u, None, xy, z)?
-                    }
-                    k @ (0x21..=0x23 | 0x25..=0x27) => {
-                        let which = if k < 0x24 { BuiltIn::LocalInvocationId } else { BuiltIn::WorkgroupId };
-                        let id = self.compute_id(which)?;
-                        let c = if k < 0x24 { k - 0x21 } else { k - 0x25 };
-                        self.b.composite_extract(u, None, id, [c as u32])?
-                    }
-                    0x38..=0x3c => {
-                        let lane = self.lane_id()?;
-                        let one = self.u(1);
-                        let bit = self.b.shift_left_logical(u, None, one, lane)?;
-                        let below = self.b.i_sub(u, None, bit, one)?;
-                        match i.bits(20, 8) {
-                            0x38 => bit,
-                            0x39 => below,
-                            0x3a => self.b.bitwise_or(u, None, below, bit)?,
-                            0x3b => {
-                                let le = self.b.bitwise_or(u, None, below, bit)?;
-                                self.b.not(u, None, le)?
-                            }
-                            _ => self.b.not(u, None, below)?,
-                        }
-                    }
-                    _ => {
+                let v = match self.system_value(i.bits(20, 8) as u32)? {
+                    Some(v) => v,
+                    None => {
                         self.unsupported.push("s2r (system value)");
                         self.u(0)
+                    }
+                };
+                self.set(i.rd(), v)
+            }
+            // `cs2r` reads the same special-register file as the `s2r` form
+            // of `mov`, but through the constant path.
+            "cs2r" => {
+                let v = match self.system_value(i.bits(20, 8) as u32)? {
+                    Some(v) => v,
+                    None => {
+                        self.unsupported.push("cs2r (special register)");
+                        return Ok(());
                     }
                 };
                 self.set(i.rd(), v)
@@ -1031,7 +1390,11 @@ impl<'a> Translator<'a> {
                 };
                 let a = self.rf(i.ra())?;
                 let a = self.fneg_abs(a, neg_a, abs_a)?;
-                let b = if i.name() == "fadd32i" { self.f(f32::from_bits(i.imm32())) } else { self.src_bf(i)? };
+                let b = if i.name() == "fadd32i" {
+                    self.f(f32::from_bits(i.imm32()))
+                } else {
+                    self.src_bf(i)?
+                };
                 let b = self.fneg_abs(b, neg_b, abs_b)?;
                 let v = self.b.f_add(t, None, a, b)?;
                 self.exact(v);
@@ -1083,7 +1446,13 @@ impl<'a> Translator<'a> {
                     } else {
                         (b, c)
                     };
-                    (self.cast_f(b)?, self.cast_f(c)?, i.bit(48), i.bit(49), i.bit(50))
+                    (
+                        self.cast_f(b)?,
+                        self.cast_f(c)?,
+                        i.bit(48),
+                        i.bit(49),
+                        i.bit(50),
+                    )
                 } else {
                     let b = self.f(f32::from_bits(i.imm32()));
                     let c = self.rf(i.rd())?;
@@ -1154,7 +1523,10 @@ impl<'a> Translator<'a> {
                 let sel = self.b.bitwise_and(u, None, sel, three)?;
                 let mut x = self.f(0.0);
                 let mut y = self.f(1.0);
-                for (k, (xk, yk)) in [(1.0, 1.0), (-1.0, 1.0), (1.0, -1.0)].into_iter().enumerate() {
+                for (k, (xk, yk)) in [(1.0, 1.0), (-1.0, 1.0), (1.0, -1.0)]
+                    .into_iter()
+                    .enumerate()
+                {
                     let kc = self.u(k as u32);
                     let hit = self.b.i_equal(self.t.bool, None, sel, kc)?;
                     let (xc, yc) = (self.f(xk), self.f(yk));
@@ -1166,6 +1538,24 @@ impl<'a> Translator<'a> {
                 self.setf(i.rd(), v)
             }
             "fset" | "fsetp" => self.fcompare(i),
+            "cset" => {
+                let cc = i.bits(8, 5);
+                let cond = if cc == 0xf {
+                    self.btrue()
+                } else {
+                    self.cc_test(cc)?
+                };
+                let (p, n) = i.pred(39, 42);
+                let pred = self.p(p, n)?;
+                let cond = self.bool_op(i.bits(45, 2), cond, pred)?;
+                let zero = self.u(0);
+                let all = self.u(u32::MAX);
+                let one = self.f(1.0);
+                let f = self.cast_u(one)?;
+                let (t, f) = if i.bit(44) { (f, zero) } else { (all, zero) };
+                let v = self.b.select(self.t.u32, None, cond, t, f)?;
+                self.set(i.rd(), v)
+            }
             "csetp" => {
                 let test = self.cc_test(i.bits(8, 5))?;
                 let (p, n) = i.pred(39, 42);
@@ -1180,6 +1570,7 @@ impl<'a> Translator<'a> {
             "vote" => self.vote(i),
             "shfl" => self.shfl(i),
             "red" | "atom" => self.atomic(pc, i),
+            "atoms" => self.atoms(i),
             "isetp" | "iset" => self.icompare(i),
             "psetp" => {
                 let (a, na) = i.pred(12, 15);
@@ -1204,12 +1595,17 @@ impl<'a> Translator<'a> {
                 let c = self.p(c, nc)?;
                 let ab = self.bool_op(i.bits(24, 2), a, b)?;
                 let r = self.bool_op(i.bits(45, 2), ab, c)?;
-                let v = if i.bit(44) { self.b2u(r, 1.0f32.to_bits(), 0)? } else { self.b2u(r, u32::MAX, 0)? };
+                let v = if i.bit(44) {
+                    self.b2u(r, 1.0f32.to_bits(), 0)?
+                } else {
+                    self.b2u(r, u32::MAX, 0)?
+                };
                 if i.bit(47) {
                     self.set_cc(v, None, None)?;
                 }
                 self.set(i.rd(), v)
             }
+            "imad" | "imad32i" | "imul" | "imul32i" => self.imad(i),
             "iadd" | "iadd32i" => {
                 let a = self.r(i.ra())?;
                 let (b, neg_a, neg_b, x, cc) = if i.name() == "iadd" {
@@ -1233,7 +1629,11 @@ impl<'a> Translator<'a> {
                 } else {
                     (a, b, c, 0)
                 };
-                let (a, b, c) = (self.ineg(a, i.bit(51))?, self.ineg(b, i.bit(50))?, self.ineg(c, i.bit(49))?);
+                let (a, b, c) = (
+                    self.ineg(a, i.bit(51))?,
+                    self.ineg(b, i.bit(50))?,
+                    self.ineg(c, i.bit(49))?,
+                );
                 let mut ab = self.b.i_add(u, None, a, b)?;
                 let sixteen = self.u(16);
                 match shift {
@@ -1261,7 +1661,11 @@ impl<'a> Translator<'a> {
                 let (p, n) = i.pred(39, 42);
                 let c = self.p(p, n)?;
                 let signed = i.bit(48);
-                let (mn, mx) = if signed { (glsl::SMIN, glsl::SMAX) } else { (glsl::UMIN, glsl::UMAX) };
+                let (mn, mx) = if signed {
+                    (glsl::SMIN, glsl::SMAX)
+                } else {
+                    (glsl::UMIN, glsl::UMAX)
+                };
                 let lo = self.ext(u, mn, &[a, b])?;
                 let hi = self.ext(u, mx, &[a, b])?;
                 let v = self.b.select(u, None, c, lo, hi)?;
@@ -1321,7 +1725,11 @@ impl<'a> Translator<'a> {
                 let a = self.r(i.ra())?;
                 let (b, c, lut) = match i.form() {
                     Form::Reg => (self.r(i.rb())?, self.r(i.rc())?, i.bits(28, 8) as u32),
-                    Form::Imm => (self.u(i.simm20() as u32), self.r(i.rc())?, i.bits(48, 8) as u32),
+                    Form::Imm => (
+                        self.u(i.simm20() as u32),
+                        self.r(i.rc())?,
+                        i.bits(48, 8) as u32,
+                    ),
                     Form::Cbuf => {
                         let (s, o) = i.cbuf();
                         (self.cbuf_imm(s, o)?, self.r(i.rc())?, i.bits(48, 8) as u32)
@@ -1339,14 +1747,22 @@ impl<'a> Translator<'a> {
             "shr" => {
                 let a = self.r(i.ra())?;
                 let b = self.src_b(i)?;
-                let a = if i.bit(40) { self.b.bit_reverse(u, None, a)? } else { a };
+                let a = if i.bit(40) {
+                    self.b.bit_reverse(u, None, a)?
+                } else {
+                    a
+                };
                 let v = self.shift(a, b, false, i.bit(48), i.bit(39))?;
                 self.set(i.rd(), v)
             }
             "bfe" => {
                 let a = self.r(i.ra())?;
                 let b = self.src_b(i)?;
-                let a = if i.bit(40) { self.b.bit_reverse(u, None, a)? } else { a };
+                let a = if i.bit(40) {
+                    self.b.bit_reverse(u, None, a)?
+                } else {
+                    a
+                };
                 let ff = self.u(0xff);
                 let pos = self.b.bitwise_and(u, None, b, ff)?;
                 let eight = self.u(8);
@@ -1381,14 +1797,41 @@ impl<'a> Translator<'a> {
                 self.set(i.rd(), v)
             }
             "vmnmx" => self.vmnmx(i),
+            "vadd" => self.vadd(i),
+            "vmad" => self.vmad(i),
+            "vabsdiff" => self.vabsdiff(i),
+            "vsetp" => self.vsetp(i),
+            "prmt" => self.prmt(i),
+            "idp" => self.idp(i),
+            "iscadd32i" => {
+                let a = self.r(i.ra())?;
+                let sh = self.u(i.bits(53, 5) as u32);
+                let a = self.b.shift_left_logical(u, None, a, sh)?;
+                let imm = self.u(i.imm32());
+                let v = self.b.i_add(u, None, a, imm)?;
+                if i.bit(52) {
+                    self.set_cc(v, None, None)?;
+                }
+                self.set(i.rd(), v)
+            }
+            "getcrsptr" | "setcrsptr" | "getlmembase" | "setlmembase" => self.pointer(i),
+            "hadd2_32i" | "hmul2_32i" | "hfma2_32i" => self.half32i(i),
             "i2f" => self.i2f(i),
             "f2i" => self.f2i(i),
             "f2f" => self.f2f(i),
             "i2i" => self.i2i(i),
             "flo" => {
                 let b = self.src_b(i)?;
-                let b = if i.bit(40) { self.b.not(u, None, b)? } else { b };
-                let v = if i.bit(48) { self.ext(u, glsl::FIND_S_MSB, &[b])? } else { self.ext(u, glsl::FIND_U_MSB, &[b])? };
+                let b = if i.bit(40) {
+                    self.b.not(u, None, b)?
+                } else {
+                    b
+                };
+                let v = if i.bit(48) {
+                    self.ext(u, glsl::FIND_S_MSB, &[b])?
+                } else {
+                    self.ext(u, glsl::FIND_U_MSB, &[b])?
+                };
                 let v = if i.bit(41) {
                     let c31 = self.u(31);
                     let s = self.b.i_sub(u, None, c31, v)?;
@@ -1402,7 +1845,11 @@ impl<'a> Translator<'a> {
             }
             "popc" => {
                 let b = self.src_b(i)?;
-                let b = if i.bit(40) { self.b.not(u, None, b)? } else { b };
+                let b = if i.bit(40) {
+                    self.b.not(u, None, b)?
+                } else {
+                    b
+                };
                 let v = self.b.bit_count(u, None, b)?;
                 self.set(i.rd(), v)
             }
@@ -1508,7 +1955,11 @@ impl<'a> Translator<'a> {
                     }
                     _ => (self.src_b(i)?, i.bits(39, 5) as u32, false),
                 };
-                let neg = if hi { i.bit(37) || i.bit(56) } else { i.bit(45) };
+                let neg = if hi {
+                    i.bit(37) || i.bit(56)
+                } else {
+                    i.bit(45)
+                };
                 let a = self.ineg(a, neg && !hi)?;
                 let shifted = if hi {
                     let c = self.r(i.rc())?;
@@ -1516,7 +1967,11 @@ impl<'a> Translator<'a> {
                     let inv = self.u(32 - sh);
                     let x = self.b.shift_left_logical(u, None, c, s)?;
                     let y = self.b.shift_right_logical(u, None, a, inv)?;
-                    if sh == 0 { c } else { self.b.bitwise_or(u, None, x, y)? }
+                    if sh == 0 {
+                        c
+                    } else {
+                        self.b.bitwise_or(u, None, x, y)?
+                    }
                 } else {
                     let s = self.u(sh);
                     self.b.shift_left_logical(u, None, a, s)?
@@ -1525,18 +1980,32 @@ impl<'a> Translator<'a> {
                 self.set(i.rd(), v)
             }
             "txq" => self.txq(i),
+            "txd" => self.txd(pc, i),
+            "tld" => self.tld(pc, i),
+            "lepc" => {
+                let v = self.u(pc);
+                self.set(i.rd(), v)
+            }
+            // Cache maintenance only: host caches are coherent for the
+            // descriptor and image data this recompiler reads.
+            "cctl" | "cctll" | "cctlt" => Ok(()),
             "tmml" => self.tmml(pc, i),
             "ipa" => self.ipa(i),
             "texs" => self.texs(i),
             "tlds" => self.tlds(i),
             "sust" => self.sust(pc, i),
-            "tex" => self.tex(i),
-            "tld4" => self.tld4(i),
+            "tex" => self.tex(pc, i),
+            "tld4" => self.tld4(pc, i),
             "tld4s" => self.tld4s(i),
             "hadd2" | "hmul2" | "hfma2" => self.half(i),
             "hsetp2" => self.hsetp2(i),
+            // Everything else is left out whole and reported by name, which is
+            // what the coverage map counts as missing. A mnemonic whose gap is
+            // not obvious from its name carries the reason as a sub-form label,
+            // and only the forms of a mnemonic that are translated get a
+            // sub-form of their own.
             name => {
-                self.unsupported.push(name);
+                self.unsupported.push(unavailable_reason(name));
                 Ok(())
             }
         }
@@ -1571,7 +2040,11 @@ impl<'a> Translator<'a> {
             self.video_operand(b, b_sel)?
         } else {
             let imm = i.bits(20, 16) as u32;
-            self.u(if b_sel & 8 != 0 { imm as u16 as i16 as i32 as u32 } else { imm })
+            self.u(if b_sel & 8 != 0 {
+                imm as u16 as i16 as i32 as u32
+            } else {
+                imm
+            })
         };
         let c = self.r(i.rc())?;
         let (a_signed, b_signed) = (a_sel & 8 != 0, b_sel & 8 != 0);
@@ -1579,10 +2052,18 @@ impl<'a> Translator<'a> {
         let dformat = i.bit(54);
         let zero = self.u(0);
         let (mut v, signed) = if a_signed != b_signed {
-            let v = if max { self.ext(u, glsl::UMAX, &[a, b])? } else { self.ext(u, glsl::SMIN, &[a, b])? };
+            let v = if max {
+                self.ext(u, glsl::UMAX, &[a, b])?
+            } else {
+                self.ext(u, glsl::SMIN, &[a, b])?
+            };
             let (signed_op, other) = if a_signed { (a, b) } else { (b, a) };
             let neg = self.b.s_less_than(bt, None, signed_op, zero)?;
-            let v = if max { self.b.select(u, None, neg, other, v)? } else { self.b.select(u, None, neg, signed_op, v)? };
+            let v = if max {
+                self.b.select(u, None, neg, other, v)?
+            } else {
+                self.b.select(u, None, neg, signed_op, v)?
+            };
             (v, !max)
         } else {
             let op = match (max, a_signed) {
@@ -1616,6 +2097,465 @@ impl<'a> Translator<'a> {
             _ => v,
         };
         self.set(i.rd(), v)
+    }
+
+    /// Operand selectors of the integer video ALU: three bits choose the
+    /// lane and the fourth asks for sign extension.
+    fn video_selects(i: &Insn) -> (u64, u64) {
+        (
+            (i.bits(48, 1) << 3) | i.bits(36, 3),
+            (i.bits(49, 1) << 3) | i.bits(28, 3),
+        )
+    }
+
+    fn video_source(&mut self, i: &Insn, sel: u64) -> R<Word> {
+        if i.bit(50) {
+            let v = self.r(i.rb())?;
+            self.video_operand(v, sel)
+        } else {
+            let imm = i.bits(20, 16) as u32;
+            let v = self.u(if sel & 8 != 0 {
+                imm as u16 as i16 as i32 as u32
+            } else {
+                imm
+            });
+            Ok(v)
+        }
+    }
+
+    /// Write-back modes of the video ALU: the result replaces one lane of
+    /// `c`, or is combined with it.
+    fn video_write(&mut self, i: &Insn, v: Word, c: Word, dformat: bool) -> R {
+        let u = self.t.u32;
+        let insert = |t: &mut Self, pos: u32, len: u32| -> R<Word> {
+            let (p, l) = (t.u(pos), t.u(len));
+            Ok(t.b.bit_field_insert(u, None, c, v, p, l)?)
+        };
+        let v = match i.bits(51, 3) {
+            0 => insert(self, 16, 16)?,
+            1 => insert(self, 0, 16)?,
+            2 => insert(self, 0, 8)?,
+            3 => insert(self, 16, 8)?,
+            4 => self.b.i_add(u, None, v, c)?,
+            5 => self.ext(u, if dformat { glsl::SMIN } else { glsl::UMIN }, &[v, c])?,
+            6 => self.ext(u, if dformat { glsl::SMAX } else { glsl::UMAX }, &[v, c])?,
+            _ => v,
+        };
+        self.set(i.rd(), v)
+    }
+
+    /// The `sat` flag of the 32-bit video operations clamps an unsigned
+    /// result to the positive `s32` range and a signed one to zero, which is
+    /// what the hardware does when the destination format differs from the
+    /// operand format.
+    fn video_sat32(&mut self, v: Word, signed: bool, dformat: bool) -> R<Word> {
+        let u = self.t.u32;
+        if dformat && !signed {
+            let m = self.u(i32::MAX as u32);
+            self.ext(u, glsl::UMIN, &[v, m])
+        } else if !dformat && signed {
+            let zero = self.u(0);
+            self.ext(u, glsl::SMAX, &[v, zero])
+        } else {
+            Ok(v)
+        }
+    }
+
+    /// Saturates a 64-bit `{high, low}` result to the destination range:
+    /// clamped to `INT_MIN`/`INT_MAX` when the result is signed, to zero or
+    /// all ones otherwise.
+    fn video_sat64(&mut self, low: Word, high: Word, signed: bool) -> R<Word> {
+        let u = self.t.u32;
+        let bt = self.t.bool;
+        let sign = self.sra(high, 31)?;
+        let zero = self.u(0);
+        let negative = self.b.i_not_equal(bt, None, sign, zero)?;
+        let (overflow, fill) = if signed {
+            let ext = self.sra(low, 31)?;
+            let overflow = self.b.i_not_equal(bt, None, high, ext)?;
+            let (lo, hi) = (self.u(i32::MIN as u32), self.u(i32::MAX as u32));
+            let fill = self.b.select(u, None, negative, lo, hi)?;
+            (overflow, fill)
+        } else {
+            let overflow = self.b.i_not_equal(bt, None, high, zero)?;
+            let fill = self.b.not(u, None, sign)?;
+            (overflow, fill)
+        };
+        Ok(self.b.select(u, None, overflow, fill, low)?)
+    }
+
+    fn sra(&mut self, v: Word, amount: u32) -> R<Word> {
+        let i = self.cast_i(v)?;
+        let s = self.u(amount);
+        let r = self.b.shift_right_arithmetic(self.t.i32, None, i, s)?;
+        self.cast_u(r)
+    }
+
+    fn add_carry(&mut self, a: Word, b: Word) -> R<(Word, Word)> {
+        let u = self.t.u32;
+        let sum = self.b.i_add(u, None, a, b)?;
+        let carry = self.b.u_less_than(self.t.bool, None, sum, a)?;
+        let carry = self.b2u(carry, 1, 0)?;
+        Ok((sum, carry))
+    }
+
+    fn negate_long(&mut self, low: Word, high: Word) -> R<(Word, Word)> {
+        let u = self.t.u32;
+        let low = self.b.not(u, None, low)?;
+        let high = self.b.not(u, None, high)?;
+        let one = self.u(1);
+        let (low, carry) = self.add_carry(low, one)?;
+        let high = self.b.i_add(u, None, high, carry)?;
+        Ok((low, high))
+    }
+
+    /// Integer video add: `(a + b)` with the optional `avg` forms of the
+    /// video pipeline (`-a + b`, `a - b`, `a + b + 1`), the `sat` clamp and
+    /// the shared write-back modes.
+    fn vadd(&mut self, i: &Insn) -> R {
+        let u = self.t.u32;
+        let (a_sel, b_sel) = Self::video_selects(i);
+        let avg = i.bits(56, 2);
+        let a = self.r(i.ra())?;
+        let mut a = self.video_operand(a, a_sel)?;
+        let mut b = self.video_source(i, b_sel)?;
+        a = self.ineg(a, avg == 1)?;
+        b = self.ineg(b, avg == 2)?;
+        let (sum, mut carry) = self.add_carry(a, b)?;
+        let mut res = sum;
+        if avg == 3 {
+            let one = self.u(1);
+            let (v, c) = self.add_carry(res, one)?;
+            res = v;
+            carry = self.b.i_add(u, None, carry, c)?;
+        }
+        let signed = a_sel == 0xe || b_sel == 0xe || avg == 1 || avg == 2;
+        if i.bit(55) {
+            let high = self.sra(a, 31)?;
+            let other = self.sra(b, 31)?;
+            let high = self.b.i_add(u, None, high, other)?;
+            let high = self.b.i_add(u, None, high, carry)?;
+            res = self.video_sat64(res, high, signed)?;
+        }
+        let c = self.r(i.rc())?;
+        self.video_write(i, res, c, i.bit(54))
+    }
+
+    /// Integer video multiply-add: a 64-bit product of two extended operands
+    /// plus `c`, with the averaging negations, the `>> 7`/`>> 15` scaling of
+    /// the video pipeline and the `sat` clamp on the 64-bit result.
+    fn vmad(&mut self, i: &Insn) -> R {
+        let u = self.t.u32;
+        let (a_sel, b_sel) = Self::video_selects(i);
+        let avg = i.bits(53, 2);
+        let scale = i.bits(51, 2);
+        if scale == 3 {
+            self.unsupported.push("vmad (scale)");
+            return Ok(());
+        }
+        let signed_a = a_sel & 8 != 0;
+        let signed_b = b_sel & 8 != 0;
+        let signed = a_sel == 0xe || b_sel == 0xe || avg == 1 || avg == 2;
+        let a = self.r(i.ra())?;
+        let a = self.video_operand(a, a_sel)?;
+        let b = self.video_source(i, b_sel)?;
+        let mut c = self.r(i.rc())?;
+        c = self.ineg(c, avg == 2)?;
+        let mut low = self.b.i_mul(u, None, a, b)?;
+        let mut high = self.mul_hi(a, b, signed_a, signed_b)?;
+        if avg == 1 {
+            (low, high) = self.negate_long(low, high)?;
+        }
+        let (sum, carry) = self.add_carry(low, c)?;
+        low = sum;
+        high = self.b.i_add(u, None, high, carry)?;
+        if avg == 3 {
+            let one = self.u(1);
+            let (low2, carry) = self.add_carry(low, one)?;
+            low = low2;
+            high = self.b.i_add(u, None, high, carry)?;
+        }
+        let shift = match scale {
+            1 => 7,
+            2 => 15,
+            _ => 0,
+        };
+        if shift != 0 {
+            let s = self.u(shift);
+            let moved = self.b.shift_right_logical(u, None, low, s)?;
+            let inv = self.u(32 - shift);
+            let upper = self.b.shift_left_logical(u, None, high, inv)?;
+            low = self.b.bitwise_or(u, None, moved, upper)?;
+            high = if signed {
+                self.sra(high, shift)?
+            } else {
+                let s = self.u(shift);
+                self.b.shift_right_logical(u, None, high, s)?
+            };
+        }
+        let v = if i.bit(55) {
+            self.video_sat64(low, high, signed)?
+        } else {
+            low
+        };
+        self.set(i.rd(), v)
+    }
+
+    /// Integer video absolute difference of two same-signedness operands,
+    /// followed by the shared `sat` clamp and write-back modes.
+    fn vabsdiff(&mut self, i: &Insn) -> R {
+        let u = self.t.u32;
+        let (a_sel, b_sel) = Self::video_selects(i);
+        let signed_a = a_sel & 8 != 0;
+        if signed_a != (b_sel & 8 != 0) {
+            self.unsupported.push("vabsdiff (mixed signedness)");
+            return Ok(());
+        }
+        let a = self.r(i.ra())?;
+        let a = self.video_operand(a, a_sel)?;
+        let b = self.video_source(i, b_sel)?;
+        let v = if signed_a {
+            let (ai, bi) = (self.cast_i(a)?, self.cast_i(b)?);
+            let d = self.b.i_sub(self.t.i32, None, ai, bi)?;
+            let abs = self.ext(self.t.i32, glsl::SABS, &[d])?;
+            self.cast_u(abs)?
+        } else {
+            let hi = self.ext(u, glsl::UMAX, &[a, b])?;
+            let lo = self.ext(u, glsl::UMIN, &[a, b])?;
+            self.b.i_sub(u, None, hi, lo)?
+        };
+        let v = if i.bit(55) {
+            self.video_sat32(v, signed_a, i.bit(54))?
+        } else {
+            v
+        };
+        let c = self.r(i.rc())?;
+        self.video_write(i, v, c, i.bit(54))
+    }
+
+    /// Integer video compare that writes two predicates, with the shared
+    /// predicate boolean operation.
+    fn vsetp(&mut self, i: &Insn) -> R {
+        let (a_sel, b_sel) = Self::video_selects(i);
+        let a = self.r(i.ra())?;
+        let a = self.video_operand(a, a_sel)?;
+        let b = self.video_source(i, b_sel)?;
+        let signed_a = a_sel & 8 != 0;
+        let signed_b = b_sel & 8 != 0;
+        let cmp = (i.bits(47, 1) << 2) | i.bits(43, 2);
+        let cond = if signed_a == signed_b {
+            self.int_cmp(cmp, signed_a, a, b)?
+        } else if a_sel & 7 == 6 || b_sel & 7 == 6 {
+            self.unsupported.push("vsetp (mixed signedness)");
+            return Ok(());
+        } else {
+            // Both operands are narrow extended values, so a signed compare
+            // of the two's-complement words orders them correctly.
+            self.int_cmp(cmp, true, a, b)?
+        };
+        let (p, n) = i.pred(39, 42);
+        let pv = self.p(p, n)?;
+        let op = i.bits(45, 2);
+        let r = self.bool_op(op, cond, pv)?;
+        let nc = self.b.logical_not(self.t.bool, None, cond)?;
+        let r2 = self.bool_op(op, nc, pv)?;
+        self.setp(i.bits(3, 3) as u8, r)?;
+        self.setp(i.bits(0, 3) as u8, r2)
+    }
+
+    fn byte_at(&mut self, v: Word, k: u32, signed: bool) -> R<Word> {
+        let pos = self.u(8 * k);
+        let eight = self.u(8);
+        if signed {
+            let vi = self.cast_i(v)?;
+            let r = self
+                .b
+                .bit_field_s_extract(self.t.i32, None, vi, pos, eight)?;
+            self.cast_u(r)
+        } else {
+            Ok(self
+                .b
+                .bit_field_u_extract(self.t.u32, None, v, pos, eight)?)
+        }
+    }
+
+    /// Integer dot product of four byte pairs plus the accumulator. The
+    /// two-way (`dp2a`) forms are not translated.
+    fn idp(&mut self, i: &Insn) -> R {
+        let u = self.t.u32;
+        let (a_sign, is_dp, b_sign) = (i.bit(49), i.bit(48), i.bit(47));
+        if is_dp {
+            self.unsupported.push("idp (dp2a)");
+            return Ok(());
+        }
+        if i.bit(50) {
+            self.unsupported.push("idp (high half)");
+            return Ok(());
+        }
+        let a = self.r(i.ra())?;
+        let b = match i.form() {
+            Form::Cbuf => {
+                let (s, o) = i.cbuf();
+                self.cbuf_imm(s, o)?
+            }
+            _ => self.r(i.rb())?,
+        };
+        let mut sum = self.r(i.rc())?;
+        for k in 0..4 {
+            let av = self.byte_at(a, k, a_sign)?;
+            let bv = self.byte_at(b, k, b_sign)?;
+            let p = self.b.i_mul(u, None, av, bv)?;
+            sum = self.b.i_add(u, None, sum, p)?;
+        }
+        self.set(i.rd(), sum)
+    }
+
+    /// Byte permute of the `{b, a}` register pair. The `f4e`, `b4e`, `rc8`,
+    /// `ecl`, `ecr` and `rc16` modes take their selector from `c[1:0]`; the
+    /// generic mode uses one nibble per destination byte and replicates the
+    /// sign bit when the nibble's msb is set.
+    fn prmt(&mut self, i: &Insn) -> R {
+        let u = self.t.u32;
+        let mode = i.bits(48, 4);
+        if mode > 6 {
+            self.unsupported.push("prmt (mode)");
+            return Ok(());
+        }
+        let a = self.r(i.ra())?;
+        let b = match i.form() {
+            Form::Reg => self.r(i.rb())?,
+            Form::Cbuf => {
+                let (s, o) = i.cbuf();
+                self.cbuf_imm(s, o)?
+            }
+            Form::Imm => self.u(i.simm20() as u32),
+        };
+        let c = self.r(i.rc())?;
+        let mut bytes = [0; 8];
+        for k in 0..4 {
+            bytes[k as usize] = self.byte_at(a, k, false)?;
+            bytes[k as usize + 4] = self.byte_at(b, k, false)?;
+        }
+        let av = self.b.composite_construct(
+            self.t.v4u,
+            None,
+            [bytes[0], bytes[1], bytes[2], bytes[3]],
+        )?;
+        let bv = self.b.composite_construct(
+            self.t.v4u,
+            None,
+            [bytes[4], bytes[5], bytes[6], bytes[7]],
+        )?;
+        let three = self.u(3);
+        let sel = self.b.bitwise_and(u, None, c, three)?;
+        let zero = self.u(0);
+        let mut out = zero;
+        for k in 0..4u32 {
+            let mut sign = None;
+            let idx = match mode {
+                0 => {
+                    let sh = self.u(4 * k);
+                    let v = self.b.shift_right_logical(u, None, c, sh)?;
+                    let (f, eight, seven) = (self.u(0xf), self.u(8), self.u(7));
+                    let nib = self.b.bitwise_and(u, None, v, f)?;
+                    let msb = self.b.bitwise_and(u, None, nib, eight)?;
+                    let msb = self.b.i_not_equal(self.t.bool, None, msb, zero)?;
+                    sign = Some(msb);
+                    self.b.bitwise_and(u, None, nib, seven)?
+                }
+                1 => {
+                    let kk = self.u(k);
+                    self.b.i_add(u, None, sel, kk)?
+                }
+                2 => {
+                    let kk = self.u(8 - k);
+                    let v = self.b.i_add(u, None, sel, kk)?;
+                    let seven = self.u(7);
+                    self.b.bitwise_and(u, None, v, seven)?
+                }
+                3 => sel,
+                4 => {
+                    let kk = self.u(k);
+                    self.ext(u, glsl::UMAX, &[sel, kk])?
+                }
+                5 => {
+                    let kk = self.u(k);
+                    self.ext(u, glsl::UMIN, &[sel, kk])?
+                }
+                _ => {
+                    let one = self.u(1);
+                    let half = self.b.bitwise_and(u, None, sel, one)?;
+                    let two = self.u(2);
+                    let base = self.b.i_mul(u, None, half, two)?;
+                    let kk = self.u(k & 1);
+                    self.b.i_add(u, None, base, kk)?
+                }
+            };
+            let low = self.b.bitwise_and(u, None, idx, three)?;
+            let va = self.b.vector_extract_dynamic(u, None, av, low)?;
+            let vb = self.b.vector_extract_dynamic(u, None, bv, low)?;
+            let four = self.u(4);
+            let from_b = self.b.u_greater_than_equal(self.t.bool, None, idx, four)?;
+            let mut byte = self.b.select(u, None, from_b, vb, va)?;
+            if let Some(msb) = sign {
+                let fill = self.u(0xff);
+                byte = self.b.select(u, None, msb, fill, byte)?;
+            }
+            let sh = self.u(8 * k);
+            let v = self.b.shift_left_logical(u, None, byte, sh)?;
+            out = self.b.bitwise_or(u, None, out, v)?;
+        }
+        self.set(i.rd(), out)
+    }
+
+    /// Half-precision pair operations whose second operand is one 32-bit
+    /// immediate holding both halves.
+    fn half32i(&mut self, i: &Insn) -> R {
+        let v2 = self.t.v2f;
+        let name = i.name();
+        let (swizzle, neg_a, sat) = match name {
+            "hadd2_32i" => (i.bits(53, 2), i.bit(56), i.bit(52)),
+            "hmul2_32i" => (i.bits(53, 2), false, i.bit(52)),
+            _ => (i.bits(47, 2), false, false),
+        };
+        let raw = self.r(i.ra())?;
+        let a = self.halves(raw, swizzle)?;
+        let a = self.half_neg_abs(a, neg_a, false)?;
+        let imm = self.u(i.imm32());
+        let b = self.halves(imm, 0)?;
+        let v = match name {
+            "hadd2_32i" => self.b.f_add(v2, None, a, b)?,
+            "hmul2_32i" => self.b.f_mul(v2, None, a, b)?,
+            _ => {
+                let c = self.r(i.rd())?;
+                let c = self.halves(c, 0)?;
+                let c = self.half_neg_abs(c, i.bit(51), false)?;
+                self.ext(v2, glsl::FMA, &[a, b, c])?
+            }
+        };
+        self.exact(v);
+        self.store_halves(i.rd(), v, 0, sat)
+    }
+
+    /// `getcrsptr`/`setcrsptr` and `getlmembase`/`setlmembase`: the two
+    /// opaque pointers are kept per invocation so a save/restore pair
+    /// round-trips. Nothing else in the translator reads them.
+    fn pointer(&mut self, i: &Insn) -> R {
+        let slot = if i.name().ends_with("crsptr") {
+            self.crs
+        } else {
+            self.lmembase
+        };
+        let Some(var) = slot else {
+            return Ok(());
+        };
+        if i.name().starts_with("get") {
+            let v = self.b.load(self.t.u32, None, var, None, [])?;
+            self.set(i.rd(), v)
+        } else {
+            let v = self.r(i.ra())?;
+            Ok(self.b.store(var, v, None, [])?)
+        }
     }
 
     fn half_select(&mut self, v: Word, sel: u64) -> R<Word> {
@@ -1653,6 +2593,94 @@ impl<'a> Translator<'a> {
         Ok(v)
     }
 
+    /// High 32 bits of the 64-bit product of two 32-bit operands. Each
+    /// operand is sign- or zero-extended to 64 bits, multiplied modulo 2^64,
+    /// and shifted right. Two's-complement multiplication makes this correct
+    /// for every signed/unsigned combination.
+    fn mul_hi(&mut self, a: Word, b: Word, signed_a: bool, signed_b: bool) -> R<Word> {
+        let (u64t, i64t) = match self.int64 {
+            Some(t) => t,
+            None => {
+                self.b.capability(Capability::Int64);
+                let t = (self.b.type_int(64, 0), self.b.type_int(64, 1));
+                self.int64 = Some(t);
+                t
+            }
+        };
+        let a = if signed_a {
+            let v = self.cast_i(a)?;
+            let v = self.b.s_convert(i64t, None, v)?;
+            self.cast_u(v)?
+        } else {
+            self.b.u_convert(u64t, None, a)?
+        };
+        let b = if signed_b {
+            let v = self.cast_i(b)?;
+            let v = self.b.s_convert(i64t, None, v)?;
+            self.cast_u(v)?
+        } else {
+            self.b.u_convert(u64t, None, b)?
+        };
+        let product = self.b.i_mul(u64t, None, a, b)?;
+        let shift = self.b.constant_bit64(u64t, 32);
+        let hi = self.b.shift_right_logical(u64t, None, product, shift)?;
+        Ok(self.b.u_convert(self.t.u32, None, hi)?)
+    }
+
+    fn imad(&mut self, i: &Insn) -> R {
+        let u = self.t.u32;
+        let (a, b, c, signed_a, signed_b, high) = match i.name() {
+            "imad" => {
+                if i.bit(49) {
+                    self.unsupported.push("imad (extended)");
+                    return Ok(());
+                }
+                if i.bit(50) {
+                    self.unsupported.push("imad (saturate)");
+                    return Ok(());
+                }
+                (
+                    self.r(i.ra())?,
+                    self.src_b(i)?,
+                    self.r(i.rc())?,
+                    i.bit(40),
+                    i.bit(41),
+                    i.bit(54),
+                )
+            }
+            "imul" => (
+                self.r(i.ra())?,
+                self.src_b(i)?,
+                self.u(0),
+                i.bit(40),
+                i.bit(41),
+                i.bit(39),
+            ),
+            "imad32i" => {
+                let a = self.r(i.ra())?;
+                let a = self.ineg(a, i.bit(56))?;
+                let c = self.r(i.rd())?;
+                let c = self.ineg(c, i.bit(55))?;
+                (a, self.u(i.imm32()), c, i.bit(54), i.bit(57), i.bit(53))
+            }
+            _ => (
+                self.r(i.ra())?,
+                self.u(i.imm32()),
+                self.u(0),
+                i.bit(54),
+                i.bit(55),
+                i.bit(53),
+            ),
+        };
+        let product = if high {
+            self.mul_hi(a, b, signed_a, signed_b)?
+        } else {
+            self.b.i_mul(u, None, a, b)?
+        };
+        let v = self.b.i_add(u, None, product, c)?;
+        self.set(i.rd(), v)
+    }
+
     fn ineg(&mut self, v: Word, neg: bool) -> R<Word> {
         if !neg {
             return Ok(v);
@@ -1684,7 +2712,11 @@ impl<'a> Translator<'a> {
                 let na = self.b.is_nan(bt, None, a)?;
                 let nb = self.b.is_nan(bt, None, b)?;
                 let any = self.b.logical_or(bt, None, na, nb)?;
-                if op == 8 { any } else { self.b.logical_not(bt, None, any)? }
+                if op == 8 {
+                    any
+                } else {
+                    self.b.logical_not(bt, None, any)?
+                }
             }
             9 => self.b.f_unord_less_than(bt, None, a, b)?,
             10 => self.b.f_unord_equal(bt, None, a, b)?,
@@ -1734,7 +2766,11 @@ impl<'a> Translator<'a> {
             let b = self.fneg_abs(b, i.bit(53), i.bit(44))?;
             let c = self.fcmp(i.bits(48, 4), a, b)?;
             let r = self.bool_op(i.bits(45, 2), c, pv)?;
-            let v = if i.bit(52) { self.b2u(r, 1.0f32.to_bits(), 0)? } else { self.b2u(r, u32::MAX, 0)? };
+            let v = if i.bit(52) {
+                self.b2u(r, 1.0f32.to_bits(), 0)?
+            } else {
+                self.b2u(r, u32::MAX, 0)?
+            };
             if i.bit(47) {
                 self.set_cc(v, None, None)?;
             }
@@ -1756,7 +2792,11 @@ impl<'a> Translator<'a> {
             self.setp(i.bits(3, 3) as u8, r)?;
             self.setp(i.bits(0, 3) as u8, r2)
         } else {
-            let v = if i.bit(44) { self.b2u(r, 1.0f32.to_bits(), 0)? } else { self.b2u(r, u32::MAX, 0)? };
+            let v = if i.bit(44) {
+                self.b2u(r, 1.0f32.to_bits(), 0)?
+            } else {
+                self.b2u(r, u32::MAX, 0)?
+            };
             if i.bit(47) {
                 self.set_cc(v, None, None)?;
             }
@@ -1794,7 +2834,11 @@ impl<'a> Translator<'a> {
     fn lop3(&mut self, a: Word, b: Word, c: Word, lut: u32) -> R<Word> {
         let u = self.t.u32;
         let mut acc = self.u(0);
-        let (na, nb, nc) = (self.b.not(u, None, a)?, self.b.not(u, None, b)?, self.b.not(u, None, c)?);
+        let (na, nb, nc) = (
+            self.b.not(u, None, a)?,
+            self.b.not(u, None, b)?,
+            self.b.not(u, None, c)?,
+        );
         for k in 0..8u32 {
             if lut >> k & 1 == 0 {
                 continue;
@@ -1813,8 +2857,24 @@ impl<'a> Translator<'a> {
         let u = self.t.u32;
         let a = self.r(i.ra())?;
         let (b, c, hi_b, psl, mrg, mode, b_imm) = match (i.form(), i.op.value) {
-            (Form::Reg, _) => (self.r(i.rb())?, self.r(i.rc())?, i.bit(35), i.bit(36), i.bit(37), i.bits(50, 3), false),
-            (Form::Imm, _) => (self.u(i.bits(20, 16) as u32), self.r(i.rc())?, false, i.bit(36), i.bit(37), i.bits(50, 3), true),
+            (Form::Reg, _) => (
+                self.r(i.rb())?,
+                self.r(i.rc())?,
+                i.bit(35),
+                i.bit(36),
+                i.bit(37),
+                i.bits(50, 3),
+                false,
+            ),
+            (Form::Imm, _) => (
+                self.u(i.bits(20, 16) as u32),
+                self.r(i.rc())?,
+                false,
+                i.bit(36),
+                i.bit(37),
+                i.bits(50, 3),
+                true,
+            ),
             (Form::Cbuf, 0x5100000000000000) => {
                 let b = self.r(i.rc())?;
                 let (s, o) = i.cbuf();
@@ -2038,8 +3098,17 @@ impl<'a> Translator<'a> {
                 let sixteen = self.u(16);
                 self.b.shift_right_logical(u, None, raw, sixteen)?
             };
-            let (c8000, c16, c10, c1f, c3ff, c13, c23, c112, c7f8) =
-                (self.u(0x8000), self.u(16), self.u(10), self.u(0x1f), self.u(0x3ff), self.u(13), self.u(23), self.u(112), self.u(0x7f80_0000));
+            let (c8000, c16, c10, c1f, c3ff, c13, c23, c112, c7f8) = (
+                self.u(0x8000),
+                self.u(16),
+                self.u(10),
+                self.u(0x1f),
+                self.u(0x3ff),
+                self.u(13),
+                self.u(23),
+                self.u(112),
+                self.u(0x7f80_0000),
+            );
             let sign = self.b.bitwise_and(u, None, h, c8000)?;
             let sign = self.b.shift_left_logical(u, None, sign, c16)?;
             let e = self.b.shift_right_logical(u, None, h, c10)?;
@@ -2069,7 +3138,9 @@ impl<'a> Translator<'a> {
 
     fn unpack_half(&mut self, raw: Word, high: bool) -> R<Word> {
         let v2 = self.unpack_h2(raw)?;
-        Ok(self.b.composite_extract(self.t.f32, None, v2, [high as u32])?)
+        Ok(self
+            .b
+            .composite_extract(self.t.f32, None, v2, [high as u32])?)
     }
 
     fn halves(&mut self, raw: Word, swizzle: u64) -> R<Word> {
@@ -2115,7 +3186,11 @@ impl<'a> Translator<'a> {
                 let packed = self.ext(self.t.u32, glsl::PACK_HALF_2X16, &[v])?;
                 let old = self.r(rd)?;
                 let u = self.t.u32;
-                let (keep, take) = if mode == 2 { (0xffff_0000u32, 0x0000_ffffu32) } else { (0x0000_ffff, 0xffff_0000) };
+                let (keep, take) = if mode == 2 {
+                    (0xffff_0000u32, 0x0000_ffffu32)
+                } else {
+                    (0x0000_ffff, 0xffff_0000)
+                };
                 let (k, t) = (self.u(keep), self.u(take));
                 let o = self.b.bitwise_and(u, None, old, k)?;
                 let n = self.b.bitwise_and(u, None, packed, t)?;
@@ -2169,10 +3244,20 @@ impl<'a> Translator<'a> {
         let a = self.half_operand(ops.a)?;
         let b = self.half_operand(ops.b)?;
         let reg_form = i.op.value == 0x5d20000000000000;
-        let (cmp, h_and) = if reg_form { (i.bits(35, 4), i.bit(49)) } else { (i.bits(49, 4), i.bit(53)) };
+        let (cmp, h_and) = if reg_form {
+            (i.bits(35, 4), i.bit(49))
+        } else {
+            (i.bits(49, 4), i.bit(53))
+        };
         let f = self.t.f32;
-        let (a0, a1) = (self.b.composite_extract(f, None, a, [0])?, self.b.composite_extract(f, None, a, [1])?);
-        let (b0, b1) = (self.b.composite_extract(f, None, b, [0])?, self.b.composite_extract(f, None, b, [1])?);
+        let (a0, a1) = (
+            self.b.composite_extract(f, None, a, [0])?,
+            self.b.composite_extract(f, None, a, [1])?,
+        );
+        let (b0, b1) = (
+            self.b.composite_extract(f, None, b, [0])?,
+            self.b.composite_extract(f, None, b, [1])?,
+        );
         let c0 = self.fcmp(cmp, a0, b0)?;
         let c1 = self.fcmp(cmp, a1, b1)?;
         let (p, n) = i.pred(39, 42);
@@ -2243,7 +3328,8 @@ impl<'a> Translator<'a> {
                             let r = self.b.bit_field_s_extract(self.t.i32, None, wi, off, len)?;
                             self.cast_u(r)?
                         } else {
-                            self.b.bit_field_u_extract(self.t.u32, None, word, off, len)?
+                            self.b
+                                .bit_field_u_extract(self.t.u32, None, word, off, len)?
                         };
                         self.set(i.rd(), v)
                     }
@@ -2349,10 +3435,31 @@ impl<'a> Translator<'a> {
     }
 
     fn shared_pointer(&mut self, i: &Insn, extra: u32) -> R<Option<Word>> {
-        let Some((var, elem)) = self.shared else { return Ok(None) };
+        let Some((var, elem)) = self.shared else {
+            return Ok(None);
+        };
         let base = self.r(i.ra())?;
         let imm = ((i.bits(20, 24) as u32) << 8) as i32 >> 8;
         let off = self.u((imm as u32).wrapping_add(extra));
+        let addr = self.b.i_add(self.t.u32, None, base, off)?;
+        let two = self.u(2);
+        let w = self.b.shift_right_logical(self.t.u32, None, addr, two)?;
+        let max = self.u(self.opts.shared_memory.div_ceil(4).clamp(1, 0x4000) - 1);
+        let w = self.ext(self.t.u32, glsl::UMIN, &[w, max])?;
+        Ok(Some(self.b.access_chain(elem, None, var, [w])?))
+    }
+
+    /// The `[s[ra]+imm]` address of `atoms`. Its immediate is a 22-bit signed
+    /// field in bits 30-51 holding four-byte units, unlike the byte offset
+    /// `lds` and `sts` carry in bits 20-43.
+    fn shared_atom_pointer(&mut self, i: &Insn) -> R<Option<Word>> {
+        let Some((var, elem)) = self.shared else {
+            return Ok(None);
+        };
+        let base = self.r(i.ra())?;
+        let raw = i.bits(30, 22) as u32;
+        let units = ((raw << 10) as i32) >> 10;
+        let off = self.u((units as u32) << 2);
         let addr = self.b.i_add(self.t.u32, None, base, off)?;
         let two = self.u(2);
         let w = self.b.shift_right_logical(self.t.u32, None, addr, two)?;
@@ -2377,16 +3484,25 @@ impl<'a> Translator<'a> {
         if let Some(io) = map.get(&generic) {
             return (io.var, io.kind);
         }
-        let kind = if !output && self.opts.stage == Stage::Vertex { self.opts.attribute_types[generic as usize] } else { Kind::Float };
+        let kind = if !output && self.opts.stage == Stage::Vertex {
+            self.opts.attribute_types[generic as usize]
+        } else {
+            Kind::Float
+        };
         let vec = match kind {
             Kind::Float => self.t.v4f,
             Kind::Sint => self.t.v4i,
             Kind::Uint => self.t.v4u,
         };
-        let class = if output { StorageClass::Output } else { StorageClass::Input };
+        let class = if output {
+            StorageClass::Output
+        } else {
+            StorageClass::Input
+        };
         let ptr = self.b.type_pointer(None, class, vec);
         let var = self.global(ptr, class);
-        self.b.decorate(var, Decoration::Location, [Operand::LiteralBit32(generic)]);
+        self.b
+            .decorate(var, Decoration::Location, [Operand::LiteralBit32(generic)]);
         if !output && self.opts.stage == Stage::Fragment {
             match self.header.ps_input(generic as usize, 0) {
                 Interpolation::Constant => self.b.decorate(var, Decoration::Flat, []),
@@ -2395,7 +3511,11 @@ impl<'a> Translator<'a> {
             }
         }
         self.interface.push(var);
-        let map = if output { &mut self.outputs } else { &mut self.inputs };
+        let map = if output {
+            &mut self.outputs
+        } else {
+            &mut self.inputs
+        };
         map.insert(generic, Io { var, kind });
         if output {
             self.shader.outputs |= 1 << generic;
@@ -2410,10 +3530,15 @@ impl<'a> Translator<'a> {
         if let Some(&v) = self.builtins.get(&key) {
             return v;
         }
-        let class = if output { StorageClass::Output } else { StorageClass::Input };
+        let class = if output {
+            StorageClass::Output
+        } else {
+            StorageClass::Input
+        };
         let ptr = self.b.type_pointer(None, class, ty);
         let var = self.global(ptr, class);
-        self.b.decorate(var, Decoration::BuiltIn, [Operand::BuiltIn(which)]);
+        self.b
+            .decorate(var, Decoration::BuiltIn, [Operand::BuiltIn(which)]);
         if output && matches!(which, BuiltIn::Position) {
             self.b.decorate(var, Decoration::Invariant, []);
         }
@@ -2432,7 +3557,11 @@ impl<'a> Translator<'a> {
         let idx = self.u(c);
         let ptr = self.b.access_chain(ptr_ty, None, var, [idx])?;
         let v = self.b.load(scalar, None, ptr, None, [])?;
-        if kind == Kind::Uint { Ok(v) } else { self.cast_u(v) }
+        if kind == Kind::Uint {
+            Ok(v)
+        } else {
+            self.cast_u(v)
+        }
     }
 
     fn attribute_read(&mut self, addr: u32, _output: bool) -> R<Word> {
@@ -2445,10 +3574,19 @@ impl<'a> Translator<'a> {
             attr::POSITION..=0x7c if self.opts.stage == Stage::Fragment => {
                 let v4f = self.t.v4f;
                 let var = self.builtin(BuiltIn::FragCoord, v4f, false);
-                self.component(var, Kind::Float, StorageClass::Input, (addr - attr::POSITION) / 4)
+                self.component(
+                    var,
+                    Kind::Float,
+                    StorageClass::Input,
+                    (addr - attr::POSITION) / 4,
+                )
             }
             attr::VERTEX_ID | attr::INSTANCE_ID if self.opts.stage == Stage::Vertex => {
-                let which = if addr == attr::VERTEX_ID { BuiltIn::VertexIndex } else { BuiltIn::InstanceIndex };
+                let which = if addr == attr::VERTEX_ID {
+                    BuiltIn::VertexIndex
+                } else {
+                    BuiltIn::InstanceIndex
+                };
                 let i32_ = self.t.i32;
                 let var = self.builtin(which, i32_, false);
                 let v = self.b.load(self.t.i32, None, var, None, [])?;
@@ -2507,13 +3645,22 @@ impl<'a> Translator<'a> {
             attr::POSITION..=0x7c => {
                 let v4f = self.t.v4f;
                 let var = self.builtin(BuiltIn::FragCoord, v4f, false);
-                self.component(var, Kind::Float, StorageClass::Input, (addr - attr::POSITION) / 4)?
+                self.component(
+                    var,
+                    Kind::Float,
+                    StorageClass::Input,
+                    (addr - attr::POSITION) / 4,
+                )?
             }
             _ => self.attribute_read(addr, false)?,
         };
         let f = self.cast_f(v)?;
         let generic = (attr::GENERIC..attr::GENERIC_END).contains(&addr);
-        let perspective = generic && self.header.ps_input(((addr - attr::GENERIC) / 16) as usize, ((addr % 16) / 4) as usize) == Interpolation::Perspective;
+        let perspective = generic
+            && self.header.ps_input(
+                ((addr - attr::GENERIC) / 16) as usize,
+                ((addr % 16) / 4) as usize,
+            ) == Interpolation::Perspective;
         let mode = i.bits(54, 2);
         let f = if mode <= 1 && perspective {
             let v4f = self.t.v4f;
@@ -2537,7 +3684,9 @@ impl<'a> Translator<'a> {
     fn fragment_outputs(&mut self) -> R {
         let mut reg = 0u8;
         for target in 0..8 {
-            let comps: Vec<usize> = (0..4).filter(|&c| self.header.ps_output(target, c)).collect();
+            let comps: Vec<usize> = (0..4)
+                .filter(|&c| self.header.ps_output(target, c))
+                .collect();
             if comps.is_empty() {
                 continue;
             }
@@ -2550,13 +3699,21 @@ impl<'a> Translator<'a> {
             };
             let ptr = self.b.type_pointer(None, StorageClass::Output, vec);
             let var = self.global(ptr, StorageClass::Output);
-            self.b.decorate(var, Decoration::Location, [Operand::LiteralBit32(target as u32)]);
+            self.b.decorate(
+                var,
+                Decoration::Location,
+                [Operand::LiteralBit32(target as u32)],
+            );
             self.interface.push(var);
             let mut values = Vec::new();
             for c in 0..4 {
                 if let Some(color) = self.opts.debug_color {
                     let v = self.u(color[c].to_bits());
-                    values.push(if kind == Kind::Uint { v } else { self.b.bitcast(scalar, None, v)? });
+                    values.push(if kind == Kind::Uint {
+                        v
+                    } else {
+                        self.b.bitcast(scalar, None, v)?
+                    });
                     continue;
                 }
                 if let Some((pc, n)) = self.opts.debug_probe.filter(|_| target < 2) {
@@ -2564,7 +3721,9 @@ impl<'a> Translator<'a> {
                     let k = if signed { c } else { c + 3 * target };
                     let v = match (c, self.probe) {
                         (3, _) => self.u(1.0f32.to_bits()),
-                        (_, Some(vars)) if pc != u32::MAX => self.b.load(self.t.u32, None, vars[k], None, [])?,
+                        (_, Some(vars)) if pc != u32::MAX => {
+                            self.b.load(self.t.u32, None, vars[k], None, [])?
+                        }
                         _ => self.r(n.saturating_add(k as u8))?,
                     };
                     let v = if signed && target == 1 && c < 3 {
@@ -2574,7 +3733,11 @@ impl<'a> Translator<'a> {
                     } else {
                         v
                     };
-                    values.push(if kind == Kind::Uint { v } else { self.b.bitcast(scalar, None, v)? });
+                    values.push(if kind == Kind::Uint {
+                        v
+                    } else {
+                        self.b.bitcast(scalar, None, v)?
+                    });
                     continue;
                 }
                 let v = if comps.contains(&c) {
@@ -2586,9 +3749,19 @@ impl<'a> Translator<'a> {
                 } else {
                     self.u(0)
                 };
-                values.push(if kind == Kind::Uint { v } else { self.b.bitcast(scalar, None, v)? });
+                values.push(if kind == Kind::Uint {
+                    v
+                } else {
+                    self.b.bitcast(scalar, None, v)?
+                });
             }
-            if self.opts.alpha_test && target == 0 && kind == Kind::Float && comps.contains(&3) && self.opts.debug_color.is_none() && self.opts.debug_probe.is_none() {
+            if self.opts.alpha_test
+                && target == 0
+                && kind == Kind::Float
+                && comps.contains(&3)
+                && self.opts.debug_color.is_none()
+                && self.opts.debug_probe.is_none()
+            {
                 self.alpha_test(values[3])?;
             }
             let value = self.b.composite_construct(vec, None, values)?;
@@ -2598,7 +3771,11 @@ impl<'a> Translator<'a> {
             let f32_ = self.t.f32;
             let var = self.builtin(BuiltIn::FragDepth, f32_, true);
             let d = self.rf(reg + 1)?;
-            let d = if self.opts.depth_unorm16 { self.snap_unorm16(d)? } else { d };
+            let d = if self.opts.depth_unorm16 {
+                self.snap_unorm16(d)?
+            } else {
+                d
+            };
             self.b.store(var, d, None, [])?;
         }
         Ok(())
@@ -2618,9 +3795,11 @@ impl<'a> Translator<'a> {
     fn alpha_test(&mut self, alpha: Word) -> R {
         let (u32_, f32_, bool_) = (self.t.u32, self.t.f32, self.t.bool);
         let mask = self.b.spec_constant_bit32(u32_, 7);
-        self.b.decorate(mask, Decoration::SpecId, [Operand::LiteralBit32(0)]);
+        self.b
+            .decorate(mask, Decoration::SpecId, [Operand::LiteralBit32(0)]);
         let reference = self.b.spec_constant_bit32(f32_, 0);
-        self.b.decorate(reference, Decoration::SpecId, [Operand::LiteralBit32(1)]);
+        self.b
+            .decorate(reference, Decoration::SpecId, [Operand::LiteralBit32(1)]);
         let zero = self.u(0);
         let mut pass = None;
         for bit in [1, 2, 4] {
@@ -2648,10 +3827,132 @@ impl<'a> Translator<'a> {
         Ok(())
     }
 
+    /// Constant-buffer word a register was loaded from, following register
+    /// copies and constant loads. A bindless texture handle is such a word:
+    /// the descriptor is read from the constant bank, so only a statically
+    /// known location can become a descriptor binding.
     fn cbuf_source(&self, pc: u32, reg: u8) -> Option<(u32, u32)> {
-        const NO_RD: &[&str] = &["st", "stg", "sts", "stl", "sust", "red", "exit", "bra", "brx", "sync", "ssy", "pbk", "brk", "kil", "depbar", "bar", "membar", "nop", "isetp", "fsetp", "psetp", "hsetp2", "csetp", "dsetp"];
-        let (_, def) = self.insns.range(..pc).rev().take(512).find(|(_, i)| i.rd() == reg && !NO_RD.contains(&i.name()))?;
-        (def.name() == "mov" && def.form() == Form::Cbuf).then(|| def.cbuf())
+        self.cbuf_source_depth(pc, reg, 8)
+    }
+
+    fn cbuf_source_depth(&self, pc: u32, reg: u8, depth: u32) -> Option<(u32, u32)> {
+        if reg == RZ {
+            return None;
+        }
+        let (&def_pc, def) = self
+            .insns
+            .range(..pc)
+            .rev()
+            .take(512)
+            .find(|(_, i)| i.rd() == reg && !NO_DEST.contains(&i.name()))?;
+        match (def.name(), def.form()) {
+            ("mov", Form::Cbuf) => Some(def.cbuf()),
+            // `mov rd, rs` copies a word the shader already loaded.
+            ("mov", Form::Reg) if depth > 0 => self.cbuf_source_depth(def_pc, def.rb(), depth - 1),
+            // `ld` (LDC) reads the same file. An indexed load keeps a constant
+            // address only when the index is itself a constant in the program.
+            ("ld", _) if def.op.value == 0xef90000000000000 => {
+                let size = def.bits(48, 3);
+                if size != 4 && size != 5 {
+                    return None;
+                }
+                let offset = ((def.bits(20, 16) as u32) << 16) as i32 >> 16;
+                if offset < 0 {
+                    return None;
+                }
+                let index = if def.ra() == RZ {
+                    0
+                } else {
+                    self.constant_word(def_pc, def.ra(), depth)?
+                };
+                Some((def.bits(36, 5) as u32, (offset as u32).wrapping_add(index)))
+            }
+            _ => None,
+        }
+    }
+
+    /// Value of a register the program has already put there: an immediate or
+    /// a copy of one. Indexed constant loads use this to keep a static address.
+    fn constant_word(&self, pc: u32, reg: u8, depth: u32) -> Option<u32> {
+        if reg == RZ {
+            return Some(0);
+        }
+        if depth == 0 {
+            return None;
+        }
+        let (&def_pc, def) = self
+            .insns
+            .range(..pc)
+            .rev()
+            .take(512)
+            .find(|(_, i)| i.rd() == reg && !NO_DEST.contains(&i.name()))?;
+        match (def.name(), def.form()) {
+            ("mov32i", _) => Some(def.imm32()),
+            ("mov", Form::Reg) => self.constant_word(def_pc, def.rb(), depth - 1),
+            _ => None,
+        }
+    }
+
+    /// Constant-bank words the register form of `tex` reads its handle from.
+    /// NVN keeps the handle in the driver's bank, so it is a descriptor only
+    /// when the program names the word statically; the others are reported
+    /// with the sub-form that made them dynamic instead of guessing.
+    fn bindless_handle(&self, pc: u32, reg: u8) -> Result<BindlessHandle, &'static str> {
+        if reg == RZ {
+            return Err("tex (bindless)");
+        }
+        let (&def_pc, def) = self
+            .insns
+            .range(..pc)
+            .rev()
+            .take(512)
+            .find(|(_, i)| i.rd() == reg && !NO_DEST.contains(&i.name()))
+            .ok_or("tex (bindless)")?;
+        match def.name() {
+            // `lop rd, rs, c[2][off]` with OR and neither operand inverted:
+            // NVN's 128-slot layout keeps the texture index in one word of the
+            // texture bank and the sampler descriptor in another, and the
+            // program combines them into the packed handle.
+            "lop"
+                if def.form() == Form::Cbuf
+                    && def.bits(41, 2) == 1
+                    && !def.bit(39)
+                    && !def.bit(40) =>
+            {
+                let (slot, offset) = def.cbuf();
+                let other = if def.ra() == reg {
+                    self.cbuf_source(def_pc, reg)
+                } else {
+                    self.cbuf_source(def_pc, def.ra())
+                };
+                let Some((other_slot, other_offset)) = other else {
+                    return Err("tex (bindless dynamic handle)");
+                };
+                // Demand the documented 128-slot pair: one word from the
+                // texture table and one from the sampler table. NVN's other
+                // handle layout packs both halves in a single word, which the
+                // runtime resolves without a second word.
+                let Some((texture, sampler)) = separate_handle_layout(offset, other_offset) else {
+                    return Err("tex (bindless handle or)");
+                };
+                if slot != TEXTURE_BANK || other_slot != slot {
+                    return Err("tex (bindless handle or)");
+                }
+                Ok(BindlessHandle {
+                    slot,
+                    word: texture / 4,
+                    sampler: Some(sampler / 4),
+                })
+            }
+            _ => self
+                .cbuf_source(pc, reg)
+                .map(|(slot, offset)| BindlessHandle {
+                    slot,
+                    word: offset / 4,
+                    sampler: None,
+                })
+                .ok_or("tex (bindless)"),
+        }
     }
 
     fn storage_slot(&mut self, pc: u32, reg: u8) -> Option<u32> {
@@ -2667,12 +3968,21 @@ impl<'a> Translator<'a> {
     }
 
     fn storage_source(&self, pc: u32, reg: u8, depth: u32) -> Option<u32> {
-        const NO_RD: &[&str] = &["st", "stg", "sts", "stl", "sust", "red", "exit", "bra", "brx", "sync", "ssy", "pbk", "brk", "kil", "depbar", "bar", "membar", "nop", "isetp", "fsetp", "psetp", "hsetp2", "csetp"];
+        const NO_RD: &[&str] = &[
+            "st", "stg", "sts", "stl", "sust", "sured", "red", "exit", "bra", "brx", "sync", "ssy",
+            "pbk", "brk", "kil", "depbar", "bar", "membar", "nop", "isetp", "fsetp", "psetp",
+            "hsetp2", "csetp",
+        ];
         if reg == 255 {
             return None;
         }
         let window = storage_window(self.opts.stage);
-        let (&def_pc, def) = self.insns.range(..pc).rev().take(4096).find(|(_, i)| i.rd() == reg && !NO_RD.contains(&i.name()))?;
+        let (&def_pc, def) = self
+            .insns
+            .range(..pc)
+            .rev()
+            .take(4096)
+            .find(|(_, i)| i.rd() == reg && !NO_RD.contains(&i.name()))?;
         if def.form() == Form::Cbuf {
             let (slot, off) = def.cbuf();
             if slot == 0 && window.contains(&off) && off % 16 == 0 {
@@ -2686,34 +3996,53 @@ impl<'a> Translator<'a> {
         if def.form() == Form::Reg {
             sources.push(def.rb());
         }
-        sources.into_iter().find_map(|r| self.storage_source(def_pc, r, depth - 1))
+        sources
+            .into_iter()
+            .find_map(|r| self.storage_source(def_pc, r, depth - 1))
     }
 
     fn storage_var(&mut self, slot: u32) -> Word {
         if let Some(&v) = self.storage.get(&slot) {
             return v;
         }
-        let arr = self.b.type_runtime_array(self.t.u32);
-        self.b.decorate(arr, Decoration::ArrayStride, [Operand::LiteralBit32(4)]);
-        let st = self.b.type_struct([arr]);
-        self.b.decorate(st, Decoration::Block, []);
-        self.b.member_decorate(st, 0, Decoration::Offset, [Operand::LiteralBit32(0)]);
-        let ptr = self.b.type_pointer(None, StorageClass::StorageBuffer, st);
+        let ptr = match self.storage_type {
+            Some(ptr) => ptr,
+            None => {
+                let arr = self.b.type_runtime_array(self.t.u32);
+                self.b
+                    .decorate(arr, Decoration::ArrayStride, [Operand::LiteralBit32(4)]);
+                let st = self.b.type_struct([arr]);
+                self.b.decorate(st, Decoration::Block, []);
+                self.b
+                    .member_decorate(st, 0, Decoration::Offset, [Operand::LiteralBit32(0)]);
+                let ptr = self.b.type_pointer(None, StorageClass::StorageBuffer, st);
+                self.storage_type = Some(ptr);
+                ptr
+            }
+        };
         let var = self.global(ptr, StorageClass::StorageBuffer);
-        self.b.decorate(var, Decoration::DescriptorSet, [Operand::LiteralBit32(0)]);
-        self.b.decorate(var, Decoration::Binding, [Operand::LiteralBit32(self.opts.storage_binding + slot)]);
+        self.b
+            .decorate(var, Decoration::DescriptorSet, [Operand::LiteralBit32(0)]);
+        self.b.decorate(
+            var,
+            Decoration::Binding,
+            [Operand::LiteralBit32(self.opts.storage_binding + slot)],
+        );
         self.interface_storage(var);
         self.storage.insert(slot, var);
         var
     }
 
-    fn interface_storage(&mut self, _var: Word) {
-    }
+    fn interface_storage(&mut self, _var: Word) {}
 
     fn global_memory(&mut self, pc: u32, i: &Insn) -> R {
         let u = self.t.u32;
         let Some(slot) = self.storage_slot(pc, i.ra()) else {
-            self.unsupported.push(if i.name() == "ldg" { "ldg (unknown buffer)" } else { "stg (unknown buffer)" });
+            self.unsupported.push(if i.name() == "ldg" {
+                "ldg (unknown buffer)"
+            } else {
+                "stg (unknown buffer)"
+            });
             return Ok(());
         };
         let var = self.storage_var(slot);
@@ -2754,7 +4083,12 @@ impl<'a> Translator<'a> {
     fn enable_subgroups(&mut self) {
         if !self.subgroups {
             self.subgroups = true;
-            for c in [Capability::GroupNonUniform, Capability::GroupNonUniformVote, Capability::GroupNonUniformBallot, Capability::GroupNonUniformShuffle] {
+            for c in [
+                Capability::GroupNonUniform,
+                Capability::GroupNonUniformVote,
+                Capability::GroupNonUniformBallot,
+                Capability::GroupNonUniformShuffle,
+            ] {
                 self.b.capability(c);
             }
         }
@@ -2768,7 +4102,10 @@ impl<'a> Translator<'a> {
         let local = self.b.load(u, None, index_var, None, [])?;
         let wg = self.compute_id(BuiltIn::WorkgroupId)?;
         let count = self.compute_id(BuiltIn::NumWorkgroups)?;
-        let (wx, wy) = (self.b.composite_extract(u, None, wg, [0])?, self.b.composite_extract(u, None, wg, [1])?);
+        let (wx, wy) = (
+            self.b.composite_extract(u, None, wg, [0])?,
+            self.b.composite_extract(u, None, wg, [1])?,
+        );
         let nx = self.b.composite_extract(u, None, count, [0])?;
         let row = self.b.i_mul(u, None, wy, nx)?;
         let group = self.b.i_add(u, None, row, wx)?;
@@ -2780,7 +4117,11 @@ impl<'a> Translator<'a> {
         let ptr_ty = self.b.type_pointer(None, StorageClass::StorageBuffer, u);
         let zero = self.u(0);
         for k in 0..4u32 {
-            let v = if k < 3 { self.r(n.saturating_add(k as u8))? } else { self.u(1.0f32.to_bits()) };
+            let v = if k < 3 {
+                self.r(n.saturating_add(k as u8))?
+            } else {
+                self.u(1.0f32.to_bits())
+            };
             let kc = self.u(k);
             let idx = self.b.i_add(u, None, entry, kc)?;
             let ptr = self.b.access_chain(ptr_ty, None, var, [zero, idx])?;
@@ -2797,6 +4138,73 @@ impl<'a> Translator<'a> {
         let ty = self.t.v3u;
         let var = self.builtin(which, ty, false);
         Ok(self.b.load(ty, None, var, None, [])?)
+    }
+
+    /// Reads a special register addressed by `s2r`/`cs2r`. Returns `None`
+    /// when the value has no shader-visible meaning here (counters, ids of
+    /// other warps, and so on).
+    fn system_value(&mut self, code: u32) -> R<Option<Word>> {
+        let u = self.t.u32;
+        Ok(Some(match code {
+            0xff => self.u(0),
+            0x00 => self.lane_id()?,
+            0x12 => self.u(1.0f32.to_bits()),
+            0x13 => {
+                if self.opts.stage == Stage::Fragment {
+                    let var = self.builtin(BuiltIn::HelperInvocation, self.t.bool, false);
+                    let helper = self.b.load(self.t.bool, None, var, None, [])?;
+                    self.b2u(helper, 1, 0)?
+                } else {
+                    self.u(0)
+                }
+            }
+            0x20 => {
+                let id = self.compute_id(BuiltIn::LocalInvocationId)?;
+                let (x, y, z) = (
+                    self.b.composite_extract(u, None, id, [0])?,
+                    self.b.composite_extract(u, None, id, [1])?,
+                    self.b.composite_extract(u, None, id, [2])?,
+                );
+                let (s16, s26) = (self.u(16), self.u(26));
+                let y = self.b.shift_left_logical(u, None, y, s16)?;
+                let z = self.b.shift_left_logical(u, None, z, s26)?;
+                let xy = self.b.bitwise_or(u, None, x, y)?;
+                self.b.bitwise_or(u, None, xy, z)?
+            }
+            k @ (0x21..=0x23 | 0x25..=0x27) => {
+                let which = if k < 0x24 {
+                    BuiltIn::LocalInvocationId
+                } else {
+                    BuiltIn::WorkgroupId
+                };
+                let id = self.compute_id(which)?;
+                let c = if k < 0x24 { k - 0x21 } else { k - 0x25 };
+                self.b.composite_extract(u, None, id, [c])?
+            }
+            0x38..=0x3c => {
+                let lane = self.lane_id()?;
+                let one = self.u(1);
+                let bit = self.b.shift_left_logical(u, None, one, lane)?;
+                let below = self.b.i_sub(u, None, bit, one)?;
+                match code {
+                    0x38 => bit,
+                    0x39 => below,
+                    0x3a => self.b.bitwise_or(u, None, below, bit)?,
+                    0x3b => {
+                        let le = self.b.bitwise_or(u, None, below, bit)?;
+                        self.b.not(u, None, le)?
+                    }
+                    _ => self.b.not(u, None, below)?,
+                }
+            }
+            0x1e | 0x1f => {
+                // W scale factors (per-view W scaling, single-pass stereo).
+                // The runtime renders one view and has no view-scale state to
+                // read, so the identity is the only scale it can model.
+                self.u(1.0f32.to_bits())
+            }
+            _ => return Ok(None),
+        }))
     }
 
     fn subgroup_invocation(&mut self) -> R<Word> {
@@ -2818,40 +4226,68 @@ impl<'a> Translator<'a> {
 
     fn ballot32(&mut self, p: Word) -> R<Word> {
         let subgroup = self.u(3);
-        let ballot = self.b.group_non_uniform_ballot(self.t.v4u, None, subgroup, p)?;
+        let ballot = self
+            .b
+            .group_non_uniform_ballot(self.t.v4u, None, subgroup, p)?;
         let id = self.subgroup_invocation()?;
         let five = self.u(5);
         let word = self.b.shift_right_logical(self.t.u32, None, id, five)?;
         let word = self.ext(self.t.u32, glsl::UMIN, &[word, five])?;
         let three = self.u(3);
         let word = self.ext(self.t.u32, glsl::UMIN, &[word, three])?;
-        Ok(self.b.vector_extract_dynamic(self.t.u32, None, ballot, word)?)
+        Ok(self
+            .b
+            .vector_extract_dynamic(self.t.u32, None, ballot, word)?)
+    }
+
+    fn active_ballot(&mut self) -> R<Word> {
+        let all = self.btrue();
+        self.ballot32(all)
     }
 
     fn vote(&mut self, i: &Insn) -> R {
         if i.op.value != 0x50d8000000000000 {
+            // `vote.vtg` (0x50e0) is a different instruction: it names one of
+            // `r`/`a`/`ra` and a 24-bit operand instead of a ballot, has no
+            // predicate operand and writes no register, and every dumped form
+            // (`ra`, 0x321111, in both stages) sits two instructions before an
+            // `exit` whose condition code is the stop mask. Without the
+            // thread-group state it votes on there is nothing to compute.
             self.unsupported.push("vote (vtg)");
             return Ok(());
         }
         let (p, n) = i.pred(39, 42);
+        let kind = i.bits(48, 2);
+        if kind > 2 {
+            // Types 0..2 are the documented ballots; anything else is left
+            // whole rather than guessed.
+            self.unsupported.push("vote (type 3)");
+            return Ok(());
+        }
         let pv = self.p(p, n)?;
         let ballot = self.ballot32(pv)?;
         let zero = self.u(0);
-        let result = match i.bits(48, 2) {
+        // `vote.all` is the ballot of the active lanes, `vote.any` any bit set
+        // and `vote.eq` (Kepler's `vote.uni`) every lane equal, so the ballot is
+        // either all of the active lanes or none of them.
+        let result = match kind {
             0 => {
-                let active = self.btrue();
-                let active = self.ballot32(active)?;
+                let active = self.active_ballot()?;
                 self.b.i_equal(self.t.bool, None, ballot, active)?
             }
             1 => self.b.i_not_equal(self.t.bool, None, ballot, zero)?,
             _ => {
-                let active = self.btrue();
-                let active = self.ballot32(active)?;
+                let active = self.active_ballot()?;
                 let all = self.b.i_equal(self.t.bool, None, ballot, active)?;
                 let none = self.b.i_equal(self.t.bool, None, ballot, zero)?;
                 self.b.logical_or(self.t.bool, None, all, none)?
             }
         };
+        // The register takes the ballot and the condition goes to the predicate
+        // in `pred45`: the operand order is the one envydis prints (`vote.all
+        // R0, P4, P3` is the destination predicate first, then the source),
+        // matching gf100's `vote.all DST, PDST2, PSRC1`. Only the source
+        // predicate carries a `not` bit.
         self.set(i.rd(), ballot)?;
         self.setp(i.bits(45, 3) as u8, result)
     }
@@ -2859,7 +4295,12 @@ impl<'a> Translator<'a> {
     fn shfl(&mut self, i: &Insn) -> R {
         let u = self.t.u32;
         let value = self.r(i.ra())?;
-        if i.bits(30, 2) == 3 && i.bit(28) && i.bit(29) && matches!(i.bits(20, 5), 1..=3) && i.bits(34, 13) & 0x1f1f == 0x1c03 {
+        if i.bits(30, 2) == 3
+            && i.bit(28)
+            && i.bit(29)
+            && matches!(i.bits(20, 5), 1..=3)
+            && i.bits(34, 13) & 0x1f1f == 0x1c03
+        {
             let xor = i.bits(20, 5) as u32;
             let t = self.btrue();
             self.setp(i.bits(48, 3) as u8, t)?;
@@ -2870,7 +4311,11 @@ impl<'a> Translator<'a> {
                 }
                 let f = self.cast_f(value)?;
                 let ft = self.t.f32;
-                let d = if xor == 1 { self.b.d_pdx_fine(ft, None, f)? } else { self.b.d_pdy_fine(ft, None, f)? };
+                let d = if xor == 1 {
+                    self.b.d_pdx_fine(ft, None, f)?
+                } else {
+                    self.b.d_pdy_fine(ft, None, f)?
+                };
                 let lane = self.subgroup_invocation()?;
                 let bit = self.u(xor);
                 let side = self.b.bitwise_and(u, None, lane, bit)?;
@@ -2888,11 +4333,21 @@ impl<'a> Translator<'a> {
             }
             let subgroup = self.u(3);
             let direction = self.u(xor - 1);
-            let v = self.b.group_non_uniform_quad_swap(u, None, subgroup, value, direction)?;
+            let v = self
+                .b
+                .group_non_uniform_quad_swap(u, None, subgroup, value, direction)?;
             return self.set(i.rd(), v);
         }
-        let b = if i.bit(28) { self.u(i.bits(20, 5) as u32) } else { self.r(i.rb())? };
-        let c = if i.bit(29) { self.u(i.bits(34, 13) as u32) } else { self.r(i.rc())? };
+        let b = if i.bit(28) {
+            self.u(i.bits(20, 5) as u32)
+        } else {
+            self.r(i.rb())?
+        };
+        let c = if i.bit(29) {
+            self.u(i.bits(34, 13) as u32)
+        } else {
+            self.r(i.rc())?
+        };
         let lane = self.lane_id()?;
         let m31 = self.u(31);
         let clamp = self.b.bitwise_and(u, None, c, m31)?;
@@ -2936,7 +4391,9 @@ impl<'a> Translator<'a> {
         let group = self.b.bitwise_and(u, None, id, n31)?;
         let src = self.b.bitwise_or(u, None, group, j)?;
         let subgroup = self.u(3);
-        let v = self.b.group_non_uniform_shuffle(u, None, subgroup, value, src)?;
+        let v = self
+            .b
+            .group_non_uniform_shuffle(u, None, subgroup, value, src)?;
         self.setp(i.bits(48, 3) as u8, valid)?;
         self.set(i.rd(), v)
     }
@@ -2983,7 +4440,9 @@ impl<'a> Translator<'a> {
             5 => self.b.atomic_and(u, None, ptr, scope, semantics, data)?,
             6 => self.b.atomic_or(u, None, ptr, scope, semantics, data)?,
             7 => self.b.atomic_xor(u, None, ptr, scope, semantics, data)?,
-            8 => self.b.atomic_exchange(u, None, ptr, scope, semantics, data)?,
+            8 => self
+                .b
+                .atomic_exchange(u, None, ptr, scope, semantics, data)?,
             _ => {
                 self.unsupported.push("red/atom (inc/dec)");
                 return Ok(());
@@ -2996,12 +4455,66 @@ impl<'a> Translator<'a> {
         Ok(())
     }
 
+    /// `atoms`: atomic reduction on shared memory. The 32-bit integer forms map
+    /// straight onto SPIR-V's workgroup atomics; the 64-bit ones, the
+    /// increment/decrement pair (a compare-and-swap loop on hardware) and the
+    /// compare-and-swap/`cast` encodings keep their labels.
+    fn atoms(&mut self, i: &Insn) -> R {
+        if i.op.value != 0xec00000000000000 {
+            self.unsupported.push(match i.bits(53, 2) {
+                0 => "atoms (cast)",
+                1 => "atoms (cast spin)",
+                _ => "atoms (cas)",
+            });
+            return Ok(());
+        }
+        if i.bits(28, 2) > 1 {
+            self.unsupported.push("atoms (64-bit)");
+            return Ok(());
+        }
+        let op = i.bits(52, 4);
+        if op > 8 || op == 3 || op == 4 {
+            self.unsupported.push("atoms (inc/dec)");
+            return Ok(());
+        }
+        let Some(ptr) = self.shared_atom_pointer(i)? else {
+            self.unsupported.push("atoms (no shared memory)");
+            return Ok(());
+        };
+        let data = self.r(i.rb())?;
+        let u = self.t.u32;
+        let scope = self.u(2);
+        let semantics = self.u(0);
+        let signed = i.bits(28, 2) == 1;
+        let old = match op {
+            0 => self.b.atomic_i_add(u, None, ptr, scope, semantics, data)?,
+            1 if signed => self.b.atomic_s_min(u, None, ptr, scope, semantics, data)?,
+            1 => self.b.atomic_u_min(u, None, ptr, scope, semantics, data)?,
+            2 if signed => self.b.atomic_s_max(u, None, ptr, scope, semantics, data)?,
+            2 => self.b.atomic_u_max(u, None, ptr, scope, semantics, data)?,
+            5 => self.b.atomic_and(u, None, ptr, scope, semantics, data)?,
+            6 => self.b.atomic_or(u, None, ptr, scope, semantics, data)?,
+            7 => self.b.atomic_xor(u, None, ptr, scope, semantics, data)?,
+            _ => self
+                .b
+                .atomic_exchange(u, None, ptr, scope, semantics, data)?,
+        };
+        self.set(i.rd(), old)
+    }
+
     fn brx(&mut self, pc: u32, i: &Insn) -> R {
+        // A bounded dispatch is the only lowering of `brx` that keeps the branch inside code the translator already
+        // scanned: the scan resolves the jump table (an `ldc` from the constant bank, sliced by the program size) to
+        // a finite target list, and each target becomes an ordinary block. Without that list the branch could leave
+        // the program, so it is reported with the reason instead of guessed.
         let Some(targets) = self.brx.get(&pc).cloned() else {
-            self.unsupported.push("brx");
+            self.unsupported
+                .push("brx (indirect target has no jump table: no readable constant-bank ldc)");
             return Ok(());
         };
         if self.pc_var.is_none() {
+            self.unsupported
+                .push("brx (no dispatcher to take a computed block)");
             return Ok(());
         }
         let u = self.t.u32;
@@ -3038,7 +4551,8 @@ impl<'a> Translator<'a> {
             self.unsupported.push("txq (query type)");
             return Ok(());
         }
-        let (image_var, _, image_ty, _) = self.texture(None, handle, TexDim::D2, false, false);
+        let (image_var, _, image_ty, _) =
+            self.texture(None, handle, None, TexDim::D2, false, false);
         let img = self.b.load(image_ty, None, image_var, None, [])?;
         let lod = self.r(i.ra())?;
         let lod_i = self.cast_i(lod)?;
@@ -3092,7 +4606,8 @@ impl<'a> Translator<'a> {
         }
         let zero = self.u(0);
         let (computed, accessed) = if self.opts.stage == Stage::Fragment {
-            let (image_var, sampler_var, image_ty, sampled_ty) = self.texture(slot, handle, dim, array, false);
+            let (image_var, sampler_var, image_ty, sampled_ty) =
+                self.texture(slot, handle, None, dim, array, false);
             let img = self.b.load(image_ty, None, image_var, None, [])?;
             let sampler_ty = self.b.type_sampler();
             let smp = self.b.load(sampler_ty, None, sampler_var, None, [])?;
@@ -3108,7 +4623,9 @@ impl<'a> Translator<'a> {
             let scale = self.f(256.0);
             let mut fixed = [zero; 2];
             for (k, slot) in fixed.iter_mut().enumerate() {
-                let v = self.b.composite_extract(self.t.f32, None, lod, [1 - k as u32])?;
+                let v = self
+                    .b
+                    .composite_extract(self.t.f32, None, lod, [1 - k as u32])?;
                 let v = self.b.f_mul(self.t.f32, None, v, scale)?;
                 let v = self.b.convert_f_to_s(self.t.i32, None, v)?;
                 *slot = self.cast_u(v)?;
@@ -3127,29 +4644,64 @@ impl<'a> Translator<'a> {
         Ok(())
     }
 
-    fn texture(&mut self, slot: Option<u32>, handle: u32, dim: TexDim, array: bool, shadow: bool) -> (Word, Word, Word, Word) {
-        let key = TextureUse { slot, handle, dim, array, shadow, binding: 0 };
+    fn texture(
+        &mut self,
+        slot: Option<u32>,
+        handle: u32,
+        sampler: Option<u32>,
+        dim: TexDim,
+        array: bool,
+        shadow: bool,
+    ) -> (Word, Word, Word, Word) {
+        let key = TextureUse {
+            slot,
+            handle,
+            sampler,
+            dim,
+            array,
+            shadow,
+            binding: 0,
+        };
         let image_ty = self.image_type(dim, array, shadow);
         let sampled_ty = self.b.type_sampled_image(image_ty);
-        if let Some(&(_, var)) = self.textures.iter().find(|(u, _)| u.slot == slot && u.handle == handle && u.dim == dim && u.array == array && u.shadow == shadow) {
+        if let Some(&(_, var)) = self.textures.iter().find(|(u, _)| {
+            u.slot == slot
+                && u.handle == handle
+                && u.sampler == sampler
+                && u.dim == dim
+                && u.array == array
+                && u.shadow == shadow
+        }) {
             return (var, var + 1, image_ty, sampled_ty);
         }
         let binding = self.opts.texture_binding + 2 * self.textures.len() as u32;
-        let image_ptr = self.b.type_pointer(None, StorageClass::UniformConstant, image_ty);
+        let image_ptr = self
+            .b
+            .type_pointer(None, StorageClass::UniformConstant, image_ty);
         let sampler_ty = self.b.type_sampler();
-        let sampler_ptr = self.b.type_pointer(None, StorageClass::UniformConstant, sampler_ty);
+        let sampler_ptr = self
+            .b
+            .type_pointer(None, StorageClass::UniformConstant, sampler_ty);
         let image = self.global(image_ptr, StorageClass::UniformConstant);
         let sampler = self.global(sampler_ptr, StorageClass::UniformConstant);
         debug_assert_eq!(sampler, image + 1);
         for (var, b) in [(image, binding), (sampler, binding + 1)] {
-            self.b.decorate(var, Decoration::DescriptorSet, [Operand::LiteralBit32(0)]);
-            self.b.decorate(var, Decoration::Binding, [Operand::LiteralBit32(b)]);
+            self.b
+                .decorate(var, Decoration::DescriptorSet, [Operand::LiteralBit32(0)]);
+            self.b
+                .decorate(var, Decoration::Binding, [Operand::LiteralBit32(b)]);
         }
         self.textures.push((TextureUse { binding, ..key }, image));
         (image, sampler, image_ty, sampled_ty)
     }
 
-    fn storage_image(&mut self, slot: Option<u32>, handle: u32, dim: TexDim, array: bool) -> (Word, Word) {
+    fn storage_image(
+        &mut self,
+        slot: Option<u32>,
+        handle: u32,
+        dim: TexDim,
+        array: bool,
+    ) -> (Word, Word) {
         let d = match dim {
             TexDim::D1 => Dim::Dim1D,
             TexDim::D2 => Dim::Dim2D,
@@ -3158,28 +4710,57 @@ impl<'a> Translator<'a> {
         };
         if !self.storage_images {
             self.storage_images = true;
-            self.b.capability(Capability::StorageImageWriteWithoutFormat);
+            self.b
+                .capability(Capability::StorageImageWriteWithoutFormat);
             if dim == TexDim::D1 {
                 self.b.capability(Capability::Image1D);
             }
         }
-        let image_ty = self.b.type_image(self.t.f32, d, 0, array as u32, 0, 2, ImageFormat::Unknown, None);
-        if let Some(&(_, var)) = self.images.iter().find(|(u, _)| u.slot == slot && u.handle == handle && u.dim == dim && u.array == array) {
+        let image_ty = self.b.type_image(
+            self.t.f32,
+            d,
+            0,
+            array as u32,
+            0,
+            2,
+            ImageFormat::Unknown,
+            None,
+        );
+        if let Some(&(_, var)) = self
+            .images
+            .iter()
+            .find(|(u, _)| u.slot == slot && u.handle == handle && u.dim == dim && u.array == array)
+        {
             return (var, image_ty);
         }
         let binding = self.opts.image_binding + self.images.len() as u32;
-        let ptr = self.b.type_pointer(None, StorageClass::UniformConstant, image_ty);
+        let ptr = self
+            .b
+            .type_pointer(None, StorageClass::UniformConstant, image_ty);
         let var = self.global(ptr, StorageClass::UniformConstant);
-        self.b.decorate(var, Decoration::DescriptorSet, [Operand::LiteralBit32(0)]);
-        self.b.decorate(var, Decoration::Binding, [Operand::LiteralBit32(binding)]);
+        self.b
+            .decorate(var, Decoration::DescriptorSet, [Operand::LiteralBit32(0)]);
+        self.b
+            .decorate(var, Decoration::Binding, [Operand::LiteralBit32(binding)]);
         self.b.decorate(var, Decoration::NonReadable, []);
-        self.images.push((ImageUse { slot, handle, dim, array, binding }, var));
+        self.images.push((
+            ImageUse {
+                slot,
+                handle,
+                dim,
+                array,
+                binding,
+            },
+            var,
+        ));
         (var, image_ty)
     }
 
     fn sust(&mut self, pc: u32, i: &Insn) -> R {
-        if i.bit(52) {
-            self.unsupported.push("sust (raw)");
+        // Bit 52 selects the `.D` (surface descriptor) form over `.P`, which
+        // addresses memory directly and carries no descriptor to resolve.
+        if !i.bit(52) {
+            self.unsupported.push("sust (physical address)");
             return Ok(());
         }
         let (slot, handle) = if i.bit(51) {
@@ -3248,7 +4829,16 @@ impl<'a> Translator<'a> {
             self.sampled_1d = true;
             self.b.capability(Capability::Sampled1D);
         }
-        self.b.type_image(self.t.f32, d, shadow as u32, array as u32, 0, 1, ImageFormat::Unknown, None)
+        self.b.type_image(
+            self.t.f32,
+            d,
+            shadow as u32,
+            array as u32,
+            0,
+            1,
+            ImageFormat::Unknown,
+            None,
+        )
     }
 
     fn coord_count(dim: TexDim) -> u32 {
@@ -3260,14 +4850,29 @@ impl<'a> Translator<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn sample(&mut self, handle: u32, dim: TexDim, array: bool, shadow: bool, coords: Vec<Word>, layer: Option<Word>, lod: Lod, dref: Option<Word>, offset: Option<Word>) -> R<[Word; 4]> {
-        let (image_var, sampler_var, image_ty, sampled_ty) = self.texture(None, handle, dim, array, shadow);
+    fn sample(
+        &mut self,
+        slot: Option<u32>,
+        handle: u32,
+        sampler: Option<u32>,
+        dim: TexDim,
+        array: bool,
+        shadow: bool,
+        coords: Vec<Word>,
+        layer: Option<Word>,
+        lod: Lod,
+        dref: Option<Word>,
+        offset: Option<TexelOffset>,
+        grad: Option<(Vec<Word>, Vec<Word>)>,
+    ) -> R<[Word; 4]> {
+        let (image_var, sampler_var, image_ty, sampled_ty) =
+            self.texture(slot, handle, sampler, dim, array, shadow);
         let img = self.b.load(image_ty, None, image_var, None, [])?;
         let sampler_ty = self.b.type_sampler();
         let smp = self.b.load(sampler_ty, None, sampler_var, None, [])?;
         let image = self.b.sampled_image(sampled_ty, None, img, smp)?;
         let mut comps = coords;
-        if let Some(packed) = offset
+        if let Some(off) = offset
             && dim != TexDim::Cube
         {
             let n = Self::coord_count(dim);
@@ -3279,15 +4884,26 @@ impl<'a> Translator<'a> {
                 _ => self.u(0),
             };
             let dims = n + array as u32;
-            let size_ty = if dims == 1 { self.t.i32 } else { self.b.type_vector(self.t.i32, dims) };
+            let size_ty = if dims == 1 {
+                self.t.i32
+            } else {
+                self.b.type_vector(self.t.i32, dims)
+            };
             let size = self.b.image_query_size_lod(size_ty, None, img, level)?;
-            let pi = self.cast_i(packed)?;
+            let pi = self.cast_i(off.packed)?;
             for (k, c) in comps.iter_mut().enumerate().take(n as usize) {
-                let off = self.u(4 * k as u32);
+                let pos = self.u(off.shift + 4 * k as u32);
                 let four = self.u(4);
-                let o = self.b.bit_field_s_extract(self.t.i32, None, pi, off, four)?;
+                let o = self
+                    .b
+                    .bit_field_s_extract(self.t.i32, None, pi, pos, four)?;
                 let of = self.b.convert_s_to_f(self.t.f32, None, o)?;
-                let s = if dims == 1 { size } else { self.b.composite_extract(self.t.i32, None, size, [k as u32])? };
+                let s = if dims == 1 {
+                    size
+                } else {
+                    self.b
+                        .composite_extract(self.t.i32, None, size, [k as u32])?
+                };
                 let sf = self.b.convert_s_to_f(self.t.f32, None, s)?;
                 let d = self.b.f_div(self.t.f32, None, of, sf)?;
                 *c = self.b.f_add(self.t.f32, None, *c, d)?;
@@ -3305,6 +4921,40 @@ impl<'a> Translator<'a> {
             let vty = self.b.type_vector(self.t.f32, comps.len() as u32);
             self.b.composite_construct(vty, None, comps)?
         };
+        if let Some((dx, dy)) = grad {
+            let gradient = |t: &mut Self, v: Vec<Word>| -> R<Word> {
+                if v.len() == 1 {
+                    Ok(v[0])
+                } else {
+                    let ty = t.b.type_vector(t.t.f32, v.len() as u32);
+                    Ok(t.b.composite_construct(ty, None, v)?)
+                }
+            };
+            let dx = gradient(self, dx)?;
+            let dy = gradient(self, dy)?;
+            let v = if let Some(d) = dref {
+                let df = self.cast_f(d)?;
+                self.b.image_sample_dref_explicit_lod(
+                    self.t.f32,
+                    None,
+                    image,
+                    coord,
+                    df,
+                    ImageOperands::GRAD,
+                    [Operand::IdRef(dx), Operand::IdRef(dy)],
+                )?
+            } else {
+                self.b.image_sample_explicit_lod(
+                    self.t.v4f,
+                    None,
+                    image,
+                    coord,
+                    ImageOperands::GRAD,
+                    [Operand::IdRef(dx), Operand::IdRef(dy)],
+                )?
+            };
+            return self.sampled_words(v, dref.is_some());
+        }
         let implicit_ok = self.opts.stage == Stage::Fragment;
         let (ops, extra): (Option<ImageOperands>, Vec<Operand>) = match lod {
             Lod::Zero => {
@@ -3312,6 +4962,9 @@ impl<'a> Translator<'a> {
                 (Some(ImageOperands::LOD), vec![Operand::IdRef(z)])
             }
             Lod::Level(l) => (Some(ImageOperands::LOD), vec![Operand::IdRef(l)]),
+            // A depth comparison cannot carry a bias in SPIR-V, so the level
+            // stays implicit instead of dropping to zero.
+            Lod::Bias(_) if dref.is_some() => (None, vec![]),
             Lod::Bias(b) if implicit_ok => (Some(ImageOperands::BIAS), vec![Operand::IdRef(b)]),
             Lod::Bias(_) | Lod::Implicit if !implicit_ok => {
                 let z = self.f(0.0);
@@ -3320,30 +4973,45 @@ impl<'a> Translator<'a> {
             _ => (None, vec![]),
         };
         let explicit = ops == Some(ImageOperands::LOD);
-        let result: [Word; 4] = if let Some(d) = dref {
+        let v = if let Some(d) = dref {
             let df = self.cast_f(d)?;
-            let v = if explicit {
-                self.b.image_sample_dref_explicit_lod(self.t.f32, None, image, coord, df, ops.unwrap(), extra)?
+            if explicit {
+                self.b.image_sample_dref_explicit_lod(
+                    self.t.f32,
+                    None,
+                    image,
+                    coord,
+                    df,
+                    ops.unwrap(),
+                    extra,
+                )?
             } else {
-                self.b.image_sample_dref_implicit_lod(self.t.f32, None, image, coord, df, ops, extra)?
-            };
+                self.b.image_sample_dref_implicit_lod(
+                    self.t.f32, None, image, coord, df, ops, extra,
+                )?
+            }
+        } else if explicit {
+            self.b
+                .image_sample_explicit_lod(self.t.v4f, None, image, coord, ops.unwrap(), extra)?
+        } else {
+            self.b
+                .image_sample_implicit_lod(self.t.v4f, None, image, coord, ops, extra)?
+        };
+        self.sampled_words(v, dref.is_some())
+    }
+
+    fn sampled_words(&mut self, v: Word, dref: bool) -> R<[Word; 4]> {
+        if dref {
             let u = self.cast_u(v)?;
             let one = self.u(1.0f32.to_bits());
-            [u, u, u, one]
-        } else {
-            let v = if explicit {
-                self.b.image_sample_explicit_lod(self.t.v4f, None, image, coord, ops.unwrap(), extra)?
-            } else {
-                self.b.image_sample_implicit_lod(self.t.v4f, None, image, coord, ops, extra)?
-            };
-            let mut out = [0; 4];
-            for (c, o) in out.iter_mut().enumerate() {
-                let f = self.b.composite_extract(self.t.f32, None, v, [c as u32])?;
-                *o = self.cast_u(f)?;
-            }
-            out
-        };
-        Ok(result)
+            return Ok([u, u, u, one]);
+        }
+        let mut out = [0; 4];
+        for (c, o) in out.iter_mut().enumerate() {
+            let f = self.b.composite_extract(self.t.f32, None, v, [c as u32])?;
+            *o = self.cast_u(f)?;
+        }
+        Ok(out)
     }
 
     fn nvidia_rounding(&mut self, dim: TexDim, comps: &mut [Word]) -> R {
@@ -3358,8 +5026,20 @@ impl<'a> Translator<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn gather(&mut self, handle: u32, dim: TexDim, array: bool, coords: Vec<Word>, layer: Option<Word>, component: u32, dref: Option<Word>, offset: Option<Word>) -> R<[Word; 4]> {
-        let (image_var, sampler_var, image_ty, sampled_ty) = self.texture(None, handle, dim, array, dref.is_some());
+    fn gather(
+        &mut self,
+        slot: Option<u32>,
+        handle: u32,
+        dim: TexDim,
+        array: bool,
+        coords: Vec<Word>,
+        layer: Option<Word>,
+        component: u32,
+        dref: Option<Word>,
+        offset: Option<Word>,
+    ) -> R<[Word; 4]> {
+        let (image_var, sampler_var, image_ty, sampled_ty) =
+            self.texture(slot, handle, None, dim, array, dref.is_some());
         let img = self.b.load(image_ty, None, image_var, None, [])?;
         let sampler_ty = self.b.type_sampler();
         let smp = self.b.load(sampler_ty, None, sampler_var, None, [])?;
@@ -3399,11 +5079,13 @@ impl<'a> Translator<'a> {
         let v = match dref {
             Some(d) => {
                 let df = self.cast_f(d)?;
-                self.b.image_dref_gather(self.t.v4f, None, image, coord, df, ops, extra)?
+                self.b
+                    .image_dref_gather(self.t.v4f, None, image, coord, df, ops, extra)?
             }
             None => {
                 let c = self.u(component);
-                self.b.image_gather(self.t.v4f, None, image, coord, c, ops, extra)?
+                self.b
+                    .image_gather(self.t.v4f, None, image, coord, c, ops, extra)?
             }
         };
         let mut out = [0; 4];
@@ -3414,16 +5096,39 @@ impl<'a> Translator<'a> {
         Ok(out)
     }
 
-    fn tld4(&mut self, i: &Insn) -> R {
-        if i.op.value != 0xc838000000000000 {
-            self.unsupported.push("tld4 (bindless)");
-            return Ok(());
-        }
-        if i.bits(54, 2) == 2 {
+    fn tld4(&mut self, pc: u32, i: &Insn) -> R {
+        // `tld4` has two encodings. The immediate form (`0xc838`) carries the
+        // 13-bit texture index in the instruction; the register form
+        // (`0xdef8`, Maxwell's bindless form) carries it in `rb`, loaded from a
+        // constant-buffer word. The bindless form moves the destination
+        // component to bits 38-39 and the offset flag to bit 36.
+        let bindless = i.op.value == 0xdef8000000000000;
+        let next = |r: u8| if r == RZ { RZ } else { r + 1 };
+        let (slot, handle, mut reg_b) = if bindless {
+            let source = if i.rb() == RZ {
+                None
+            } else {
+                self.cbuf_source(pc, i.rb())
+            };
+            match source {
+                Some((slot, offset)) => (Some(slot), offset / 4, next(i.rb())),
+                None => {
+                    self.unsupported.push("tld4 (bindless)");
+                    return Ok(());
+                }
+            }
+        } else {
+            (None, i.bits(36, 13) as u32, i.rb())
+        };
+        let offset_mode = if bindless {
+            i.bits(36, 2)
+        } else {
+            i.bits(54, 2)
+        };
+        if offset_mode == 2 {
             self.unsupported.push("tld4 (per-texel offsets)");
             return Ok(());
         }
-        let handle = i.bits(36, 13) as u32;
         let dim = match i.bits(29, 2) {
             0 => TexDim::D1,
             1 => TexDim::D2,
@@ -3445,7 +5150,6 @@ impl<'a> Translator<'a> {
             let v = take_a(self)?;
             coords.push(self.cast_f(v)?);
         }
-        let mut reg_b = i.rb();
         let mut take_b = |t: &mut Self| -> R<Word> {
             let r = reg_b;
             if reg_b != RZ {
@@ -3453,9 +5157,20 @@ impl<'a> Translator<'a> {
             }
             t.r(r)
         };
-        let offset = if i.bits(54, 2) == 1 { Some(take_b(self)?) } else { None };
+        let offset = if offset_mode == 1 {
+            Some(take_b(self)?)
+        } else {
+            None
+        };
         let dref = if i.bit(50) { Some(take_b(self)?) } else { None };
-        let result = self.gather(handle, dim, array, coords, layer, i.bits(56, 2) as u32, dref, offset)?;
+        let component = if bindless {
+            i.bits(38, 2) as u32
+        } else {
+            i.bits(56, 2) as u32
+        };
+        let result = self.gather(
+            slot, handle, dim, array, coords, layer, component, dref, offset,
+        )?;
         let mut reg = i.rd();
         for (c, &value) in result.iter().enumerate() {
             if i.bit(31 + c as u32) && reg != RZ {
@@ -3477,10 +5192,24 @@ impl<'a> Translator<'a> {
         } else {
             let y = self.rf(next(ra))?;
             let offset = if aoffi { Some(self.r(rb)?) } else { None };
-            let dref = if dc { Some(self.r(if aoffi { next(rb) } else { rb })?) } else { None };
+            let dref = if dc {
+                Some(self.r(if aoffi { next(rb) } else { rb })?)
+            } else {
+                None
+            };
             (y, offset, dref)
         };
-        let result = self.gather(handle, TexDim::D2, false, vec![x, y], None, i.bits(52, 2) as u32, dref, offset)?;
+        let result = self.gather(
+            None,
+            handle,
+            TexDim::D2,
+            false,
+            vec![x, y],
+            None,
+            i.bits(52, 2) as u32,
+            dref,
+            offset,
+        )?;
         let (rd, rd2) = (i.rd(), i.rd2());
         if i.bit(55) {
             for (pair, reg) in result.chunks(2).zip([rd, rd2]) {
@@ -3579,7 +5308,9 @@ impl<'a> Translator<'a> {
                 return Ok(());
             }
         };
-        let result = self.sample(handle, dim, array, shadow, coords, layer, lod, dref, None)?;
+        let result = self.sample(
+            None, handle, None, dim, array, shadow, coords, layer, lod, dref, None, None,
+        )?;
         self.texs_results(i, result)
     }
 
@@ -3587,7 +5318,8 @@ impl<'a> Translator<'a> {
         let handle = i.bits(36, 13) as u32;
         let (ra, rb) = (i.ra(), i.rb());
         let next = |r: u8| if r == RZ { RZ } else { r + 1 };
-        let (mut dim, mut array, mut lod, mut offset, mut layer) = (TexDim::D2, false, None, None, None);
+        let (mut dim, mut array, mut lod, mut offset, mut layer) =
+            (TexDim::D2, false, None, None, None);
         let coords = match i.bits(53, 4) {
             0 => {
                 dim = TexDim::D1;
@@ -3627,14 +5359,184 @@ impl<'a> Translator<'a> {
                 return Ok(());
             }
         };
-        let result = self.fetch(handle, dim, array, coords, layer, lod, offset)?;
+        let result = self.fetch(None, handle, dim, array, coords, layer, lod, offset)?;
         self.texs_results(i, result)
     }
 
+    fn texel_results(&mut self, i: &Insn, result: [Word; 4]) -> R {
+        let mut reg = i.rd();
+        for (c, &value) in result.iter().enumerate() {
+            if i.bit(31 + c as u32) && reg != RZ {
+                self.set(reg, value)?;
+                reg += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn tld(&mut self, pc: u32, i: &Insn) -> R {
+        // Immediate `tld` keeps the 13-bit table index in the instruction;
+        // the register form carries it in `rb` (bindless), like `tex`.
+        let bindless = i.op.value == 0xdd38000000000000;
+        let next = |r: u8| if r == RZ { RZ } else { r + 1 };
+        let (slot, handle, mut reg_b) = if bindless {
+            let source = if i.rb() == RZ {
+                None
+            } else {
+                self.cbuf_source(pc, i.rb())
+            };
+            match source {
+                Some((slot, offset)) => (Some(slot), offset / 4, next(i.rb())),
+                None => {
+                    self.unsupported.push("tld (bindless)");
+                    return Ok(());
+                }
+            }
+        } else {
+            (None, i.bits(36, 13) as u32, i.rb())
+        };
+        if i.bit(50) {
+            self.unsupported.push("tld (multisample)");
+            return Ok(());
+        }
+        if i.bit(54) {
+            self.unsupported.push("tld (cl)");
+            return Ok(());
+        }
+        let dim = match i.bits(29, 2) {
+            0 => TexDim::D1,
+            1 => TexDim::D2,
+            2 => TexDim::D3,
+            _ => TexDim::Cube,
+        };
+        let array = i.bit(28);
+        let mut reg_a = i.ra();
+        let mut take_a = |t: &mut Self| -> R<Word> {
+            let r = reg_a;
+            if reg_a != RZ {
+                reg_a += 1;
+            }
+            t.r(r)
+        };
+        let layer = if array { Some(take_a(self)?) } else { None };
+        let mut coords = Vec::new();
+        for _ in 0..Self::coord_count(dim) {
+            coords.push(take_a(self)?);
+        }
+        let mut take_b = |t: &mut Self| -> R<Word> {
+            let r = reg_b;
+            if reg_b != RZ {
+                reg_b += 1;
+            }
+            t.r(r)
+        };
+        let level = if i.bit(55) { Some(take_b(self)?) } else { None };
+        let offset = if i.bit(35) { Some(take_b(self)?) } else { None };
+        let result = self.fetch(slot, handle, dim, array, coords, layer, level, offset)?;
+        self.texel_results(i, result)
+    }
+
+    fn txd(&mut self, pc: u32, i: &Insn) -> R {
+        // Both `txd` forms put the derivatives in `rb`; the bindless form
+        // carries the texture handle in `ra` and shifts the coordinates down
+        // one register.
+        let bindless = i.op.value == 0xde78000000000000;
+        let next = |r: u8| if r == RZ { RZ } else { r + 1 };
+        let (slot, handle, mut reg_a) = if bindless {
+            let source = if i.ra() == RZ {
+                None
+            } else {
+                self.cbuf_source(pc, i.ra())
+            };
+            match source {
+                Some((slot, offset)) => (Some(slot), offset / 4, next(i.ra())),
+                None => {
+                    self.unsupported.push("txd (bindless)");
+                    return Ok(());
+                }
+            }
+        } else {
+            (None, i.bits(36, 13) as u32, i.ra())
+        };
+        let dim = match i.bits(29, 2) {
+            0 => TexDim::D1,
+            1 => TexDim::D2,
+            2 => TexDim::D3,
+            _ => TexDim::Cube,
+        };
+        let array = i.bit(28);
+        let count = Self::coord_count(dim);
+        let mut take_a = |t: &mut Self| -> R<Word> {
+            let r = reg_a;
+            if reg_a != RZ {
+                reg_a += 1;
+            }
+            t.rf(r)
+        };
+        let mut coords = Vec::new();
+        for _ in 0..count {
+            coords.push(take_a(self)?);
+        }
+        let packed = take_a(self)?;
+        let packed = self.cast_u(packed)?;
+        let layer = if array {
+            let mask = self.u(0xffff);
+            Some(self.b.bitwise_and(self.t.u32, None, packed, mask)?)
+        } else {
+            None
+        };
+        let offset = if i.bit(35) {
+            Some(TexelOffset { packed, shift: 16 })
+        } else {
+            None
+        };
+        let mut reg_b = i.rb();
+        let mut take_b = |t: &mut Self| -> R<Word> {
+            let r = reg_b;
+            if reg_b != RZ {
+                reg_b += 1;
+            }
+            t.rf(r)
+        };
+        let mut dx = Vec::new();
+        let mut dy = Vec::new();
+        for _ in 0..count {
+            dx.push(take_b(self)?);
+        }
+        for _ in 0..count {
+            dy.push(take_b(self)?);
+        }
+        let result = self.sample(
+            slot,
+            handle,
+            None,
+            dim,
+            array,
+            false,
+            coords,
+            layer,
+            Lod::Implicit,
+            None,
+            offset,
+            Some((dx, dy)),
+        )?;
+        self.texel_results(i, result)
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn fetch(&mut self, handle: u32, dim: TexDim, array: bool, coords: Vec<Word>, layer: Option<Word>, lod: Option<Word>, offset: Option<Word>) -> R<[Word; 4]> {
+    fn fetch(
+        &mut self,
+        slot: Option<u32>,
+        handle: u32,
+        dim: TexDim,
+        array: bool,
+        coords: Vec<Word>,
+        layer: Option<Word>,
+        lod: Option<Word>,
+        offset: Option<Word>,
+    ) -> R<[Word; 4]> {
         let i32t = self.t.i32;
-        let (image_var, _, image_ty, _) = self.texture(None, handle, dim, array, false);
+        let (image_var, _, image_ty, _) = self.texture(slot, handle, None, dim, array, false);
         let img = self.b.load(image_ty, None, image_var, None, [])?;
         let mut comps = Vec::new();
         for (k, c) in coords.into_iter().enumerate() {
@@ -3653,14 +5555,25 @@ impl<'a> Translator<'a> {
         let coord = if comps.len() == 1 {
             comps[0]
         } else {
-            let vty = self.b.type_vector(i32t, comps.len() as u32);
+            let vty = match comps.len() {
+                2 => self.t.v2i,
+                3 => self.t.v3i,
+                _ => self.t.v4i,
+            };
             self.b.composite_construct(vty, None, comps)?
         };
         let level = match lod {
             Some(l) => self.cast_i(l)?,
             None => self.u(0),
         };
-        let v = self.b.image_fetch(self.t.v4f, None, img, coord, Some(ImageOperands::LOD), [Operand::IdRef(level)])?;
+        let v = self.b.image_fetch(
+            self.t.v4f,
+            None,
+            img,
+            coord,
+            Some(ImageOperands::LOD),
+            [Operand::IdRef(level)],
+        )?;
         let mut out = [0; 4];
         for (c, o) in out.iter_mut().enumerate() {
             let f = self.b.composite_extract(self.t.f32, None, v, [c as u32])?;
@@ -3703,7 +5616,11 @@ impl<'a> Translator<'a> {
             return Ok(());
         }
         for (k, &c) in comps.iter().enumerate() {
-            let reg = if k < 2 { i.rd().wrapping_add(k as u8) } else { rd2.wrapping_add(k as u8 - 2) };
+            let reg = if k < 2 {
+                i.rd().wrapping_add(k as u8)
+            } else {
+                rd2.wrapping_add(k as u8 - 2)
+            };
             if (k < 2 && i.rd() == RZ) || (k >= 2 && rd2 == RZ) {
                 continue;
             }
@@ -3712,12 +5629,14 @@ impl<'a> Translator<'a> {
         Ok(())
     }
 
-    fn tex(&mut self, i: &Insn) -> R {
-        if i.op.value != 0xc038000000000000 {
-            self.unsupported.push("tex (bindless)");
-            return Ok(());
-        }
-        let handle = i.bits(36, 13) as u32;
+    fn tex(&mut self, pc: u32, i: &Insn) -> R {
+        // `tex` has two encodings: the immediate form (`0xc038`) carries a
+        // 13-bit table index in the instruction, while the register form
+        // (`0xdeb8`) carries the handle in `rb`, loaded from the constant bank
+        // (Maxwell's bindless form, or NVN's separate texture and sampler
+        // words combined with an OR).
+        let bindless = i.op.value != 0xc038000000000000;
+        let next = |r: u8| if r == RZ { RZ } else { r + 1 };
         let dim = match i.bits(29, 2) {
             0 => TexDim::D1,
             1 => TexDim::D2,
@@ -3725,7 +5644,23 @@ impl<'a> Translator<'a> {
             _ => TexDim::Cube,
         };
         let array = i.bit(28);
+        // `dc` requests a depth comparison; its data register follows the
+        // LOD bias/level and offset registers (bindless included).
         let shadow = i.bit(50);
+        // `aoffi` adds a per-texel offset from the packed register after the
+        // LOD value. The bindless form keeps the flag in bit 36.
+        let aoffi = if bindless { i.bit(36) } else { i.bit(54) };
+        let (slot, handle, sampler) = if bindless {
+            match self.bindless_handle(pc, i.rb()) {
+                Ok(h) => (Some(h.slot), h.word, h.sampler),
+                Err(label) => {
+                    self.unsupported.push(label);
+                    return Ok(());
+                }
+            }
+        } else {
+            (None, i.bits(36, 13) as u32, None)
+        };
         let mut reg_a = i.ra();
         let mut take_a = |t: &mut Self| -> R<Word> {
             let r = reg_a;
@@ -3740,7 +5675,9 @@ impl<'a> Translator<'a> {
             let v = take_a(self)?;
             coords.push(self.cast_f(v)?);
         }
-        let mut reg_b = i.rb();
+        // In the bindless form `rb` is the handle, so the optional values
+        // start at `rb + 1`, in encoding order: LOD, offset, depth.
+        let mut reg_b = if bindless { next(i.rb()) } else { i.rb() };
         let mut take_b = |t: &mut Self| -> R<Word> {
             let r = reg_b;
             if reg_b != RZ {
@@ -3748,33 +5685,74 @@ impl<'a> Translator<'a> {
             }
             t.r(r)
         };
-        let lod = match i.bits(55, 3) {
-            1 => Lod::Zero,
-            2 => {
-                let v = take_b(self)?;
-                Lod::Bias(self.cast_f(v)?)
+        let lod = if bindless {
+            match i.bits(37, 3) {
+                0 => Lod::Implicit,
+                1 => Lod::Zero,
+                2 => {
+                    let v = take_b(self)?;
+                    Lod::Bias(self.cast_f(v)?)
+                }
+                3 => {
+                    let v = take_b(self)?;
+                    Lod::Level(self.cast_f(v)?)
+                }
+                6 => {
+                    self.unsupported.push("tex (bindless lba)");
+                    return Ok(());
+                }
+                7 => {
+                    self.unsupported.push("tex (bindless lla)");
+                    return Ok(());
+                }
+                _ => {
+                    self.unsupported.push("tex (bindless lod)");
+                    return Ok(());
+                }
             }
-            3 => {
-                let v = take_b(self)?;
-                Lod::Level(self.cast_f(v)?)
-            }
-            0 => Lod::Implicit,
-            _ => {
-                self.unsupported.push("tex (lod mode)");
-                Lod::Implicit
+        } else {
+            match i.bits(55, 3) {
+                1 => Lod::Zero,
+                2 => {
+                    let v = take_b(self)?;
+                    Lod::Bias(self.cast_f(v)?)
+                }
+                3 => {
+                    let v = take_b(self)?;
+                    Lod::Level(self.cast_f(v)?)
+                }
+                0 => Lod::Implicit,
+                6 => {
+                    self.unsupported.push("tex (lba)");
+                    return Ok(());
+                }
+                7 => {
+                    self.unsupported.push("tex (lla)");
+                    return Ok(());
+                }
+                _ => {
+                    self.unsupported.push("tex (lod mode)");
+                    return Ok(());
+                }
             }
         };
-        let offset = if i.bit(54) { Some(take_b(self)?) } else { None };
+        let offset = if aoffi { Some(take_b(self)?) } else { None };
         let dref = if shadow { Some(take_b(self)?) } else { None };
-        let result = self.sample(handle, dim, array, shadow, coords, layer, lod, dref, offset)?;
-        let mut reg = i.rd();
-        for (c, &value) in result.iter().enumerate() {
-            if i.bit(31 + c as u32) && reg != RZ {
-                self.set(reg, value)?;
-                reg += 1;
-            }
-        }
-        Ok(())
+        let result = self.sample(
+            slot,
+            handle,
+            sampler,
+            dim,
+            array,
+            shadow,
+            coords,
+            layer,
+            lod,
+            dref,
+            offset.map(|packed| TexelOffset { packed, shift: 0 }),
+            None,
+        )?;
+        self.texel_results(i, result)
     }
 }
 
@@ -3784,6 +5762,15 @@ enum Lod {
     Zero,
     Level(Word),
     Bias(Word),
+}
+
+/// Packed per-texel offsets: four signed bits per coordinate, starting at
+/// `shift` in the register. `tex`/`tld` put them in the low bits, `txd`
+/// shares the register with the array layer and starts at bit 16.
+#[derive(Clone, Copy)]
+struct TexelOffset {
+    packed: Word,
+    shift: u32,
 }
 
 mod glsl {

@@ -4,10 +4,10 @@ use kirikae_maxwell::{Kind, Stage};
 use super::Renderer;
 use super::buffers::instanced_stream;
 use super::descriptors::{Descriptor, FRAGMENT_BASE, STORAGE_OFFSET, VERTEX_BASE};
-use super::images::{IDENTITY, ImageKey, aspect_of, color_surface};
+use super::images::{IDENTITY, ImageKey, Surface, aspect_of, color_surface};
 use super::pipeline::{ShaderModule, alpha_test_func};
 use crate::gpu::formats::ColorFormat;
-use crate::gpu::threed::{CB_SLOTS, Draw, address, reg};
+use crate::gpu::threed::{CB_SLOTS, Draw, address, color_block, reg, target_count, target_slot};
 use crate::gpu::{Gpu, formats};
 use crate::mem::GuestMemory;
 
@@ -62,6 +62,48 @@ pub(super) fn admit_shader(shader: &ShaderModule, partial: bool) -> Result<(), S
         Unsupported::Skip => Err(why),
         _ => Ok(()),
     }
+}
+
+/// Why the colour target a draw names could not become an image.
+///
+/// The ways to fail point at different registers, so they are told apart: a format that is not
+/// a colour format, an address the guest never wrote, and an address with no GPU mapping. A
+/// target whose size and format are set but whose address pair is zero used to be reported as
+/// "render target format 0x…", which sends the reader after the format register instead of the
+/// address. `base` is the first method of the target block; the address is `base`/`base + 1`.
+pub(super) fn missing_target_reason(
+    index: u32,
+    base: usize,
+    regs: &[u32],
+    surface: &Surface,
+    mapped: bool,
+) -> String {
+    let (high, low) = (regs[base], regs[base + 1]);
+    let (width, height, format) = (surface.width, surface.height, surface.format);
+    if formats::color_target(format).is_none() {
+        return format!(
+            "render target {index}: format {format:#x} is not a colour format (method {:#x}); the address is {high:#x}:{low:#x}",
+            base + 4
+        );
+    }
+    if surface.va == 0 {
+        return format!(
+            "render target {index}: the address registers are zero (method {base:#x} = {high:#x}, method {:#x} = {low:#x}); {width}x{height} format {format:#x} says the guest wrote the size and the format but not the surface",
+            base + 1
+        );
+    }
+    if !mapped {
+        return format!(
+            "render target {index}: address {:#x} has no GPU mapping (method {base:#x} = {high:#x}, method {:#x} = {low:#x}); {width}x{height} format {format:#x}",
+            surface.va,
+            base + 1
+        );
+    }
+    format!(
+        "render target {index}: no image for {:#x} {width}x{height} format {format:#x} (method {base:#x} = {high:#x}, method {:#x} = {low:#x})",
+        surface.va,
+        base + 1
+    )
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -284,9 +326,9 @@ impl Renderer {
         let fragment = regs[reg::PIPELINE + 16 * 5] & 1 == 1;
         if fragment {
             let ct = regs[reg::CT_SELECT];
-            for k in 0..(ct & 0xf).min(8) as usize {
-                let rt = (ct >> (4 + 3 * k) & 7) as usize;
-                if regs[reg::COLOR_TARGET + rt * 16 + 4] != 0 && regs[0x680 + k] & 0x1111 != 0 {
+            for k in 0..target_count(ct) {
+                let rt = target_slot(ct, k);
+                if regs[color_block(rt) + 4] != 0 && regs[0x680 + k as usize] & 0x1111 != 0 {
                     return false;
                 }
             }
@@ -329,7 +371,7 @@ impl Renderer {
         }
         self.lap(0, &mut lap);
         let ct = regs[reg::CT_SELECT];
-        let count = (ct & 0xf).min(8);
+        let count = target_count(ct);
         let mut scratch = std::mem::take(&mut self.scratch);
         let mut targets = std::mem::take(&mut scratch.targets);
         let mut sizes = std::mem::take(&mut scratch.sizes);
@@ -337,17 +379,21 @@ impl Renderer {
         sizes.clear();
         let mut output_types = [Kind::Float; 8];
         for k in 0..count {
-            let rt = (ct >> (4 + 3 * k) & 7) as usize;
-            let base = reg::COLOR_TARGET + rt * 16;
+            let rt = target_slot(ct, k);
+            let base = color_block(rt);
             let format = regs[base + 4];
             if format == 0 {
                 targets.push(None);
                 continue;
             }
             let s = color_surface(regs, base);
-            let (key, fmt) = self
-                .surface_image(gpu, mem, &s, true)
-                .ok_or_else(|| format!("render target format {format:#x}"))?;
+            let (key, fmt) = match self.surface_image(gpu, mem, &s, true) {
+                Some(image) => image,
+                None => {
+                    let mapped = s.va != 0 && gpu.translate(s.va).is_some();
+                    return Err(missing_target_reason(k, base, regs, &s, mapped));
+                }
+            };
             output_types[k as usize] = fmt.kind;
             if let (Some(pitch), Some(cpu)) = (s.pitch, gpu.translate(s.va)) {
                 self.pitch_targets.insert(key, (cpu, pitch, s.height));
@@ -981,5 +1027,73 @@ mod tests {
         assert!(!gap.report_once());
         let translated = module(Vec::new(), 0x1000);
         assert!(translated.report_once());
+    }
+
+    /// The colour-target block Brilliant Diamond's driver writes: 1920x1080 RGBA8, block
+    /// linear, and both address words zero.
+    fn bd_registers() -> Vec<u32> {
+        let mut regs = vec![0u32; 0x1000];
+        regs[reg::COLOR_TARGET + 2] = 1920;
+        regs[reg::COLOR_TARGET + 3] = 1080;
+        regs[reg::COLOR_TARGET + 4] = 0xd5;
+        regs[reg::COLOR_TARGET + 5] = 0x40;
+        regs[reg::CT_SELECT] = 0xfac_6881;
+        regs
+    }
+
+    #[test]
+    fn a_zero_target_address_is_reported_as_an_address_not_a_format() {
+        let regs = bd_registers();
+        let surface = color_surface(&regs, reg::COLOR_TARGET);
+        let why = missing_target_reason(0, reg::COLOR_TARGET, &regs, &surface, false);
+        assert!(why.contains("address registers are zero"), "{why}");
+        assert!(why.contains("0x200"), "{why}");
+        assert!(why.contains("0xd5"), "{why}");
+        assert!(why.contains("1920x1080"), "{why}");
+        assert!(!why.contains("not a colour format"), "{why}");
+    }
+
+    #[test]
+    fn an_unmapped_target_address_names_the_address_and_the_registers() {
+        let mut regs = bd_registers();
+        regs[reg::COLOR_TARGET] = 0x2;
+        regs[reg::COLOR_TARGET + 1] = 0x00ab_cdef;
+        regs[reg::COLOR_TARGET + 4] = 0xd6;
+        let surface = color_surface(&regs, reg::COLOR_TARGET);
+        let why = missing_target_reason(0, reg::COLOR_TARGET, &regs, &surface, false);
+        assert!(why.contains("no GPU mapping"), "{why}");
+        assert!(why.contains("0x200abcdef"), "{why}");
+        assert!(why.contains("0x200 = 0x2"), "{why}");
+    }
+
+    #[test]
+    fn an_unknown_target_format_is_reported_as_a_format() {
+        let mut regs = bd_registers();
+        regs[reg::COLOR_TARGET + 4] = 0x7f;
+        let surface = color_surface(&regs, reg::COLOR_TARGET);
+        let why = missing_target_reason(0, reg::COLOR_TARGET, &regs, &surface, false);
+        assert!(why.contains("is not a colour format"), "{why}");
+        assert!(why.contains("0x7f"), "{why}");
+    }
+
+    #[test]
+    fn the_smbw_target_resolves_from_the_colour_target_block() {
+        let mut regs = bd_registers();
+        regs[reg::COLOR_TARGET] = 0x2;
+        regs[reg::COLOR_TARGET + 1] = 0x01e0_0000;
+        regs[reg::COLOR_TARGET + 4] = 0xd6;
+        let slot = target_slot(regs[reg::CT_SELECT], 0);
+        assert_eq!(slot, 0);
+        let surface = color_surface(&regs, color_block(slot));
+        assert_eq!(surface.va, 0x2_01e0_0000);
+        assert_eq!((surface.width, surface.height), (1920, 1080));
+        assert_eq!(surface.block_height_log2, 4);
+        let format = formats::color_target(surface.format).unwrap();
+        assert_eq!(format.vk, vk::Format::R8G8B8A8_SRGB);
+        // With a mapping the old failure message would have been wrong; a mapped address only
+        // reaches the reason when the image itself could not be made.
+        let why = missing_target_reason(0, reg::COLOR_TARGET, &regs, &surface, true);
+        assert!(why.contains("no image"), "{why}");
+        assert!(!why.contains("zero"), "{why}");
     }
 }

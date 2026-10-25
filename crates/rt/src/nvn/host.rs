@@ -586,11 +586,23 @@ fn present(c: &mut Cpu, real: u64, window_arg: usize, index_arg: usize) -> bool 
     let window = args[window_arg];
     let index = args[index_arg];
     let before = crate::display::FRAMES.load(Ordering::Relaxed);
+    let target = { lock().present_target(window, index) };
+    // The capture belongs to the replayed frame. Reserve its slot before the driver's own present runs, or that path
+    // would capture the stale swapchain the replay is about to replace. Only a present the host can resolve reserves
+    // it; an unresolved one leaves the capture to the driver, as before.
+    let capture = crate::gpu::capture::capture()
+        .filter(|capture| before.saturating_add(1) == capture.frame());
+    let capture = match (&target, capture) {
+        (Ok(_), Some(capture)) if !capture.done() => {
+            capture.claim();
+            Some(capture)
+        }
+        _ => None,
+    };
     if real != 0 {
         crate::hle::call_guest(c, real, false);
     }
     let p = c.process();
-    let target = { lock().present_target(window, index) };
     let mut credit = false;
     match target {
         Ok(target) => {
@@ -601,7 +613,14 @@ fn present(c: &mut Cpu, real: u64, window_arg: usize, index_arg: usize) -> bool 
             let shown = p
                 .gpu
                 .with_renderer(|renderer| {
-                    renderer.nvn_present(target.cpu, target.width, target.height, Some(target.crop))
+                    renderer.nvn_present(
+                        target.cpu,
+                        target.width,
+                        target.height,
+                        Some(target.crop),
+                        before,
+                        capture,
+                    )
                 })
                 .unwrap_or(crate::gpu::vulkan::Presented::NoSwapchain);
             lock().note_present(window, target.serial, shown);
@@ -711,10 +730,11 @@ pub fn report() {
     let presents = snapshot.presents;
     if presents.replayed + presents.fallback + presents.no_swapchain > 0 {
         eprintln!(
-            "kirikae:         nvn present: {} windows, {} presents ({} from the replay, {} stayed with the driver, {} without a swapchain); {} frames counted here",
+            "kirikae:         nvn present: {} windows, {} presents ({} from the replay, {} composed from the last target, {} stayed with the driver, {} without a swapchain); {} frames counted here",
             host.windows.len(),
             presents.replayed + presents.fallback + presents.no_swapchain,
             presents.replayed,
+            window::COMPOSED.load(Ordering::Relaxed),
             presents.fallback,
             presents.no_swapchain,
             presents.frames
@@ -793,6 +813,23 @@ impl Host {
             }
             QueuePresent | PresentTexture => {}
         }
+    }
+
+    /// The guest textures every live window names, once each, in window order. The replay needs them even when the
+    /// title never draws into the window: the present composes the frame from the last drawn target.
+    fn window_textures(&self) -> Vec<u64> {
+        let mut textures = Vec::new();
+        for window in self.windows.values() {
+            for &texture in &window.textures {
+                if texture != 0
+                    && !textures.contains(&texture)
+                    && matches!(self.objects.get(texture), Some(Object::Texture(_)))
+                {
+                    textures.push(texture);
+                }
+            }
+        }
+        textures
     }
 
     /// The window texture a present names, as the renderer needs it. This only reads the host tables; the caller
@@ -1371,6 +1408,18 @@ impl Host {
                         other.as_ref().map_or("not in the host table", Object::kind)
                     ),
                 ),
+            }
+        }
+        // A window texture is where the title composes the presented frame. It may never be a recorded draw target
+        // on this title (the driver performs the composition), so resolve it even when the records only set it as a
+        // target and never draw into it (`docs/nvn/CONTRACT.md` §8).
+        for address in self.window_textures() {
+            if let Some(Object::Texture(texture)) = self.objects.get(address) {
+                submit.windows.insert(address);
+                submit
+                    .textures
+                    .entry(address)
+                    .or_insert_with(|| texture_info(&texture));
             }
         }
         for address in views {
@@ -3349,5 +3398,22 @@ mod tests {
         host.note_present(0x1000, 3, Presented::NoImage);
         assert_eq!(host.presents.fallback, 1);
         assert_eq!(host.presented.get(&0x1000), Some(&2));
+    }
+
+    #[test]
+    fn a_submit_knows_every_window_texture_even_without_a_draw() {
+        let mut host = Host::default();
+        add_window(&mut host, 0x1000, &[0x2000, 0x3000, 0x2000]);
+        host.objects.make(
+            0x2000,
+            Object::Texture(window_texture(0x1_0000, 0x1d, 1920, 1080)),
+        );
+        host.objects.make(
+            0x3000,
+            Object::Texture(window_texture(0x2_0000, 0x1d, 1920, 1080)),
+        );
+        // A texture the table does not know is not reported: the submit resolves textures, not addresses.
+        add_window(&mut host, 0x4000, &[0x9000]);
+        assert_eq!(host.window_textures(), [0x2000, 0x3000]);
     }
 }

@@ -27,7 +27,10 @@ fn block(word: u32) -> Block {
 
 fn mem(word: u32) -> Mem {
     match decode_at(0x1000, word).operands.as_slice() {
-        [Operand::Reg(_), Operand::Mem(mem)] | [Operand::Regs { .. }, Operand::Mem(mem)] => *mem,
+        [Operand::Reg(_), Operand::Mem(mem)]
+        | [Operand::Regs { .. }, Operand::Mem(mem)]
+        | [Operand::S(_), Operand::Mem(mem)]
+        | [Operand::D(_), Operand::Mem(mem)] => *mem,
         other => panic!("{word:#010x} is not a single transfer: {other:?}"),
     }
 }
@@ -169,9 +172,9 @@ fn condition_field() {
     // Field 0b1111 is the unconditional space, which this slice only enters for `blx`.
     assert_eq!(decode(0x1000, 0xF000_0000), Err(DecodeError::Unsupported));
     assert_eq!(
-        decode(0x1000, 0xF5D1_F000),
-        Err(DecodeError::Unsupported),
-        "pld lives in the unconditional space and is not part of the slice"
+        text(0xF5D1_F000),
+        "pld [r1]",
+        "pld is a hint in the unconditional space"
     );
 }
 
@@ -860,12 +863,25 @@ fn svc_and_bkpt() {
 
 #[test]
 fn rejected_encodings() {
-    // Coprocessor data operations, coprocessor transfers and VFP.
-    assert_eq!(decode(0x1000, 0xEE00_0010), Err(DecodeError::Unsupported));
-    assert_eq!(decode(0x1000, 0xED91_0B00), Err(DecodeError::Unsupported));
-    // The media multiply-accumulate forms (`smlad`, `smmul`, ...) are not modelled.
-    assert_eq!(decode(0x1000, 0xE700_0211), Err(DecodeError::Unsupported));
-    assert_eq!(decode(0x1000, 0xE750_0F12), Err(DecodeError::Unsupported));
+    // Coprocessor data operations and transfers that are not VFP.
+    assert_eq!(decode(0x1000, 0xEE00_0E10), Err(DecodeError::Unsupported));
+    assert_eq!(decode(0x1000, 0xED91_0E00), Err(DecodeError::Unsupported));
+    // The media multiply-accumulate forms are modelled; an unallocated form of the
+    // group is still rejected.
+    assert_eq!(text(0xE700_0211), "smlad r0, r1, r2, r0");
+    assert_eq!(
+        text_at(0x1000, media_mac(0x75, 0, false, 0, 15, 1, 2)),
+        "smmul r0, r2, r1"
+    );
+    // `Rm` may not be `pc`.
+    assert_eq!(
+        decode(0x1000, media_mac(0x75, 0, false, 0, 15, 15, 2)),
+        Err(DecodeError::Unpredictable)
+    );
+    assert_eq!(
+        decode(0x1000, media_mac(0x70, 2, false, 0, 3, 1, 2)),
+        Err(DecodeError::Unallocated)
+    );
     // `swp`/`swpb` are architecturally deprecated.
     assert_eq!(decode(0x1000, 0xE102_0092), Err(DecodeError::Deprecated));
     assert_eq!(decode(0x1000, 0xE142_0092), Err(DecodeError::Deprecated));
@@ -980,4 +996,552 @@ fn random_words_decode_or_reject_without_panicking() {
     assert_eq!(rejected.iter().sum::<u32>() + decoded, 200_000);
     assert!(decoded > 10_000, "only {decoded} of 200000 words decoded");
     assert!(rejected.iter().all(|count| *count > 0), "{rejected:?}");
+}
+
+// --- VFP and Advanced SIMD ----------------------------------------------------------
+//
+// The expected text of every word below is the assembly syntax of the ARM ARM (A8.8,
+// checked against an independent disassembler on a generated grid). The register numbers
+// are chosen so the three field layouts — `D:Vd` for `d`, `Vd:D` for `s` and `Vm:M` for
+// a source — are each exercised with a value that tells them apart.
+
+#[test]
+fn vfp_load_store() {
+    assert_eq!(text(0xED90_0A00), "vldr s0, [r0]");
+    assert_eq!(text(0xED90_0B00), "vldr d0, [r0]");
+    assert_eq!(text(0xED91_0A04), "vldr s0, [r1, #0x10]");
+    assert_eq!(text(0xED91_0B08), "vldr d0, [r1, #0x20]");
+    assert_eq!(text(0xED1F_0B04), "vldr d0, [pc, #-0x10]");
+    assert_eq!(text(0xED8D_0A10), "vstr s0, [sp, #0x40]");
+    assert_eq!(text(0xED8D_0B10), "vstr d0, [sp, #0x40]");
+    assert_eq!(text(0xED9D_0B04), "vldr d0, [sp, #0x10]");
+
+    // The offset is `imm8 * 4` and the size follows the register kind.
+    assert_eq!(mem(0xED91_0A04).size, MemSize::Word);
+    assert_eq!(mem(0xED91_0B08).size, MemSize::Double);
+    assert_eq!(mem(0xED91_0B08).offset, Offset::Imm(0x20));
+    assert_eq!(decode_at(0x1000, 0xED91_0B08).opcode, Opcode::Vldr);
+
+    // A different coprocessor number is not VFP.
+    assert_eq!(decode(0x1000, 0xED91_0E08), Err(DecodeError::Unsupported));
+}
+
+#[test]
+fn vfp_block_transfers() {
+    // `vpush`/`vpop` are the `sp` forms of `vstmdb`/`vldmia`. `imm8` counts 32-bit
+    // registers, so eight double registers encode `imm8 = 16`.
+    assert_eq!(text(0xED2D_0B10), "vpush {d0-d7}");
+    assert_eq!(text(0xED2D_8B10), "vpush {d8-d15}");
+    assert_eq!(text(0xECBD_8B10), "vpop {d8-d15}");
+    assert_eq!(decode_at(0x1000, 0xED2D_0B10).opcode, Opcode::Vpush);
+    assert_eq!(decode_at(0x1000, 0xECBD_8B10).opcode, Opcode::Vpop);
+    assert_eq!(text(0xED2D_0A10), "vpush {s0-s15}");
+
+    assert_eq!(text(0xEC90_0B02), "vldmia r0, {d0}");
+    assert_eq!(text(0xECB0_0B02), "vldmia r0!, {d0}");
+    assert_eq!(text(0xECA0_0B04), "vstmia r0!, {d0, d1}");
+    assert_eq!(text(0xEC80_0B02), "vstmia r0, {d0}");
+
+    let block = match decode_at(0x1000, 0xED2D_8B10).operands.as_slice() {
+        [Operand::VBlock(block)] => *block,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(block.first, DReg::new(8).unwrap());
+    assert_eq!(block.words, 16);
+    assert!(block.double);
+    assert_eq!(block.mode, BlockMode::DecrementBefore);
+    assert_eq!(block.bytes(), 64);
+
+    // An odd 32-bit register count cannot be a doubleword list, and the zero form is
+    // unpredictable on a VFPv3-D32 implementation.
+    assert_eq!(decode(0x1000, 0xED2D_0B01), Err(DecodeError::Unpredictable));
+    assert_eq!(decode(0x1000, 0xED2D_0B00), Err(DecodeError::Unpredictable));
+    // A list that runs past d31 is rejected.
+    assert_eq!(decode(0x1000, 0xED6D_FB04), Err(DecodeError::Unpredictable));
+}
+
+#[test]
+fn vfp_data_processing() {
+    // Every arithmetic form, single and double. The name comes from opc1 and bit 6.
+    for (word, expected) in [
+        (0xEE00_0A00u32, "vmla.f32 s0, s0, s0"),
+        (0xEE00_0A40, "vmls.f32 s0, s0, s0"),
+        (0xEE10_0A00, "vnmls.f32 s0, s0, s0"),
+        (0xEE10_0A40, "vnmla.f32 s0, s0, s0"),
+        (0xEE20_0A00, "vmul.f32 s0, s0, s0"),
+        (0xEE20_0A40, "vnmul.f32 s0, s0, s0"),
+        (0xEE30_0A00, "vadd.f32 s0, s0, s0"),
+        (0xEE30_0A40, "vsub.f32 s0, s0, s0"),
+        (0xEE80_0A00, "vdiv.f32 s0, s0, s0"),
+        (0xEE90_0A00, "vfnms.f32 s0, s0, s0"),
+        (0xEE90_0A40, "vfnma.f32 s0, s0, s0"),
+        (0xEEA0_0A00, "vfma.f32 s0, s0, s0"),
+        (0xEEA0_0A40, "vfms.f32 s0, s0, s0"),
+        (0xEE00_0B00, "vmla.f64 d0, d0, d0"),
+        (0xEE30_0B00, "vadd.f64 d0, d0, d0"),
+        (0xEE80_0B00, "vdiv.f64 d0, d0, d0"),
+    ] {
+        assert_eq!(text(word), expected);
+    }
+    assert_eq!(decode_at(0x1000, 0xEE80_0A00).opcode, Opcode::Vdiv);
+    // `vdiv` has no second form.
+    assert_eq!(decode(0x1000, 0xEE80_0A40), Err(DecodeError::Unallocated));
+
+    // The register fields: `s(2n)` is `Vd:D` and a double is `D:Vd`.
+    assert_eq!(text(0xEE00_1A00), "vmla.f32 s2, s0, s0");
+    assert_eq!(text(0xEE49_0AA9), "vmla.f32 s1, s19, s19");
+    assert_eq!(text(0xEE40_0B00), "vmla.f64 d16, d0, d0");
+    assert_eq!(text(0xEE41_0B00), "vmla.f64 d16, d1, d0");
+    assert_eq!(text(0xEE4A_0BA1), "vmla.f64 d16, d26, d17");
+
+    let vmla = decode_at(0x1000, 0xEE4A_0BA1);
+    assert_eq!(vmla.operands[0], Operand::D(DReg::new(16).unwrap()));
+    assert_eq!(vmla.operands[1], Operand::D(DReg::new(26).unwrap()));
+    assert_eq!(vmla.operands[2], Operand::D(DReg::new(17).unwrap()));
+    assert_eq!(vmla.shape, None);
+}
+
+#[test]
+fn vfp_move_compare_and_convert() {
+    // `vmov` immediate: the eight encoded bits expand to a float through VFPExpandImm.
+    assert_eq!(text(0xEEB0_0A00), "vmov.f32 s0, #2");
+    assert_eq!(text(0xEEB0_0B00), "vmov.f64 d0, #2");
+    // The register moves print the precision; the core transfers do not.
+    assert_eq!(text(0xEEB0_0A40), "vmov.f32 s0, s0");
+    assert_eq!(text(0xEEB0_0B40), "vmov.f64 d0, d0");
+    assert_eq!(text(0xEE00_0A10), "vmov s0, r0");
+    assert_eq!(text(0xEE10_0A10), "vmov r0, s0");
+    assert_eq!(text(0xEC41_0B30), "vmov d16, r0, r1");
+    assert_eq!(text(0xEC51_0B30), "vmov r0, r1, d16");
+    // The two-single transfer names two consecutive `s` registers and is not modelled.
+    assert_eq!(decode(0x1000, 0xEC40_0A30), Err(DecodeError::Unsupported));
+
+    // Unary operations, comparisons and the two conversions between precisions.
+    assert_eq!(text(0xEEB0_0AE0), "vabs.f32 s0, s1");
+    assert_eq!(text(0xEEB1_0A41), "vneg.f32 s0, s2");
+    assert_eq!(text(0xEEB1_0AC1), "vsqrt.f32 s0, s2");
+    assert_eq!(text(0xEEB4_0A41), "vcmp.f32 s0, s2");
+    assert_eq!(text(0xEEB4_0AC1), "vcmpe.f32 s0, s2");
+    assert_eq!(text(0xEEB5_0A40), "vcmp.f32 s0, #0");
+    assert_eq!(text(0xEEB5_0AC0), "vcmpe.f32 s0, #0");
+    assert_eq!(text(0xEEB6_0A40), "vrintr.f32 s0, s0");
+    assert_eq!(text(0xEEB6_0AC0), "vrintz.f32 s0, s0");
+    assert_eq!(text(0xEEB7_0A40), "vrintx.f32 s0, s0");
+    assert_eq!(text(0xEEB7_0AC0), "vcvt.f64.f32 d0, s0");
+    assert_eq!(text(0xEEB7_0BC0), "vcvt.f32.f64 s0, d0");
+
+    // Integer conversions name both types in the mnemonic, and `vcvtr` rounds to
+    // nearest even regardless of FPSCR.
+    assert_eq!(text(0xEEB8_0A40), "vcvt.f32.u32 s0, s0");
+    assert_eq!(text(0xEEB8_0AC0), "vcvt.f32.s32 s0, s0");
+    assert_eq!(text(0xEEB8_0B40), "vcvt.f64.u32 d0, s0");
+    assert_eq!(text(0xEEBC_0A40), "vcvtr.u32.f32 s0, s0");
+    assert_eq!(text(0xEEBC_0AC0), "vcvt.u32.f32 s0, s0");
+    assert_eq!(text(0xEEBC_0BC0), "vcvt.u32.f64 s0, d0");
+    assert_eq!(decode_at(0x1000, 0xEEBC_0A40).opcode, Opcode::VcvtR);
+    assert_eq!(decode_at(0x1000, 0xEEBC_0AC0).opcode, Opcode::Vcvt);
+    assert_eq!(
+        decode_at(0x1000, 0xEEB8_0AC0).operands[2],
+        Operand::Convert(Convert::F32FromS32)
+    );
+
+    // The fixed-point conversions are not modelled, and a comparison against zero
+    // cannot name a register.
+    assert_eq!(decode(0x1000, 0xEEBE_0A40), Err(DecodeError::Unsupported));
+    assert_eq!(decode(0x1000, 0xEEB5_0A41), Err(DecodeError::Unpredictable));
+}
+
+#[test]
+fn vfp_system_registers_and_elements() {
+    assert_eq!(text(0xEEF1_0A10), "vmrs r0, fpscr");
+    assert_eq!(text(0xEEF1_FA10), "vmrs apsr_nzcv, fpscr");
+    assert_eq!(text(0xEEE1_0A10), "vmsr fpscr, r0");
+    assert_eq!(
+        decode_at(0x1000, 0xEEF1_FA10).operands[0],
+        Operand::VfpDest(VfpDest::Apsr)
+    );
+
+    // `vmov.32 d0[0], r0` and the reading forms; the element index counts lanes of the
+    // named size.
+    assert_eq!(text(0xEE00_0B10), "vmov.32 d0[0], r0");
+    assert_eq!(text(0xEE20_0B10), "vmov.32 d0[1], r0");
+    assert_eq!(text(0xEE10_0B10), "vmov.32 r0, d0[0]");
+    assert_eq!(text(0xEE00_0B30), "vmov.16 d0[0], r0");
+    assert_eq!(text(0xEE20_0B70), "vmov.16 d0[3], r0");
+    assert_eq!(text(0xEE40_0B10), "vmov.8 d0[0], r0");
+    assert_eq!(text(0xEE60_0B70), "vmov.8 d0[7], r0");
+    assert_eq!(text(0xEE10_0B30), "vmov.s16 r0, d0[0]");
+    assert_eq!(text(0xEE90_0B30), "vmov.u16 r0, d0[0]");
+    assert_eq!(text(0xEE50_0B10), "vmov.s8 r0, d0[0]");
+    assert_eq!(text(0xEED0_0B10), "vmov.u8 r0, d0[0]");
+    // The extension bit of the register is bit 7 in these forms.
+    assert_eq!(text(0xEE00_0B90), "vmov.32 d16[0], r0");
+
+    // `vdup` from a core register, `d` and `q` forms.
+    assert_eq!(text(0xEE80_0B10), "vdup.32 d0, r0");
+    assert_eq!(text(0xEEA0_0B10), "vdup.32 q0, r0");
+    assert_eq!(text(0xEE80_0B30), "vdup.16 d0, r0");
+    assert_eq!(text(0xEEC0_0B10), "vdup.8 d0, r0");
+
+    // An element move cannot write or read `pc`.
+    assert_eq!(decode(0x1000, 0xEE00_FB10), Err(DecodeError::Unpredictable));
+    assert_eq!(decode(0x1000, 0xEE10_FB10), Err(DecodeError::Unpredictable));
+}
+
+#[test]
+fn cp15_thread_pointers() {
+    // The SDK reads the thread pointer through `mrc p15, 0, rt, c13, c0, 3`.
+    assert_eq!(text(0xEE1D_0F70), "mrc r0, tpidruro");
+    assert_eq!(decode_at(0x1000, 0xEE1D_0F70).opcode, Opcode::Mrc);
+    assert_eq!(text(0xEE0D_0F50), "mcr r0, tpidrurw");
+    assert_eq!(decode_at(0x1000, 0xEE0D_0F50).opcode, Opcode::Mcr);
+    // Any other cp15 register is outside the slice.
+    assert_eq!(decode(0x1000, 0xEE1D_0F30), Err(DecodeError::Unsupported));
+}
+
+#[test]
+fn neon_structure_transfers() {
+    assert_eq!(text(0xF420_070F), "vld1.8 {d0}, [r0]");
+    assert_eq!(text(0xF420_078F), "vld1.32 {d0}, [r0]");
+    assert_eq!(text(0xF420_0A8F), "vld1.32 {d0, d1}, [r0]");
+    assert_eq!(text(0xF420_020F), "vld1.8 {d0, d1, d2, d3}, [r0]");
+    assert_eq!(text(0xF400_020F), "vst1.8 {d0, d1, d2, d3}, [r0]");
+    // The writeback forms: `!` advances by the transfer size, a register is a
+    // post-index.
+    assert_eq!(text(0xF420_078D), "vld1.32 {d0}, [r0]!");
+    assert_eq!(text(0xF420_0781), "vld1.32 {d0}, [r0], r1");
+    // The interleaved layouts.
+    assert_eq!(text(0xF420_080F), "vld2.8 {d0, d1}, [r0]");
+    assert_eq!(text(0xF400_080F), "vst2.8 {d0, d1}, [r0]");
+    assert_eq!(text(0xF420_090F), "vld2.8 {d0, d2}, [r0]");
+    assert_eq!(text(0xF420_030F), "vld2.8 {d0, d1, d2, d3}, [r0]");
+    assert_eq!(text(0xF420_040F), "vld3.8 {d0, d1, d2}, [r0]");
+    assert_eq!(text(0xF420_000F), "vld4.8 {d0, d1, d2, d3}, [r0]");
+    assert_eq!(text(0xF420_079F), "vld1.32 {d0}, [r0]");
+    assert_eq!(text(0xF420_07CF), "vld1.64 {d0}, [r0]");
+
+    let mem = match decode_at(0x1000, 0xF420_090F).operands.as_slice() {
+        [Operand::NeonMem(mem)] => *mem,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(mem.first, DReg::new(0).unwrap());
+    assert_eq!(mem.count, 2);
+    assert_eq!(mem.stride, 2);
+    assert_eq!(mem.interleave, 2);
+    assert_eq!(mem.esize, 8);
+    assert_eq!(mem.update, PostUpdate::None);
+    // The alignment field is a promise about the address, not an encoding of the
+    // transfer; `vld1.32` with align `01` is 8 bytes aligned.
+    let aligned = match decode_at(0x1000, 0xF420_079F).operands.as_slice() {
+        [Operand::NeonMem(mem)] => *mem,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(aligned.align, Some(8));
+
+    // The single-lane forms and the block transfer are outside the slice, and an
+    // unallocated type is rejected.
+    assert_eq!(decode(0x1000, 0xF4A0_000F), Err(DecodeError::Unsupported));
+    assert_eq!(decode(0x1000, 0xF420_0F0F), Err(DecodeError::Unsupported));
+}
+
+#[test]
+fn neon_data_processing() {
+    // The three-register group: the logic operations use the size field as their own
+    // selector and print no element suffix.
+    assert_eq!(text(0xF201_0112), "vand d0, d1, d2");
+    assert_eq!(text(0xF211_0112), "vbic d0, d1, d2");
+    assert_eq!(text(0xF221_0112), "vorr d0, d1, d2");
+    assert_eq!(text(0xF231_0112), "vorn d0, d1, d2");
+    assert_eq!(text(0xF301_0112), "veor d0, d1, d2");
+    assert_eq!(text(0xF311_0112), "vbsl d0, d1, d2");
+
+    // Integer arithmetic, with the element suffix.
+    assert_eq!(text(0xF201_0802), "vadd.i8 d0, d1, d2");
+    assert_eq!(text(0xF211_0802), "vadd.i16 d0, d1, d2");
+    assert_eq!(text(0xF221_0802), "vadd.i32 d0, d1, d2");
+    assert_eq!(text(0xF231_0802), "vadd.i64 d0, d1, d2");
+    assert_eq!(text(0xF301_0802), "vsub.i8 d0, d1, d2");
+    assert_eq!(text(0xF221_0912), "vmul.i32 d0, d1, d2");
+    assert_eq!(text(0xF201_0912), "vmul.i8 d0, d1, d2");
+
+    // Comparisons, tests and the extrema, signed and unsigned.
+    assert_eq!(text(0xF201_0312), "vcge.s8 d0, d1, d2");
+    assert_eq!(text(0xF301_0312), "vcge.u8 d0, d1, d2");
+    assert_eq!(text(0xF201_0302), "vcgt.s8 d0, d1, d2");
+    assert_eq!(text(0xF301_0302), "vcgt.u8 d0, d1, d2");
+    assert_eq!(text(0xF201_0602), "vmax.s8 d0, d1, d2");
+    assert_eq!(text(0xF301_0602), "vmax.u8 d0, d1, d2");
+    assert_eq!(text(0xF201_0612), "vmin.s8 d0, d1, d2");
+    assert_eq!(text(0xF301_0612), "vmin.u8 d0, d1, d2");
+    assert_eq!(text(0xF201_0812), "vtst.8 d0, d1, d2");
+    assert_eq!(text(0xF301_0812), "vceq.i8 d0, d1, d2");
+
+    // The float forms live at their own `(size, opc1)` positions.
+    assert_eq!(text(0xF201_0D02), "vadd.f32 d0, d1, d2");
+    assert_eq!(text(0xF221_0D02), "vsub.f32 d0, d1, d2");
+    assert_eq!(text(0xF301_0D12), "vmul.f32 d0, d1, d2");
+    assert_eq!(text(0xF201_0D12), "vmla.f32 d0, d1, d2");
+    assert_eq!(text(0xF221_0D12), "vmls.f32 d0, d1, d2");
+    assert_eq!(text(0xF201_0C12), "vfma.f32 d0, d1, d2");
+    assert_eq!(text(0xF221_0C12), "vfms.f32 d0, d1, d2");
+    assert_eq!(text(0xF201_0E02), "vceq.f32 d0, d1, d2");
+    assert_eq!(text(0xF301_0E02), "vcge.f32 d0, d1, d2");
+    assert_eq!(text(0xF201_0F02), "vmax.f32 d0, d1, d2");
+    assert_eq!(text(0xF221_0F02), "vmin.f32 d0, d1, d2");
+
+    // A quadword names an even `d` register and sets the shape.
+    let q = decode_at(0x1000, 0xF242_0842);
+    assert_eq!(q.to_string(), "vadd.i8 q8, q1, q1");
+    assert_eq!(q.shape, Some(VecShape { esize: 8, q: true }));
+    assert_eq!(q.operands[0], Operand::D(DReg::new(16).unwrap()));
+
+    // The two-register group.
+    assert_eq!(text(0xF3B0_0042), "vrev64.8 q0, q1");
+    assert_eq!(text(0xF3B4_0082), "vrev32.16 d0, d2");
+    assert_eq!(text(0xF3B4_0102), "vrev16.16 d0, d2");
+    assert_eq!(text(0xF3B0_0582), "vmvn d0, d2");
+    assert_eq!(text(0xF3B1_0300), "vabs.s8 d0, d0");
+    assert_eq!(text(0xF3B1_0380), "vneg.s8 d0, d0");
+    assert_eq!(text(0xF3B9_0700), "vabs.f32 d0, d0");
+    assert_eq!(text(0xF3B9_0780), "vneg.f32 d0, d0");
+
+    // `vext` shifts the concatenation by whole bytes.
+    assert_eq!(text(0xF2B1_0302), "vext.8 d0, d1, d2, #0x3");
+    assert_eq!(text(0xF2B1_0382), "vext.8 d0, d17, d2, #0x3");
+
+    // The modified immediate: the lane size comes from `cmode` and the value repeats in
+    // every lane.
+    assert_eq!(text(0xF280_101F), "vmov.i32 d1, #0xf");
+    assert_eq!(text(0xF280_121F), "vmov.i32 d1, #0xf00");
+    assert_eq!(text(0xF280_181F), "vmov.i16 d1, #0xf");
+    assert_eq!(text(0xF280_1E1F), "vmov.i8 d1, #0xf");
+    assert_eq!(text(0xF280_1C1F), "vmov.i32 d1, #0xfff");
+    assert_eq!(text(0xF280_111F), "vorr.i32 d1, #0xf");
+    assert_eq!(text(0xF280_103F), "vmvn.i32 d1, #0xf");
+    assert_eq!(text(0xF280_113F), "vbic.i32 d1, #0xf");
+    assert_eq!(
+        decode_at(0x1000, 0xF280_1E1F).operands[1],
+        Operand::Imm64(0x0f0f_0f0f_0f0f_0f0f)
+    );
+
+    // The table lookups, the lane duplicate and the float immediate are not modelled.
+    assert_eq!(decode(0x1000, 0xF3B0_0802), Err(DecodeError::Unsupported));
+    assert_eq!(decode(0x1000, 0xF3B1_0C02), Err(DecodeError::Unsupported));
+    assert_eq!(decode(0x1000, 0xF280_1F1F), Err(DecodeError::Unsupported));
+}
+
+#[test]
+fn unsupported_families_are_named() {
+    assert_eq!(
+        describe_unsupported(0xEEBE_0A40),
+        "vcvt between floating point and fixed point is outside the A32 slice"
+    );
+    assert_eq!(
+        describe_unsupported(0xEE00_0E10),
+        "coprocessor access other than VFP/NEON (MCR/MRC/CDP) is outside the A32 slice"
+    );
+    // The two-register group names what it is missing.
+    assert_eq!(
+        describe_unsupported(0xF3B0_0802),
+        "an Advanced SIMD two-register encoding this slice does not model (the table lookups, `vswp`, `vdup` from a lane or a shift by immediate)"
+    );
+    // The three-register space keeps the generic name.
+    assert_eq!(
+        describe_unsupported(0xF213_0112),
+        "an Advanced SIMD data-processing encoding this slice does not model"
+    );
+    assert_eq!(
+        describe_unsupported(0xF420_0F0F),
+        "an Advanced SIMD structure transfer this slice does not model"
+    );
+    assert_eq!(
+        describe_unsupported(0xF4A0_000F),
+        "the single-lane Advanced SIMD transfers (`vld1.single` and friends) are outside the A32 slice"
+    );
+}
+
+/// `udiv`/`sdiv`: `cond 0111 00x1 Rd 1111 Rm 0001 Rn`.
+fn divide(unsigned: bool, rd: u32, rn: u32, rm: u32) -> u32 {
+    0xE710_F010 | (u32::from(unsigned) << 21) | (rd << 16) | (rm << 8) | rn
+}
+
+/// One of the media dual multiplies. `group` is bits 27:20 (`0b0111_0000`,
+/// `0b0111_0100` or `0b0111_0101`), `form` bits 7:6 and `modifier` bit 5.
+fn media_mac(group: u32, form: u32, modifier: bool, rd: u32, ra: u32, rm: u32, rn: u32) -> u32 {
+    0xE000_0000
+        | (group << 20)
+        | (rd << 16)
+        | (ra << 12)
+        | (rm << 8)
+        | (form << 6)
+        | (u32::from(modifier) << 5)
+        | 0x10
+        | rn
+}
+
+#[test]
+fn integer_divide_decodes() {
+    // The word MK8D stops on.
+    assert_eq!(text(0xE735_F710), "udiv r5, r0, r7");
+    assert_eq!(text_at(0x1000, divide(true, 0, 1, 2)), "udiv r0, r1, r2");
+    assert_eq!(text_at(0x1000, divide(false, 3, 4, 5)), "sdiv r3, r4, r5");
+    assert_eq!(decode_at(0x1000, 0xE735_F710).opcode, Opcode::Udiv);
+    assert_eq!(
+        decode_at(0x1000, divide(false, 0, 0, 0)).opcode,
+        Opcode::Sdiv
+    );
+    // Bits 15:12 are SBZ and bits 7:4 are fixed at 0b0001.
+    assert_eq!(
+        decode(0x1000, divide(false, 0, 0, 7) & !0x0000_F000),
+        Err(DecodeError::Unpredictable)
+    );
+    assert_eq!(
+        decode(0x1000, divide(false, 0, 0, 7) | 0x20),
+        Err(DecodeError::Unpredictable)
+    );
+    // `pc` is not a legal operand of either form.
+    assert_eq!(
+        decode(0x1000, divide(true, 15, 0, 7)),
+        Err(DecodeError::Unpredictable)
+    );
+}
+
+#[test]
+fn media_dual_multiplies_decode() {
+    // `smuad`/`smusd` name no accumulator, so bits 15:12 are 1111.
+    assert_eq!(
+        text_at(0x1000, media_mac(0x70, 0, false, 0, 15, 1, 2)),
+        "smuad r0, r2, r1"
+    );
+    assert_eq!(
+        text_at(0x1000, media_mac(0x70, 0, true, 0, 15, 1, 2)),
+        "smuadx r0, r2, r1"
+    );
+    assert_eq!(
+        text_at(0x1000, media_mac(0x70, 1, false, 0, 15, 1, 2)),
+        "smusd r0, r2, r1"
+    );
+    assert_eq!(
+        text_at(0x1000, media_mac(0x70, 1, true, 0, 15, 1, 2)),
+        "smusdx r0, r2, r1"
+    );
+    assert_eq!(
+        text_at(0x1000, media_mac(0x70, 0, false, 0, 3, 1, 2)),
+        "smlad r0, r2, r1, r3"
+    );
+    assert_eq!(
+        text_at(0x1000, media_mac(0x70, 0, true, 0, 3, 1, 2)),
+        "smladx r0, r2, r1, r3"
+    );
+    assert_eq!(
+        text_at(0x1000, media_mac(0x70, 1, false, 0, 3, 1, 2)),
+        "smlsd r0, r2, r1, r3"
+    );
+    assert_eq!(
+        text_at(0x1000, media_mac(0x70, 1, true, 0, 3, 1, 2)),
+        "smlsdx r0, r2, r1, r3"
+    );
+    // Bits 7:6 = 1x are not allocated in this group.
+    assert_eq!(
+        decode(0x1000, media_mac(0x70, 2, false, 0, 3, 1, 2)),
+        Err(DecodeError::Unallocated)
+    );
+
+    // The 64-bit accumulators name `RdHi:RdLo` in the two register fields.
+    assert_eq!(
+        text_at(0x1000, media_mac(0x74, 0, false, 1, 2, 3, 4)),
+        "smlald r1, r2, r4, r3"
+    );
+    assert_eq!(
+        text_at(0x1000, media_mac(0x74, 0, true, 1, 2, 3, 4)),
+        "smlaldx r1, r2, r4, r3"
+    );
+    assert_eq!(
+        text_at(0x1000, media_mac(0x74, 1, false, 1, 2, 3, 4)),
+        "smlsld r1, r2, r4, r3"
+    );
+    assert_eq!(
+        text_at(0x1000, media_mac(0x74, 1, true, 1, 2, 3, 4)),
+        "smlsldx r1, r2, r4, r3"
+    );
+    assert_eq!(
+        decode(0x1000, media_mac(0x74, 0, false, 1, 1, 3, 4)),
+        Err(DecodeError::Unpredictable),
+        "the two halves of the accumulator must differ"
+    );
+
+    // The top-word multiplies: bits 7:6 = 00 with `Ra = 1111` is `smmul`, otherwise
+    // `smmla`; bits 7:6 = 11 is `smmls`.
+    assert_eq!(
+        text_at(0x1000, media_mac(0x75, 0, false, 0, 15, 1, 2)),
+        "smmul r0, r2, r1"
+    );
+    assert_eq!(
+        text_at(0x1000, media_mac(0x75, 0, true, 0, 15, 1, 2)),
+        "smmulr r0, r2, r1"
+    );
+    assert_eq!(
+        text_at(0x1000, media_mac(0x75, 0, false, 0, 3, 1, 2)),
+        "smmla r0, r2, r1, r3"
+    );
+    assert_eq!(
+        text_at(0x1000, media_mac(0x75, 0, true, 0, 3, 1, 2)),
+        "smmlar r0, r2, r1, r3"
+    );
+    assert_eq!(
+        text_at(0x1000, media_mac(0x75, 3, false, 0, 3, 1, 2)),
+        "smmls r0, r2, r1, r3"
+    );
+    assert_eq!(
+        text_at(0x1000, media_mac(0x75, 3, true, 0, 3, 1, 2)),
+        "smmlsr r0, r2, r1, r3"
+    );
+    assert_eq!(
+        decode(0x1000, media_mac(0x75, 1, false, 0, 3, 1, 2)),
+        Err(DecodeError::Unallocated)
+    );
+}
+
+#[test]
+fn barriers_hints_and_prefetch_decode() {
+    assert_eq!(text(0xF57F_F05B), "dmb #0xb");
+    assert_eq!(text(0xF57F_F04F), "dsb #0xf");
+    assert_eq!(text(0xF57F_F06F), "isb #0xf");
+    assert_eq!(text(0xF57F_F070), "clrex #0x0");
+    assert_eq!(text(0xF57F_F030), "nop #0x0");
+    assert_eq!(text(0xF57F_F031), "yield #0x1");
+    assert_eq!(text(0xF57F_F032), "wfe #0x2");
+    assert_eq!(text(0xF57F_F033), "wfi #0x3");
+    assert_eq!(text(0xF57F_F034), "sev #0x4");
+    assert_eq!(text(0xF57F_F035), "sevl #0x5");
+    // `pld [rn, #imm12]`, including the `pc`-relative literal form.
+    assert_eq!(text(0xF5D0_F010), "pld [r0, #0x10]");
+    assert_eq!(text(0xF550_F010), "pld [r0, #-0x10]");
+    assert_eq!(text(0xF55F_F004), "pld [pc, #-0x4]");
+    // `clrex` has a fixed zero option, and the hint numbers stop at `sevl`.
+    assert_eq!(decode(0x1000, 0xF57F_F071), Err(DecodeError::Unallocated));
+    assert_eq!(decode(0x1000, 0xF57F_F036), Err(DecodeError::Unallocated));
+    // `cps`, `setend` and `pli` share the space and are not modelled.
+    assert_eq!(decode(0x1000, 0xF102_0000), Err(DecodeError::Unsupported));
+    assert_eq!(decode(0x1000, 0xF51F_F000), Err(DecodeError::Unsupported));
+}
+
+#[test]
+fn mrrc_reads_the_counters() {
+    // The word MK8D executes to read `CNTPCT` into `r2:r3`.
+    assert_eq!(text(0xEC53_2F0E), "mrrc r2, r3, cntpct");
+    assert_eq!(text(0xEC51_0F1E), "mrrc r0, r1, cntvct");
+    assert_eq!(decode_at(0x1000, 0xEC53_2F0E).opcode, Opcode::Mrrc);
+    assert_eq!(
+        decode_at(0x1000, 0xEC53_2F0E).operands[0],
+        Operand::Regs {
+            lo: Reg::R2,
+            hi: Reg::R3
+        }
+    );
+    // `Rt` and `Rt2` must differ and must not be `pc`.
+    assert_eq!(decode(0x1000, 0xEC52_2F0E), Err(DecodeError::Unpredictable));
+    assert_eq!(decode(0x1000, 0xEC5F_2F0E), Err(DecodeError::Unpredictable));
+    // Any other `cp15` pair transfer is outside the slice.
+    assert_eq!(decode(0x1000, 0xEC53_2F03), Err(DecodeError::Unsupported));
 }

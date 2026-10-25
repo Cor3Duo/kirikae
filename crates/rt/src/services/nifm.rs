@@ -61,8 +61,21 @@ fn ip_config_info() -> Reply {
     Reply::ok().bytes(&[0; IP_CONFIG_INFO_SIZE])
 }
 
-fn empty_network_profile() -> Reply {
-    Reply::ok().bytes(&[0; NETWORK_PROFILE_SIZE])
+/// `GetCurrentNetworkProfile` (5) and `GetNetworkProfile` (8) hand the profile
+/// back through a type-0x1A output buffer, not in the message's raw data: libnx
+/// sends them with `SfBufferAttr_HipcPointer | SfBufferAttr_FixedSize |
+/// SfBufferAttr_Out`. A zeroed profile is the offline machine's "no network
+/// profile stored", and it has to land in the caller's buffer or the SDK keeps
+/// whatever it had there.
+fn network_profile(c: &mut Cpu, req: &Request) -> Reply {
+    let Some(b) = req.x.first().or_else(|| req.b.first()) else {
+        return Reply::ok();
+    };
+    let n = (b.size as usize).min(NETWORK_PROFILE_SIZE);
+    c.process()
+        .memory
+        .write(b.addr, &[0; NETWORK_PROFILE_SIZE][..n]);
+    Reply::ok()
 }
 
 impl Service for GeneralService {
@@ -83,7 +96,9 @@ impl Service for GeneralService {
             }
             // CreateRequest(RequirementPreset) -> IRequest.
             4 => Reply::ok().object(Arc::new(NetworkRequest::new(c.process()))),
-            5 | 8 => empty_network_profile(),
+            // GetCurrentNetworkProfile / GetNetworkProfile: both fill the
+            // caller's output buffer with an empty SfNetworkProfileData.
+            5 | 8 => network_profile(c, req),
             // EnumerateNetworkProfiles: no profile is stored.
             7 => Reply::ok().u32(0),
             12 => Reply::ok().u32(0),
@@ -251,10 +266,79 @@ mod tests {
         let ip = ip_config_info();
         assert_eq!(ip.data.len(), 0x16);
         assert!(ip.data.iter().all(|&b| b == 0));
+        assert_eq!(NETWORK_PROFILE_SIZE, 0x17c);
+    }
 
-        let profile = empty_network_profile();
-        assert_eq!(profile.data.len(), 0x17c);
-        assert!(profile.data.iter().all(|&b| b == 0));
+    #[test]
+    fn the_profile_reads_land_in_the_callers_pointer_buffer() {
+        use crate::abi::Entry;
+        use crate::services::{Buf, harness};
+
+        extern "C" fn probe(c: &mut Cpu) {
+            let out = 0x1_2000_0000u64;
+            c.process()
+                .memory
+                .map_as(out, 0x1000, crate::mem::state::NORMAL, crate::mem::perm::RW)
+                .unwrap();
+            c.process().memory.write(out, &[0xaa; 0x1000]);
+
+            let service = GeneralService;
+            let full = service.call(
+                c,
+                &Request {
+                    cmd: 5,
+                    x: vec![Buf {
+                        addr: out,
+                        size: NETWORK_PROFILE_SIZE as u64,
+                    }],
+                    ..Default::default()
+                },
+            );
+            let profile = c
+                .process()
+                .memory
+                .read(out, NETWORK_PROFILE_SIZE as u64)
+                .unwrap();
+
+            // A buffer shorter than the struct takes only what fits; the bytes
+            // past it keep their old contents.
+            let short = out + 0x200;
+            c.process().memory.write(short, &[0xbb; 0x10]);
+            let partial = service.call(
+                c,
+                &Request {
+                    cmd: 8,
+                    x: vec![Buf {
+                        addr: short,
+                        size: 8,
+                    }],
+                    ..Default::default()
+                },
+            );
+            let tail = c.process().memory.read(short, 0x10).unwrap();
+
+            harness::record(
+                "profiles",
+                &[
+                    u64::from(full.result),
+                    full.data.len() as u64,
+                    profile.iter().filter(|&&b| b == 0).count() as u64,
+                    u64::from(partial.result),
+                    partial.data.len() as u64,
+                    tail.iter().filter(|&&b| b == 0).count() as u64,
+                    u64::from(tail[8]),
+                ],
+            );
+            c.halt();
+        }
+        harness::run(vec![Entry {
+            addr: harness::ENTRY,
+            func: probe,
+        }]);
+        assert_eq!(
+            harness::observed("profiles"),
+            vec![0, 0, NETWORK_PROFILE_SIZE as u64, 0, 0, 8, 0xbb]
+        );
     }
 
     #[test]

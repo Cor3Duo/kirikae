@@ -169,6 +169,11 @@ pub struct Counters {
     pub frames: u64,
 }
 
+/// Frames the present path composed by blitting the last drawn colour target into the window texture. The driver does
+/// this composition itself in a normal run; the replay reconstructs it because the title's command stream stops after
+/// setting the window target (`docs/nvn/CONTRACT.md` §8).
+pub static COMPOSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Whether this present is the one that must advance the frame counter: the driver's present did not.
 pub fn credit_frame(before: u64, after: u64) -> bool {
     after == before

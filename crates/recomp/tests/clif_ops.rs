@@ -622,6 +622,28 @@ fn neon_words() -> Vec<u32> {
             }
         }
     }
+    // The byte-checksum forms: CNT/MVN, UADDLP and the horizontal reductions, with a
+    // destination that aliases the source.
+    for q in [false, true] {
+        for size in 0..3 {
+            for (rn, rd) in [(1, 3), (1, 1)] {
+                words.push(asm::neon_two_misc(q, true, size, 0b00010, rn, rd));
+            }
+        }
+        for (rn, rd) in [(1, 3), (1, 1)] {
+            words.push(asm::neon_two_misc(q, false, 0, 0b00101, rn, rd));
+            words.push(asm::neon_two_misc(q, true, 0, 0b00101, rn, rd));
+        }
+        for size in 0..3 {
+            if size == 2 && !q {
+                continue;
+            }
+            for (rn, rd) in [(1, 3), (1, 1)] {
+                words.push(asm::neon_across(q, false, size, 0b11011, rn, rd));
+                words.push(asm::neon_across(q, true, size, 0b00011, rn, rd));
+            }
+        }
+    }
     words
 }
 

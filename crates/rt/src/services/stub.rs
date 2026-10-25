@@ -27,6 +27,28 @@ pub fn unimplemented(service: &str, c: &mut Cpu, req: &Request) -> Reply {
     Reply::ok().bytes(&[0; STUB_OUTPUT])
 }
 
+/// Refuses a command the runtime does not implement.
+///
+/// The reply is the CMIF "unknown command" result instead of a zero-filled
+/// success: a guest that ignores the result would otherwise treat the command as
+/// answered. The diagnostic names the command once, so a log shows *what* was
+/// missing and not only its number.
+pub fn unimplemented_named(service: &str, command: &str, c: &mut Cpu, req: &Request) -> Reply {
+    crate::usage::mark_stub("unimplemented");
+    let p = c.process();
+    p.warn_once(format!(
+        "{service} command {} ({command}) is not implemented (in: {} bytes, A={} B={} X={} C={}, called from {})",
+        req.cmd,
+        req.data.len(),
+        req.a.len(),
+        req.b.len(),
+        req.x.len(),
+        req.c.len(),
+        p.describe(c.x[30])
+    ));
+    Reply::err(result::CMIF_UNKNOWN_COMMAND)
+}
+
 pub fn plain_ok() -> Reply {
     crate::usage::mark_stub("plain ok");
     Reply::ok()

@@ -67,6 +67,19 @@ struct PlaneGeometry {
     block_height_log2: u32,
 }
 
+/// Rectangle of a queued buffer the guest wants shown, in buffer pixels.
+///
+/// Android's `QueueBufferInput` carries a crop `Rect`; NVDEC writes coded,
+/// macroblock-aligned surfaces (1920x1088 for 1080p, 912x512 for 900x506), so a
+/// YUV layer uses this rectangle to leave the padding out of the present.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Rect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
 #[derive(Clone, Debug, Default)]
 struct Slot {
     flattened: Vec<u8>,
@@ -80,6 +93,8 @@ struct Slot {
     block_height_log2: u32,
     /// Chroma planes, when the guest describes them separately.
     chroma: [PlaneGeometry; 2],
+    /// Visible rectangle inside the buffer, from the queue input.
+    crop: Option<Rect>,
 }
 
 #[derive(Default)]
@@ -785,6 +800,29 @@ fn transact(c: &Cpu, id: i32, code: u32, input: &[u8]) -> Vec<u8> {
         QUEUE_BUFFER => {
             let slot = r.i32() as usize;
             let raw = r.flattenable();
+            // One line per run so a trace shows how the guest fills the crop
+            // rectangle and the transform, even when the whole buffer is shown.
+            static FIRST_QUEUE: std::sync::Once = std::sync::Once::new();
+            if crate::host1x::trace() {
+                FIRST_QUEUE.call_once(|| {
+                    if let Some(raw) = raw.as_deref() {
+                        let word = |at: usize| {
+                            raw.get(at..at + 4)
+                                .and_then(|b| <[u8; 4]>::try_from(b).ok())
+                                .map(i32::from_le_bytes)
+                                .unwrap_or(0)
+                        };
+                        eprintln!(
+                            "vi: first queue input crop ({},{},{},{}) transform {:#x}",
+                            word(20),
+                            word(24),
+                            word(28),
+                            word(32),
+                            word(40) as u32
+                        );
+                    }
+                });
+            }
             let timestamp = queue_timestamp(raw.as_deref());
             let word = |at: usize| {
                 raw.as_ref()
@@ -805,11 +843,29 @@ fn transact(c: &Cpu, id: i32, code: u32, input: &[u8]) -> Vec<u8> {
                     crate::display::FRAMES.load(Ordering::Relaxed)
                 );
             }
-            let s = st.queue.lock().unwrap().slots.get(slot).cloned().flatten();
+            let mut s = st.queue.lock().unwrap().slots.get(slot).cloned().flatten();
+            if let Some(slot_data) = &mut s {
+                slot_data.crop = queue_crop(raw.as_deref(), slot_data.width, slot_data.height);
+                if crate::host1x::trace()
+                    && let Some(crop) = slot_data.crop
+                {
+                    eprintln!(
+                        "vi: slot {slot} crop {}x{} at {},{} of {}x{} format {}",
+                        crop.width,
+                        crop.height,
+                        crop.x,
+                        crop.y,
+                        slot_data.width,
+                        slot_data.height,
+                        slot_data.format
+                    );
+                }
+            }
             let size = match &s {
                 Some(s) => {
-                    set_layer_size(&st, s.width, s.height);
-                    (s.width, s.height)
+                    let size = s.visible();
+                    set_layer_size(&st, size.0, size.1);
+                    size
                 }
                 None => layer_size(&st),
             };
@@ -823,6 +879,12 @@ fn transact(c: &Cpu, id: i32, code: u32, input: &[u8]) -> Vec<u8> {
                     crate::sched::without_gil(c, || {
                         let prof = crate::prof::enter(crate::prof::Cat::Present);
                         let shown = if video { clock::gate(timestamp) } else { true };
+                        if crate::host1x::trace() && video {
+                            eprintln!(
+                                "vi: video queue slot {slot} {}x{} format {} shown {shown}",
+                                s.width, s.height, s.format
+                            );
+                        }
                         let presented = if shown {
                             present(p, &s, transform)
                         } else {
@@ -949,6 +1011,39 @@ fn queue_timestamp(raw: Option<&[u8]>) -> Timestamp {
     }
 }
 
+/// Reads the crop rectangle from an Android `QueueBufferInput`.
+///
+/// The flattened input starts with the timestamp (payload 0), `isAutoTimestamp`
+/// (8), the crop `Rect` (12: left, top, right, bottom) and `scalingMode` (28);
+/// `transform` follows at 32. The 8-byte flattenable header shifts all of those
+/// by 8 in the raw parcel bytes. An empty, inverted or out-of-buffer rectangle
+/// means "whole buffer", which is also what an untouched crop holds.
+fn queue_crop(raw: Option<&[u8]>, width: u32, height: u32) -> Option<Rect> {
+    let raw = raw?;
+    let word = |at: usize| {
+        raw.get(at..at + 4)
+            .and_then(|b| <[u8; 4]>::try_from(b).ok())
+            .map(i32::from_le_bytes)
+    };
+    let (left, top, right, bottom) = (word(12 + 8)?, word(16 + 8)?, word(20 + 8)?, word(24 + 8)?);
+    if left < 0 || top < 0 || right <= left || bottom <= top {
+        return None;
+    }
+    let (left, top, right, bottom) = (left as u32, top as u32, right as u32, bottom as u32);
+    if right > width || bottom > height {
+        return None;
+    }
+    if left == 0 && top == 0 && right == width && bottom == height {
+        return None;
+    }
+    Some(Rect {
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top,
+    })
+}
+
 fn parse_graphic_buffer(raw: Vec<u8>) -> Slot {
     let u = |o: usize| {
         raw.get(8 + o..12 + o)
@@ -979,6 +1074,7 @@ fn parse_graphic_buffer(raw: Vec<u8>) -> Slot {
         block_height_log2: planes[0].block_height_log2,
         chroma: [planes[1], planes[2]],
         flattened: raw,
+        crop: None,
     }
 }
 
@@ -1092,6 +1188,22 @@ fn yuv_to_rgb(y: u8, u: u8, v: u8) -> u32 {
     r << 16 | g << 8 | b
 }
 
+/// Mean luma of a converted frame, for `KIRIKAE_TRACE_VIDEO` diagnostics.
+fn mean_luma(pixels: &[u32]) -> u64 {
+    if pixels.is_empty() {
+        return 0;
+    }
+    let sum: u64 = pixels
+        .iter()
+        .map(|p| {
+            let (r, g, b) = ((p >> 16) & 0xff, (p >> 8) & 0xff, p & 0xff);
+            (r * 77 + g * 150 + b * 29) >> 8
+        })
+        .map(u64::from)
+        .sum();
+    sum / pixels.len() as u64
+}
+
 /// Byte geometry of one plane inside a layer buffer.
 struct LayerPlane {
     /// Offset from the start of the buffer.
@@ -1156,6 +1268,12 @@ impl LayerPlane {
 }
 
 impl Slot {
+    /// Size of the part of the buffer the guest displays.
+    fn visible(&self) -> (u32, u32) {
+        self.crop
+            .map_or((self.width, self.height), |crop| (crop.width, crop.height))
+    }
+
     fn is_video_format(&self) -> bool {
         is_yuv_format_code(self.format)
             || matches!(
@@ -1258,18 +1376,24 @@ fn buffer_size(planes: &[LayerPlane]) -> u64 {
     planes.iter().map(|p| p.start + p.size()).max().unwrap_or(0)
 }
 
-/// Decodes a layer buffer into `0x00RRGGBB` pixels.
+/// Decodes the visible part of a layer buffer into `0x00RRGGBB` pixels.
+///
+/// The guest's crop rectangle selects the region inside the buffer; without one
+/// the whole buffer is decoded. Plane geometry still describes the full
+/// allocation, so block-linear offsets are computed at absolute coordinates.
 fn decode_layer(bytes: &[u8], slot: &Slot, planes: &[LayerPlane], format: PixelFormat) -> Vec<u32> {
-    let (w, h) = (slot.width as u64, slot.height as u64);
+    let (w, h) = slot.visible();
+    let (ox, oy) = slot.crop.map_or((0, 0), |crop| (crop.x, crop.y));
     let mut pixels = vec![0u32; (w * h) as usize];
     let luma = &planes[0];
     for y in 0..h {
         for x in 0..w {
-            let at = luma.offset(x, y);
+            let (sx, sy) = (ox as u64 + x as u64, oy as u64 + y as u64);
+            let at = luma.offset(sx, sy);
             let pixel = match format {
                 PixelFormat::Yuv(layout) => {
                     let sample = bytes.get(at).copied().unwrap_or(0);
-                    let (u, v) = layout.chroma(bytes, planes, x, y);
+                    let (u, v) = layout.chroma(bytes, planes, sx, sy);
                     yuv_to_rgb(sample, u, v)
                 }
                 _ => {
@@ -1297,10 +1421,11 @@ fn decode_frame(bytes: &[u8], slot: &Slot, format: PixelFormat, transform: u32) 
         return None;
     }
     let pixels = decode_layer(bytes, slot, &planes, format);
+    let (width, height) = slot.visible();
     Some(transformed(
         Frame {
-            width: slot.width,
-            height: slot.height,
+            width,
+            height,
             pixels,
         },
         transform,
@@ -1338,11 +1463,20 @@ fn transformed(frame: Frame, transform: u32) -> Frame {
 
 fn read_frame(p: &Process, s: &Slot, transform: u32) -> Option<Frame> {
     let m = p.gpu.nvmap(s.nvmap)?;
-    let pixels = p.gpu.read_pixels(m.addr + s.offset, s.width, s.height)?;
+    let mut pixels = p.gpu.read_pixels(m.addr + s.offset, s.width, s.height)?;
+    let (width, height) = s.visible();
+    if let Some(crop) = s.crop {
+        let mut cropped = Vec::with_capacity((crop.width * crop.height) as usize);
+        for y in 0..crop.height {
+            let start = ((crop.y + y) * s.width + crop.x) as usize;
+            cropped.extend_from_slice(&pixels[start..start + crop.width as usize]);
+        }
+        pixels = cropped;
+    }
     Some(transformed(
         Frame {
-            width: s.width,
-            height: s.height,
+            width,
+            height,
             pixels,
         },
         transform,
@@ -1420,6 +1554,41 @@ fn present(p: &Process, s: &Slot, transform: u32) -> bool {
         }
     }
     let cpu = m.addr + s.offset;
+    if crate::host1x::trace() {
+        eprintln!(
+            "vi: present {}x{} format {} at {cpu:#x} (nvmap {}+{:#x}) video {} rendered {}",
+            s.width,
+            s.height,
+            s.format,
+            s.nvmap,
+            s.offset,
+            is_video_layer(p, s),
+            p.gpu.rendered(cpu, s.width, s.height)
+        );
+    }
+    // A surface VIC composed from a video source is written by DMA, so a GPU
+    // image registered for the same memory is stale or never filled: read it
+    // back from guest memory instead of presenting that image.
+    if !matches!(format, PixelFormat::Yuv(_)) && is_video_layer(p, s) {
+        let Some(frame) = read_frame_from_memory(p, cpu, s, format, transform) else {
+            p.warn_once(format!(
+                "vi: video surface format {} at {cpu:#x} could not be read; frame not presented",
+                s.format
+            ));
+            return false;
+        };
+        if crate::host1x::trace() {
+            eprintln!(
+                "vi: composed video {}x{} format {} at {cpu:#x} -> mean luma {}",
+                frame.width,
+                frame.height,
+                s.format,
+                mean_luma(&frame.pixels)
+            );
+        }
+        present_frame(p, frame);
+        return true;
+    }
     // YUV layers never reach the swapchain as an image: decode the planes and
     // upload the BT.601-converted pixels through the RGB present path, applying
     // the layer transform while copying.
@@ -1432,6 +1601,15 @@ fn present(p: &Process, s: &Slot, transform: u32) -> bool {
             return false;
         };
         clock::converted();
+        if crate::host1x::trace() {
+            eprintln!(
+                "vi: YUV layer {}x{} format {} at {cpu:#x} -> mean luma {}",
+                frame.width,
+                frame.height,
+                s.format,
+                mean_luma(&frame.pixels)
+            );
+        }
         present_frame(p, frame);
         return true;
     }
@@ -1440,9 +1618,10 @@ fn present(p: &Process, s: &Slot, transform: u32) -> bool {
         transform & TRANSFORM_FLIP_V != 0,
     );
     let rotation = transform & TRANSFORM_ROT_90 != 0;
-    // The swapchain present path only handles RGBA buffers and cannot rotate.
+    // The swapchain present path only handles RGBA buffers, cannot rotate and
+    // cannot crop, so a transformed or cropped layer is decoded on the CPU.
     let readable = format == PixelFormat::Rgba8888;
-    let direct = readable && !rotation;
+    let direct = readable && !rotation && s.crop.is_none();
     let dump = display::dump_due() || crate::usage::frame_wanted();
     if !display::headless()
         && direct
@@ -1454,6 +1633,17 @@ fn present(p: &Process, s: &Slot, transform: u32) -> bool {
         } else {
             None
         };
+        if crate::host1x::trace()
+            && let Some(frame) = &frame
+        {
+            eprintln!(
+                "vi: presented {}x{} mean luma {} (format {})",
+                frame.width,
+                frame.height,
+                mean_luma(&frame.pixels),
+                s.format
+            );
+        }
         display::presented(p, frame.as_ref());
         return true;
     }
@@ -1469,6 +1659,15 @@ fn present(p: &Process, s: &Slot, transform: u32) -> bool {
         p.warn_once(format!("vi: buffer at {cpu:#x} is not readable"));
         return false;
     };
+    if crate::host1x::trace() {
+        eprintln!(
+            "vi: layer {}x{} format {} at {cpu:#x} -> mean luma {}",
+            frame.width,
+            frame.height,
+            s.format,
+            mean_luma(&frame.pixels)
+        );
+    }
     present_frame(p, frame);
     true
 }
@@ -1983,6 +2182,100 @@ mod tests {
         let slot = yuv_slot(4, 2, 8);
         // The luma plane alone is not enough for the NV12 buffer.
         assert!(decode_frame(&[16; 16], &slot, PixelFormat::Yuv(YuvLayout::Nv12), 0).is_none());
+    }
+
+    #[test]
+    fn queue_crop_reads_the_guest_rectangle() {
+        let mut raw = vec![0u8; 0x60];
+        let put = |raw: &mut Vec<u8>, at: usize, v: i32| {
+            raw[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        };
+        // timestamp and isAutoTimestamp are not a crop.
+        put(&mut raw, 8, 1234);
+        put(&mut raw, 20, 4); // left
+        put(&mut raw, 24, 6); // top
+        put(&mut raw, 28, 900); // right
+        put(&mut raw, 32, 506); // bottom
+        assert_eq!(
+            queue_crop(Some(&raw), 912, 512),
+            Some(Rect {
+                x: 4,
+                y: 6,
+                width: 896,
+                height: 500
+            })
+        );
+        // The whole buffer, an empty rectangle, an inverted one, one outside
+        // the buffer and a missing queue input all mean "no crop".
+        put(&mut raw, 20, 0);
+        put(&mut raw, 24, 0);
+        put(&mut raw, 28, 912);
+        put(&mut raw, 32, 512);
+        assert_eq!(queue_crop(Some(&raw), 912, 512), None);
+        put(&mut raw, 28, 0);
+        assert_eq!(queue_crop(Some(&raw), 912, 512), None);
+        put(&mut raw, 20, 10);
+        put(&mut raw, 28, 5);
+        assert_eq!(queue_crop(Some(&raw), 912, 512), None);
+        put(&mut raw, 20, 0);
+        put(&mut raw, 28, 913);
+        assert_eq!(queue_crop(Some(&raw), 912, 512), None);
+        assert_eq!(queue_crop(None, 912, 512), None);
+    }
+
+    /// A decoded 1080p picture is coded as 1920x1088 (and 900x506 as 912x512).
+    /// The queue input's crop rectangle is what leaves the coded padding out.
+    #[test]
+    fn a_yuv_layer_crop_leaves_out_the_coded_padding() {
+        let slot = Slot {
+            width: 4,
+            height: 2,
+            pitch: 4,
+            crop: Some(Rect {
+                x: 1,
+                y: 0,
+                width: 2,
+                height: 1,
+            }),
+            ..Slot::default()
+        };
+        let mut bytes = vec![16, 235, 81, 81];
+        bytes.extend_from_slice(&[16, 16, 16, 16]);
+        bytes.extend_from_slice(&[128, 128, 90, 240]);
+        let frame = decode_frame(&bytes, &slot, PixelFormat::Yuv(YuvLayout::Nv12), 0).unwrap();
+        assert_eq!((frame.width, frame.height), (2, 1));
+        // Pixel 1 is luma 235 with neutral chroma; pixel 2 is the red pair.
+        assert_eq!(frame.pixels, [0x00ff_ffff, 0x00ff_0000]);
+    }
+
+    #[test]
+    fn a_rotated_yuv_layer_keeps_its_colours() {
+        // Left half red (Y 81, U 90, V 240), right half green (145, 54, 34).
+        let slot = yuv_slot(4, 2, 4);
+        let mut bytes = vec![81, 81, 145, 145, 81, 81, 145, 145];
+        bytes.extend_from_slice(&[90, 240, 54, 34]);
+        let frame = decode_frame(
+            &bytes,
+            &slot,
+            PixelFormat::Yuv(YuvLayout::Nv12),
+            TRANSFORM_ROT_90,
+        )
+        .unwrap();
+        assert_eq!((frame.width, frame.height), (2, 4));
+        let red = yuv_to_rgb(81, 90, 240);
+        let green = yuv_to_rgb(145, 54, 34);
+        assert_eq!(
+            frame.pixels,
+            [red, red, red, red, green, green, green, green]
+        );
+    }
+
+    #[test]
+    fn mean_luma_reports_black_and_white() {
+        assert_eq!(mean_luma(&[]), 0);
+        assert_eq!(mean_luma(&[0, 0]), 0);
+        assert_eq!(mean_luma(&[0x00ff_ffff, 0x00ff_ffff]), 255);
+        assert_eq!(mean_luma(&[0, 0x00ff_ffff]), 127);
     }
 
     #[test]

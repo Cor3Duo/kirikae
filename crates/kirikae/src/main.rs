@@ -21,6 +21,14 @@ usage:
         [--profile <file>]                           also compile the addresses a run had to
                                                      interpret (default: <dir>/<name>.profile,
                                                      written by the executable)
+        [--profile-loop <runs>]                      build, run the result headless for
+                                                     --run-seconds with a profile, rebuild with
+                                                     what it interpreted, and repeat up to <runs>
+                                                     times (stop when the count stops falling or a
+                                                     run adds nothing); it starts the game, so it
+                                                     needs this flag explicitly
+        [--run-seconds <s>]                          bound for each --profile-loop run (default
+                                                     60, at least 10: the stats window)
   kirikae run <file>                                    run with the interpreter only
   kirikae info <file>                                   modules, segments and decoder coverage
                                                      (NRO, NSO, ExeFS folder, DNSP)
@@ -155,6 +163,13 @@ fn cmd_build(args: &[String]) -> Result<ExitCode, String> {
     if opts.fast_regs && opts.backend != Backend::Cranelift {
         return Err("--fast-regs needs the Cranelift backend".into());
     }
+    let runs = profile_loop_arguments(args)?;
+    if runs.is_some() && opts.backend != Backend::Cranelift {
+        return Err("--profile-loop needs the Cranelift backend".into());
+    }
+    if let Some((runs, run_seconds)) = runs {
+        return profile_loop(&source, &mut opts, runs, run_seconds);
+    }
     let started = std::time::Instant::now();
     let report = build(&source, &opts)?;
     let dlls = match report.dlls {
@@ -172,12 +187,299 @@ fn cmd_build(args: &[String]) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Parse and validate `--profile-loop <runs>` with its `--run-seconds` bound.
+///
+/// `None` means no loop was asked for: the game is never started without that flag.
+fn profile_loop_arguments(args: &[String]) -> Result<Option<(usize, f64)>, String> {
+    let a = parse(args)?;
+    let runs = match a.option(&["--profile-loop"]) {
+        Some(v) => v
+            .parse::<usize>()
+            .map_err(|_| format!("bad profile-loop count `{v}`"))?,
+        None => return Ok(None),
+    };
+    if runs == 0 {
+        return Err("--profile-loop needs at least one run".into());
+    }
+    let run_seconds = match a.option(&["--run-seconds"]) {
+        Some(v) => v
+            .parse::<f64>()
+            .map_err(|_| format!("bad run bound `{v}`"))?,
+        None => 60.0,
+    };
+    if run_seconds < 10.0 {
+        return Err("--run-seconds must be at least 10: the stats window is 10 s".into());
+    }
+    Ok(Some((runs, run_seconds)))
+}
+
+/// What one bounded headless run measured.
+struct RunOutcome {
+    /// Interpreted instructions, from the last stats line (a run shorter than one window has no
+    /// stats line, so this stays `None`).
+    interpreted: Option<u64>,
+    frames: Option<u64>,
+    /// Seconds from spawn until the first presented frame, seen as the frame dump the run was
+    /// asked to write.
+    first_frame: Option<f64>,
+    exit: Option<i32>,
+    log: PathBuf,
+}
+
+/// The last number written before `marker`.
+fn number_before(text: &str, marker: &str) -> Option<u64> {
+    let head = &text[..text.rfind(marker)?];
+    head.split(|c: char| !c.is_ascii_digit())
+        .next_back()
+        .filter(|s| !s.is_empty())?
+        .parse()
+        .ok()
+}
+
+/// Read the counters out of the runtime's log.
+///
+/// The periodic line is `... [  10s] N frames (..) ... M interpreted`; a clean exit adds
+/// `... N recompiled function calls, M interpreted instructions, exit code X`. The Vulkan
+/// summary also says "0 frames through the swapchain", which is why the frame marker includes
+/// the parenthesis.
+fn parse_run(log: &str) -> (Option<u64>, Option<u64>) {
+    (
+        number_before(log, " interpreted"),
+        number_before(log, " frames ("),
+    )
+}
+
+/// Run the built executable headless for at most `seconds`, with a profile and a first-frame
+/// dump, and read back what it recorded.
+///
+/// The runtime flushes the profile every ten seconds and the stats line is written at the same
+/// interval, so a shorter bound would measure nothing; `profile_loop_arguments` rejects that.
+/// Killing the process at the bound loses the last few seconds of recorded addresses, which is why
+/// the profile is only evidence for the next build and never trusted for the bounds of this one.
+fn run_headless(
+    exe: &Path,
+    profile: &Path,
+    seconds: f64,
+    dir: &Path,
+) -> Result<RunOutcome, String> {
+    let frames = dir.join("frames");
+    let _ = std::fs::remove_dir_all(&frames);
+    std::fs::create_dir_all(&frames).map_err(|e| format!("{}: {e}", frames.display()))?;
+    let log_path = dir.join("run.log");
+    let log =
+        std::fs::File::create(&log_path).map_err(|e| format!("{}: {e}", log_path.display()))?;
+    let err = log
+        .try_clone()
+        .map_err(|e| format!("{}: {e}", log_path.display()))?;
+    let mut child = std::process::Command::new(exe)
+        .current_dir(exe.parent().unwrap_or_else(|| Path::new(".")))
+        // The run is what turns a profile into a rebuild, so it is always explicit: the caller
+        // asked for `--profile-loop`.
+        .env("KIRIKAE_HEADLESS", "1")
+        .env("KIRIKAE_MUTE", "1")
+        .env("KIRIKAE_STATS", "1")
+        .env("KIRIKAE_PROFILE", profile)
+        .env("KIRIKAE_FRAME_DUMP", &frames)
+        .env("KIRIKAE_FRAME_DUMP_EVERY", "1")
+        .env("KIRIKAE_FRAME_DUMP_FROM", "1")
+        .env("KIRIKAE_FRAME_DUMP_COUNT", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(log)
+        .stderr(err)
+        .spawn()
+        .map_err(|e| format!("{}: {e}", exe.display()))?;
+
+    // `display::write_dump` names the frame it was asked for `frameNNNNNN.png`; asking for the
+    // first one and watching for it is the only clock the runtime exposes for the first frame.
+    let frame = frames.join("frame000001.png");
+    let started = std::time::Instant::now();
+    let mut first_frame = None;
+    let mut exit = None;
+    loop {
+        if first_frame.is_none() && frame.is_file() {
+            first_frame = Some(started.elapsed().as_secs_f64());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit = status.code();
+                break;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("{}: {e}", exe.display()));
+            }
+        }
+        if started.elapsed().as_secs_f64() >= seconds {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let timed_out = exit.is_none();
+    if timed_out {
+        let _ = child.kill();
+        let _ = child.wait();
+        if first_frame.is_none() && frame.is_file() {
+            first_frame = Some(started.elapsed().as_secs_f64());
+        }
+    }
+    let text = std::fs::read_to_string(&log_path).unwrap_or_default();
+    let (interpreted, frames) = parse_run(&text);
+    Ok(RunOutcome {
+        interpreted,
+        frames,
+        first_frame,
+        exit,
+        log: log_path,
+    })
+}
+
+/// Build, run, rebuild with what the run interpreted, until the count stops falling.
+///
+/// The profile is the same file the runtime writes, so every run adds to it and every build reads
+/// the union: nothing is thrown away between iterations, and the loop stops as soon as a build
+/// has no new address to compile or the interpreted count does not fall.
+fn profile_loop(
+    source: &kirikae_loader::package::Source,
+    opts: &mut BuildOptions,
+    runs: usize,
+    run_seconds: f64,
+) -> Result<ExitCode, String> {
+    let out_dir = std::path::absolute(&opts.out_dir).map_err(|e| e.to_string())?;
+    let name = kirikae_recomp::project::package_name(&opts.name);
+    let profile = std::path::absolute(
+        opts.profile
+            .clone()
+            .unwrap_or_else(|| out_dir.join(format!("{name}.profile"))),
+    )
+    .map_err(|e| e.to_string())?;
+    let loop_dir = out_dir.join(format!("{name}-profile-loop"));
+    // The first iteration has nothing to compile yet; an empty profile keeps `--profile` honest
+    // (an explicit file that must exist) and lets the runtime merge the first run into it.
+    if !profile.exists() {
+        kirikae_recomp::profile::Profile::default().write(&profile)?;
+    }
+    opts.profile = Some(profile.clone());
+
+    println!(
+        "kirikae: profile loop of {runs} run(s) on {} ({run_seconds}s each), profile {}",
+        out_dir.display(),
+        profile.display()
+    );
+    let mut previous: Option<u64> = None;
+    let mut first: Option<(Option<u64>, Option<f64>)> = None;
+    let mut last: (Option<u64>, Option<f64>) = (None, None);
+    let mut stop = String::from("the run budget ended");
+    let mut used = 0;
+    let mut last_report = None;
+    let mut build_total = 0.0;
+    for i in 1..=runs {
+        let before = kirikae_recomp::profile::Profile::read(&profile)?;
+        let started = std::time::Instant::now();
+        let report = build(source, opts)?;
+        let build_seconds = started.elapsed().as_secs_f64();
+        build_total += build_seconds;
+        let executable = report.executable.clone();
+        last_report = Some(report);
+        let dir = loop_dir.join(format!("run-{i}"));
+        let outcome = run_headless(&executable, &profile, run_seconds, &dir)?;
+        let after = kirikae_recomp::profile::Profile::read(&profile)?;
+        let new = after.added_since(&before);
+        used = i;
+        println!(
+            "kirikae: profile loop {i}/{runs}: compiled {} addresses, new {}, interpreted {}, build {build_seconds:.1}s, first frame {}{}",
+            before.len(),
+            new.len(),
+            outcome
+                .interpreted
+                .map_or("-".to_string(), |n| n.to_string()),
+            outcome
+                .first_frame
+                .map_or("-".to_string(), |s| format!("{s:.1}s")),
+            match outcome.exit {
+                Some(code) => format!(
+                    " (exited {code}, {} frames; {})",
+                    outcome.frames.unwrap_or(0),
+                    outcome.log.display()
+                ),
+                None => format!(
+                    " (timed out at {run_seconds}s, {} frames; {})",
+                    outcome.frames.unwrap_or(0),
+                    outcome.log.display()
+                ),
+            }
+        );
+        if first.is_none() {
+            first = Some((outcome.interpreted, outcome.first_frame));
+        }
+        last = (outcome.interpreted, outcome.first_frame);
+        if let Some(reason) = loop_stop(previous, outcome.interpreted, new.len()) {
+            stop = reason;
+            break;
+        }
+        previous = outcome.interpreted.or(previous);
+    }
+    let final_profile = kirikae_recomp::profile::Profile::read(&profile)?;
+    let (first_interpreted, first_frame) = first.unwrap_or((None, None));
+    if let Some(report) = last_report {
+        let dlls = match report.dlls {
+            0 | 1 => String::new(),
+            n => format!(" and {n} code DLLs"),
+        };
+        println!(
+            "kirikae: recompiled {} functions ({} of {} instructions reachable) into {}{dlls} in {build_total:.0}s",
+            report.functions,
+            report.instructions,
+            report.total,
+            report.executable.display(),
+        );
+    }
+    println!(
+        "kirikae: profile loop stopped after {used} of {runs} run(s) ({stop}): interpreted {}, addresses {}, first frame {}",
+        pair(first_interpreted, last.0),
+        final_profile.len(),
+        pair(
+            first_frame.map(|s| format!("{s:.1}s")),
+            last.1.map(|s| format!("{s:.1}s")),
+        ),
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `a -> b`, with `-` for a number the run did not measure.
+fn pair<T: std::fmt::Display>(first: Option<T>, last: Option<T>) -> String {
+    match (first, last) {
+        (None, None) => "-".to_string(),
+        (first, last) => format!(
+            "{} -> {}",
+            first.map_or_else(|| "-".to_string(), |v| v.to_string()),
+            last.map_or_else(|| "-".to_string(), |v| v.to_string()),
+        ),
+    }
+}
+
+/// Why the loop stops after a run, if it stops.
+///
+/// The count only compares when both runs measured one (a crash before the first stats line does
+/// not), and a build that has nothing new to compile cannot do better than the last one.
+fn loop_stop(previous: Option<u64>, now: Option<u64>, new_addresses: usize) -> Option<String> {
+    if let (Some(prev), Some(now)) = (previous, now)
+        && now >= prev
+    {
+        return Some(format!(
+            "the interpreted count stopped falling ({prev} -> {now})"
+        ));
+    }
+    (new_addresses == 0).then(|| "no new addresses".to_string())
+}
+
 fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
     let a = parse(args)?;
     let exe = kirikae_loader::open(Path::new(a.input()?)).map_err(|e| e.to_string())?;
     if exe.arch.is_32_bit() {
         eprintln!(
-            "kirikae: interpreting {} (ARM mode; Thumb, banked modes and VFP/NEON are not implemented)",
+            "kirikae: interpreting {} (ARM mode with VFP and the NEON slice; Thumb, banked modes and the remaining coprocessor forms are not implemented)",
             exe.arch.name()
         );
     }
@@ -511,6 +813,77 @@ fn cmd_dev(args: &[String]) -> Result<ExitCode, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_the_counters_out_of_a_run_log() {
+        let text = "kirikae: [  10s] 120 frames (12.0 fps, 60.0 without the limit, longest 8300 ms), GPU: 1 submits, 2 draws, 0 clears, 0 copies, 0 dispatches; 55 native calls, 2713811 interpreted\n\
+                    kirikae:         vulkan: 0.0s of GPU work, 0 frames through the swapchain, 0 batches\n\
+                    kirikae: [  20s] 240 frames (12.0 fps, 60.0 without the limit, longest 1300 ms), GPU: 1 submits, 2 draws, 0 clears, 0 copies, 0 dispatches; 60 native calls, 3400000 interpreted\n";
+        assert_eq!(
+            parse_run(text),
+            (Some(3_400_000), Some(240)),
+            "the Vulkan summary's '0 frames through the swapchain' is not the counter"
+        );
+        let exit =
+            "kirikae: 900 recompiled function calls, 12 interpreted instructions, exit code 0\n";
+        assert_eq!(parse_run(exit), (Some(12), None));
+        assert_eq!(parse_run("no stats yet\n"), (None, None));
+    }
+
+    #[test]
+    fn the_loop_stops_when_the_count_stops_falling() {
+        assert_eq!(
+            loop_stop(None, Some(100), 3),
+            None,
+            "first run cannot stop it"
+        );
+        assert_eq!(loop_stop(Some(100), Some(90), 3), None, "still falling");
+        assert_eq!(
+            loop_stop(Some(100), Some(100), 3).unwrap(),
+            "the interpreted count stopped falling (100 -> 100)"
+        );
+        assert_eq!(
+            loop_stop(Some(100), Some(140), 0).unwrap(),
+            "the interpreted count stopped falling (100 -> 140)"
+        );
+        assert_eq!(
+            loop_stop(Some(100), None, 0).unwrap(),
+            "no new addresses",
+            "a crash before the stats line still stops when nothing is new"
+        );
+        assert_eq!(loop_stop(None, None, 2), None);
+    }
+
+    #[test]
+    fn pairs_read_as_before_and_after() {
+        assert_eq!(pair(Some(10), Some(0)), "10 -> 0");
+        assert_eq!(pair(Some(10), None), "10 -> -");
+        assert_eq!(pair(None, Some(5)), "- -> 5");
+        assert_eq!(pair::<u64>(None, None), "-");
+    }
+
+    #[test]
+    fn a_profile_loop_needs_a_positive_count_and_a_stats_window() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            profile_loop_arguments(&args(&["--profile-loop", "0"])).unwrap_err(),
+            "--profile-loop needs at least one run"
+        );
+        assert!(
+            profile_loop_arguments(&args(&["--profile-loop", "2", "--run-seconds", "5"]))
+                .unwrap_err()
+                .contains("at least 10")
+        );
+        assert_eq!(
+            profile_loop_arguments(&args(&["--profile-loop", "3"])).unwrap(),
+            Some((3, 60.0))
+        );
+        assert_eq!(
+            profile_loop_arguments(&args(&["--profile-loop", "2", "--run-seconds", "90"])).unwrap(),
+            Some((2, 90.0))
+        );
+        assert_eq!(profile_loop_arguments(&args(&["-o", "out"])).unwrap(), None);
+    }
 
     #[test]
     fn classifies_ir_helper_unsupported_and_other() {

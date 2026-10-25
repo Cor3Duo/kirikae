@@ -411,6 +411,7 @@ impl Vic {
         let mut slots = 0;
         let mut video = false;
         let mut luma_mean = 0u64;
+        let mut source_size = (0usize, 0usize);
         for index in 0..8 {
             let s = &cfg[config::SLOTS + index * config::SLOT_SIZE..][..config::SLOT_SIZE];
             if bits(s, slot::ENABLE, 1) == 0 {
@@ -422,6 +423,7 @@ impl Vic {
                 index,
                 &SurfaceConfig::parse(&s[config::SLOT_SURFACE..]),
             )?;
+            source_size = (src.width, src.height);
             if matches!(src.kind, SourceKind::Yuv { .. }) {
                 video = true;
             }
@@ -480,8 +482,11 @@ impl Vic {
         let offset = self.regs[reg::OUTPUT_SURFACE];
         self.compositions += 1;
         if trace() {
+            let mapped = dma
+                .cpu(offset, width * height * format.bytes_per_pixel())
+                .map_or_else(|| "unmapped".to_string(), |cpu| format!("{cpu:#x}"));
             eprintln!(
-                "vic: {:.3} s: composition {}: {slots} slot(s), mean luma {luma_mean} -> {width}x{height} format {} {} (block height {}) rot {} flip {}{} at {:#x}",
+                "vic: {:.3} s: composition {}: {slots} slot(s), mean luma {luma_mean} -> {width}x{height} format {} {} (block height {}) rot {} flip {}{} at {:#x} ({mapped}) from {}x{}",
                 crate::gpu::gpu_ticks() as f64 / 1e9,
                 self.compositions,
                 surface.format,
@@ -494,7 +499,9 @@ impl Vic {
                 transform.rotation * 90,
                 transform.flip_h as u8,
                 transform.flip_v as u8,
-                (offset as u64) << 8
+                (offset as u64) << 8,
+                source_size.0,
+                source_size.1
             );
         }
         let written = match format {
@@ -1545,6 +1552,63 @@ mod tests {
         assert_eq!(
             words(&h.read_plane(h.output_u, 2 * 2 * 2, 1)),
             [400u16, 440, 480, 520]
+        );
+    }
+
+    /// BT.601 limited range, as the VI present path converts it.
+    fn nv12_rgb(y: u8, u: u8, v: u8) -> u32 {
+        let (c, d, e) = (y as i32 - 16, u as i32 - 128, v as i32 - 128);
+        let clamp = |v: i32| v.clamp(0, 255) as u32;
+        let r = clamp((298 * c + 409 * e + 128) >> 8);
+        let g = clamp((298 * c - 100 * d - 208 * e + 128) >> 8);
+        let b = clamp((298 * c + 516 * d + 128) >> 8);
+        r << 16 | g << 8 | b
+    }
+
+    #[test]
+    fn rotated_nv12_output_keeps_orientation_and_colour() {
+        // 4x2 source with a red left half and a green right half, rotated 90
+        // degrees clockwise into a 2x4 NV12 surface: red on top, green below.
+        let mut h = Harness::new(2, 4, format::Y8_V8U8_N420);
+        h.set_source(4, 2);
+        h.write_luma(4, &[&[81, 81, 145, 145], &[81, 81, 145, 145]]);
+        h.write_chroma(4, &[&[90, 240, 54, 34]]);
+        h.output_config(output::ROTATION, 2, 1);
+        h.compose().unwrap();
+        let luma = h.output(2, 4);
+        assert_eq!(luma, [81, 81, 81, 81, 145, 145, 145, 145]);
+        let uv = h.read_plane(h.output_u, 2, 2);
+        assert_eq!(uv, [90, 240, 54, 34]);
+        // Reconstruct the colour each output pixel carries from the NV12 the
+        // compositor wrote.
+        let red = nv12_rgb(81, 90, 240);
+        let green = nv12_rgb(145, 54, 34);
+        for row in 0..4 {
+            let (u, v) = (uv[(row / 2) * 2], uv[(row / 2) * 2 + 1]);
+            for x in 0..2 {
+                let want = if row < 2 { red } else { green };
+                assert_eq!(nv12_rgb(luma[row * 2 + x], u, v), want, "row {row}");
+            }
+        }
+    }
+
+    #[test]
+    fn scaled_nv12_output_duplicates_luma_and_chroma() {
+        let mut h = Harness::new(4, 4, format::Y8_V8U8_N420);
+        h.set_source(2, 2);
+        h.write_luma(2, &[&[81, 145], &[81, 145]]);
+        h.write_chroma(2, &[&[90, 240]]);
+        h.slot_config(slot::NEAREST, 1, 1);
+        h.compose().unwrap();
+        assert_eq!(
+            h.output(4, 4),
+            [
+                81, 81, 145, 145, 81, 81, 145, 145, 81, 81, 145, 145, 81, 81, 145, 145
+            ]
+        );
+        assert_eq!(
+            h.read_plane(h.output_u, 4, 2),
+            [90, 240, 90, 240, 90, 240, 90, 240]
         );
     }
 

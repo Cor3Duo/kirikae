@@ -18,6 +18,10 @@ pub mod vulkan;
 
 pub const SYNCPOINTS: usize = 192;
 
+/// Pushbuffer headers this decoder does not turn into a method write. Counted so a command form
+/// that is being dropped is visible in the trace instead of changing the stream silently.
+static UNKNOWN_HEADERS: AtomicU64 = AtomicU64::new(0);
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NvMap {
     pub size: u64,
@@ -259,6 +263,19 @@ impl Gpu {
             .filter(|(_, m)| m.cpu == cpu)
             .map(|(va, _)| *va)
             .collect()
+    }
+
+    /// One method of a class's register file, for tests that read what a pushbuffer wrote.
+    #[cfg(test)]
+    pub(crate) fn reg(&self, class: u32, method: usize) -> u32 {
+        self.engines
+            .lock()
+            .unwrap()
+            .regs
+            .get(&class)
+            .and_then(|regs| regs.get(method))
+            .copied()
+            .unwrap_or(0)
     }
 
     pub fn gpu_mappings_of(&self, cpu: u64) -> Vec<(u64, u64, u64, u64)> {
@@ -531,8 +548,20 @@ impl Gpu {
                     }
                     i += count as usize;
                 }
-                4 => self.method(mem, eng, sub, method, count),
-                _ => {}
+                // GF100 "inline method": the value is the 12-bit V field at bits 16..27 and
+                // bit 28 is reserved (envytools, `dma-pusher`); reading 13 bits would fold
+                // the reserved bit into the method's value.
+                4 => self.method(mem, eng, sub, method, count & 0xfff),
+                _ => {
+                    if trace() {
+                        let n = UNKNOWN_HEADERS.fetch_add(1, Ordering::Relaxed);
+                        if n < 8 {
+                            eprintln!(
+                                "gpu: pushbuffer: header {hdr:#010x} has format {kind}, which is not a method command this decoder knows; skipping one word"
+                            );
+                        }
+                    }
+                }
             }
         }
         if let Some(p) = eng.threed.macros.pending.take() {
@@ -1072,6 +1101,32 @@ mod tests {
         let pb = [0x2004_0004u32, 0x5, 0x0000_0100, 0xcafe, 0x2];
         gpu.run_pushbuffer(&mem, &pb);
         assert_eq!(mem.read(0x1000_0100, 4).unwrap(), 0xcafeu32.to_le_bytes());
+    }
+
+    #[test]
+    fn inline_methods_carry_a_twelve_bit_value() {
+        let mem = GuestMemory::new().unwrap();
+        let gpu = Gpu::default();
+        // Select the 3D class on subchannel 0, then write the colour target address with the
+        // inline form with bit 28 (reserved) set: only the twelve-bit V field is the value.
+        let pb = [
+            0x2001_0000,
+            CLASS_3D,
+            (4 << 29) | 0x1000_0000 | (0x0800 << 16) | 0x201,
+        ];
+        gpu.run_pushbuffer(&mem, &pb);
+        assert_eq!(gpu.reg(CLASS_3D, 0x201), 0x800);
+    }
+
+    #[test]
+    fn an_unknown_header_does_not_swallow_the_next_command() {
+        let mem = GuestMemory::new().unwrap();
+        let gpu = Gpu::default();
+        // Format 0 is not a method command: it consumes its own word and the method write
+        // after it still lands.
+        let pb = [0x0000_0000, 0x2001_0000, CLASS_3D];
+        gpu.run_pushbuffer(&mem, &pb);
+        assert_eq!(gpu.engines.lock().unwrap().classes[0], CLASS_3D);
     }
 
     #[test]

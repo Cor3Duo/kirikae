@@ -105,6 +105,9 @@ define_ops! {
     Vmls => vmls(a, b, d, esize);
     Vpmax => vpmax(a, b, esize, signed);
     Vpmin => vpmin(a, b, esize, signed);
+    Vcnt => vcnt(a, esize);
+    Vaddlp => vaddlp(a, esize);
+    Vaddv => vaddv(a, esize);
     FAdd32 => fadd32(a, b, fpcr);
     FSub32 => fsub32(a, b, fpcr);
     FMul32 => fmul32(a, b, fpcr);
@@ -783,6 +786,57 @@ pub fn vpmin(a: u64, b: u64, esize: u64, signed: u64) -> u64 {
     pair_sel(a, b, esize, signed != 0, false)
 }
 
+/// Population count of every lane of a 64-bit half (`CNT`). The four partial sums are
+/// built with the usual SWAR word trick, which never carries across a byte.
+#[inline(always)]
+pub fn vcnt(a: u64, esize: u64) -> u64 {
+    let x = a - ((a >> 1) & 0x5555_5555_5555_5555);
+    let x = (x & 0x3333_3333_3333_3333) + ((x >> 2) & 0x3333_3333_3333_3333);
+    let x = (x + (x >> 4)) & 0x0f0f_0f0f_0f0f_0f0f;
+    match esize {
+        8 => x,
+        16 => (x & 0x00ff_00ff_00ff_00ff) + ((x >> 8) & 0x00ff_00ff_00ff_00ff),
+        32 => {
+            let y = (x & 0x00ff_00ff_00ff_00ff) + ((x >> 8) & 0x00ff_00ff_00ff_00ff);
+            (y & 0x0000_ffff_0000_ffff) + ((y >> 16) & 0x0000_ffff_0000_ffff)
+        }
+        _ => x,
+    }
+}
+
+/// Pairwise add of the lanes of one 64-bit half into twice as wide lanes (`SADDLP` with
+/// the signed form of the caller). The result of a lane never leaves the half, so the
+/// two halves of a register can be computed independently.
+#[inline(always)]
+pub fn vaddlp(a: u64, esize: u64) -> u64 {
+    match esize {
+        8 => (a & 0x00ff_00ff_00ff_00ff) + ((a >> 8) & 0x00ff_00ff_00ff_00ff),
+        16 => (a & 0x0000_ffff_0000_ffff) + ((a >> 16) & 0x0000_ffff_0000_ffff),
+        32 => (a & 0xffff_ffff) + (a >> 32),
+        _ => a,
+    }
+}
+
+/// Sum of every lane of one 64-bit half into a single value (`ADDV`/`SADDLV`/`UADDLV`,
+/// reduced by the caller to the result width). Adding the halves of a `Q` = 1 register
+/// and masking gives the architectural result.
+#[inline(always)]
+pub fn vaddv(a: u64, esize: u64) -> u64 {
+    match esize {
+        8 => {
+            let x = (a & 0x00ff_00ff_00ff_00ff) + ((a >> 8) & 0x00ff_00ff_00ff_00ff);
+            let x = (x & 0x0000_ffff_0000_ffff) + ((x >> 16) & 0x0000_ffff_0000_ffff);
+            (x & 0xffff_ffff) + (x >> 32)
+        }
+        16 => {
+            let x = (a & 0x0000_ffff_0000_ffff) + ((a >> 16) & 0x0000_ffff_0000_ffff);
+            (x & 0xffff_ffff) + (x >> 32)
+        }
+        32 => (a & 0xffff_ffff) + (a >> 32),
+        _ => a,
+    }
+}
+
 use crate::simd::fp::{Fpcr, Round, f32b, f64b};
 
 pub fn fp_mode(round: Round, signed: bool, width: u32) -> u64 {
@@ -1017,6 +1071,27 @@ mod tests {
         assert_eq!(Op::Vmul.arity(), 3);
         assert_eq!(Op::Vmax.arity(), 4);
         assert_eq!(Op::Vabs.name(), "vabs");
+    }
+
+    #[test]
+    fn reductions() {
+        // CNT counts bits inside each lane, so no lane can spill into its neighbour.
+        assert_eq!(vcnt(0, 8), 0);
+        assert_eq!(vcnt(u64::MAX, 8), 0x0808_0808_0808_0808);
+        assert_eq!(vcnt(0x0102_0304_0506_0708, 8), 0x0101_0201_0202_0301);
+        assert_eq!(vcnt(0x00ff_00ff_00ff_00ff, 16), 0x0008_0008_0008_0008);
+        assert_eq!(vcnt(0xffff_ffff_0000_0000, 32), 0x0000_0020_0000_0000);
+        // Pairwise add: 2 lanes of 8 bits become 1 lane of 16, and so on.
+        assert_eq!(vaddlp(0x00ff_00ff_00ff_00ff, 8), 0x00ff_00ff_00ff_00ff);
+        assert_eq!(vaddlp(0x0001_0002_0003_0004, 16), 0x0000_0003_0000_0007);
+        assert_eq!(vaddlp(0x0000_0001_0000_0002, 32), 3);
+        // ADDV adds every lane of the half; the caller masks to the result width.
+        assert_eq!(vaddv(0x0101_0101_0101_0101, 8), 8);
+        assert_eq!(vaddv(0x0001_0002_0003_0004, 16), 10);
+        assert_eq!(vaddv(0x0000_0001_0000_0002, 32), 3);
+        assert_eq!(vaddv(0x1234_5678_9abc_def0, 64), 0x1234_5678_9abc_def0);
+        assert_eq!(Op::Vcnt.arity(), 2);
+        assert_eq!(Op::Vaddlp.name(), "vaddlp");
     }
 
     #[test]

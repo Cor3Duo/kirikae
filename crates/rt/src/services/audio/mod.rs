@@ -152,6 +152,7 @@ fn start_ticks(p: &'static Process, r: Arc<Renderer>) {
             let (low, high) = (rate as usize / 25, rate as usize / 12);
             let mut samples: Vec<mixer::Frame> = Vec::new();
             let trace = std::env::var_os("KIRIKAE_TRACE_AUDIO").is_some();
+            let stats = std::env::var_os("KIRIKAE_STATS").is_some();
             let mut rendered = 0u64;
             let mut next = std::time::Instant::now();
             let mut output: Option<output::Output> = None;
@@ -216,10 +217,32 @@ fn start_ticks(p: &'static Process, r: Arc<Renderer>) {
                         o.dry_frames()
                     );
                 }
+                if let Some(o) = &output
+                    && stats
+                    && rendered.is_multiple_of(1000)
+                {
+                    // The host lead is the queue depth the render loop keeps
+                    // ahead of the device callback. The host API's own buffer
+                    // is not measurable through cpal and is not included.
+                    let channels = r.state.lock().unwrap().output().0;
+                    eprintln!(
+                        "audio: {rendered} blocks rendered, {} frames queued ({} device lead, {:.1} ms), {} dry, {} renderer channels on {} device channels",
+                        o.lead_frames(),
+                        o.lead_frames(),
+                        o.lead_ms(rate),
+                        o.dry_frames(),
+                        channels,
+                        o.device_channels
+                    );
+                }
                 for _ in 0..frames {
                     rendered += 1;
                     let (channels, coefficients) = {
                         let mut state = r.state.lock().unwrap();
+                        // The clock follows the frames the device callback has
+                        // consumed, not the block just mixed: everything still
+                        // queued is ahead of what is being heard.
+                        state.set_output_played(output.as_ref().map(|o| o.played_frames()));
                         state.render(&p.memory, &mut samples);
                         state.output()
                     };

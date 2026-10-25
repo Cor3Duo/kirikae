@@ -20,7 +20,10 @@ fn buckets() -> &'static [Vec<u16>; 1024] {
 }
 
 pub fn lookup(w: u64) -> Option<&'static Opcode> {
-    buckets()[(w >> 54) as usize].iter().map(|&i| &OPCODES[i as usize]).find(|op| w & op.mask == op.value)
+    buckets()[(w >> 54) as usize]
+        .iter()
+        .map(|&i| &OPCODES[i as usize])
+        .find(|op| w & op.mask == op.value)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -94,22 +97,45 @@ impl Insn {
     pub fn branch_target(&self, pc: u32) -> u32 {
         let off = ((self.bits(20, 24) as u32) << 8) as i32 >> 8;
         let target = (pc as i32 + 8 + off) as u32;
-        if target.is_multiple_of(32) { target + 8 } else { target }
+        if target.is_multiple_of(32) {
+            target + 8
+        } else {
+            target
+        }
     }
 
     pub fn half_operands(&self) -> HalfOperands {
         let top = self.word >> 48;
-        let reg = |r: u64, swizzle: u64| HalfSrc::Reg { reg: r as u8, swizzle: swizzle as u8 };
+        let reg = |r: u64, swizzle: u64| HalfSrc::Reg {
+            reg: r as u8,
+            swizzle: swizzle as u8,
+        };
         let op = |src: HalfSrc, neg: bool, abs: bool| HalfOperand { src, neg, abs };
         let (slot, offset) = self.cbuf();
         let cbuf = HalfSrc::Cbuf { slot, offset };
-        let imm = HalfSrc::Imm((self.bits(20, 10) as u32) << 6 | (self.bits(30, 9) as u32 | (self.bit(56) as u32) << 9) << 22);
-        let a_mods = op(reg(self.bits(8, 8), self.bits(47, 2)), self.bit(43), self.bit(44));
-        let reg_b = op(reg(self.bits(20, 8), self.bits(28, 2)), self.bit(31), self.bit(30));
+        let imm = HalfSrc::Imm(
+            (self.bits(20, 10) as u32) << 6
+                | (self.bits(30, 9) as u32 | (self.bit(56) as u32) << 9) << 22,
+        );
+        let a_mods = op(
+            reg(self.bits(8, 8), self.bits(47, 2)),
+            self.bit(43),
+            self.bit(44),
+        );
+        let reg_b = op(
+            reg(self.bits(20, 8), self.bits(28, 2)),
+            self.bit(31),
+            self.bit(30),
+        );
         let (a, b, c, sat) = match (self.name(), top & 0xfff8, top & 0xfe80) {
             ("hfma2", 0x5d00, _) => {
                 let c = op(reg(self.bits(39, 8), self.bits(35, 2)), self.bit(30), false);
-                (a_mods.plain(), op(reg_b.src, self.bit(31), false), Some(c), self.bit(32))
+                (
+                    a_mods.plain(),
+                    op(reg_b.src, self.bit(31), false),
+                    Some(c),
+                    self.bit(32),
+                )
             }
             ("hfma2", ..) => {
                 let r39 = reg(self.bits(39, 8), self.bits(53, 2));
@@ -122,11 +148,22 @@ impl Insn {
             }
             ("hmul2", 0x5d08, _) => (op(a_mods.src, false, a_mods.abs), reg_b, None, self.bit(32)),
             (_, 0x5d08 | 0x5d10 | 0x5d18 | 0x5d20, _) => (a_mods, reg_b, None, self.bit(32)),
-            (_, _, 0x7a80 | 0x7c80 | 0x7e80) => (a_mods, op(cbuf, self.bit(56), self.bit(54)), None, self.bit(52)),
+            (_, _, 0x7a80 | 0x7c80 | 0x7e80) => (
+                a_mods,
+                op(cbuf, self.bit(56), self.bit(54)),
+                None,
+                self.bit(52),
+            ),
             (_, _, 0x7880) => (a_mods, op(cbuf, false, self.bit(54)), None, self.bit(52)),
             _ => (a_mods, op(imm, false, false), None, self.bit(52)),
         };
-        HalfOperands { a, b, c, sat, mode: self.bits(49, 2) as u8 }
+        HalfOperands {
+            a,
+            b,
+            c,
+            sat,
+            mode: self.bits(49, 2) as u8,
+        }
     }
 }
 
@@ -146,7 +183,11 @@ pub struct HalfOperand {
 
 impl HalfOperand {
     fn plain(self) -> HalfOperand {
-        HalfOperand { neg: false, abs: false, ..self }
+        HalfOperand {
+            neg: false,
+            abs: false,
+            ..self
+        }
     }
 }
 
@@ -160,7 +201,12 @@ pub struct HalfOperands {
 }
 
 pub fn instructions(code: &[u8]) -> impl Iterator<Item = (u32, u64)> + '_ {
-    code.as_chunks::<8>().0.iter().enumerate().filter(|(i, _)| i % 4 != 0).map(|(i, b)| ((i * 8) as u32, u64::from_le_bytes(*b)))
+    code.as_chunks::<8>()
+        .0
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| i % 4 != 0)
+        .map(|(i, b)| ((i * 8) as u32, u64::from_le_bytes(*b)))
 }
 
 #[cfg(test)]
@@ -171,12 +217,20 @@ mod tests {
 
     #[test]
     fn table_lookup() {
-        assert_eq!(lookup(0xe300_0000_0000_0000 | GUARD_PT | 0xf).map(|o| o.name), Some("exit"));
+        assert_eq!(
+            lookup(0xe300_0000_0000_0000 | GUARD_PT | 0xf).map(|o| o.name),
+            Some("exit")
+        );
         let mov = Insn::decode(0x0100_0000_0000_0000 | (0x3f80_0000u64 << 20) | GUARD_PT).unwrap();
         assert_eq!(mov.name(), "mov32i");
         assert_eq!(mov.imm32(), 0x3f80_0000);
-        let ffma = Insn::decode(0x5980_0000_0000_0000 | (3 << 39) | (2 << 20) | GUARD_PT | (1 << 8)).unwrap();
-        assert_eq!((ffma.name(), ffma.rd(), ffma.ra(), ffma.rb(), ffma.rc()), ("ffma", 0, 1, 2, 3));
+        let ffma =
+            Insn::decode(0x5980_0000_0000_0000 | (3 << 39) | (2 << 20) | GUARD_PT | (1 << 8))
+                .unwrap();
+        assert_eq!(
+            (ffma.name(), ffma.rd(), ffma.ra(), ffma.rb(), ffma.rc()),
+            ("ffma", 0, 1, 2, 3)
+        );
         assert_eq!(ffma.guard(), (PT, false));
         for op in OPCODES {
             assert!(lookup(op.value).is_some(), "{}", op.name);

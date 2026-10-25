@@ -74,36 +74,40 @@ impl Renderer {
         mem: &GuestMemory,
         regs: &[u32],
         cbufs: [Option<(u64, u32)>; CB_SLOTS],
-        slot: Option<u32>,
-        handle: u32,
-        dim: TexDim,
-        array: bool,
-        shadow: bool,
+        use_: &kirikae_maxwell::TextureUse,
     ) -> Result<(vk::ImageView, vk::Sampler), String> {
-        let slot = slot.unwrap_or(regs[reg::BINDLESS_TEXTURE] & 0x1f);
+        let slot = use_.slot.unwrap_or(regs[reg::BINDLESS_TEXTURE] & 0x1f);
         let (cb, cb_size) = cbufs[slot as usize]
             .ok_or_else(|| format!("texture constant buffer {slot} not bound"))?;
-        if handle * 4 + 4 > cb_size {
-            return Err("texture handle outside its constant buffer".into());
-        }
-        let word = gpu
-            .bytes(mem, cb + handle as u64 * 4, 4)
-            .ok_or("texture handle unreadable")?;
-        let word = u32::from_le_bytes(word.try_into().unwrap());
-        let (tic_index, tsc_index) = (word & 0xfffff, word >> 20);
+        let dim = use_.dim;
+        let (tic_index, tsc_index) = match use_.sampler {
+            // The handle is one word: NVN packed both halves into it.
+            None => {
+                let handle = bank_word(gpu, mem, cb, cb_size, use_.handle)?;
+                (handle & 0xfffff, handle >> 20)
+            }
+            // NVN's 128-slot layout: the texture table entry carries the
+            // texture id and the sampler table entry the sampler id, and the
+            // program ORs them into the handle the hardware decodes.
+            Some(sampler_word) => {
+                let texture = bank_word(gpu, mem, cb, cb_size, use_.handle)?;
+                let sampler = bank_word(gpu, mem, cb, cb_size, sampler_word)?;
+                handle_halves(texture, sampler)?
+            }
+        };
         let tic_pool = address(regs, reg::TEX_HEADER_POOL);
         let tsc_pool = address(regs, reg::TEX_SAMPLER_POOL);
         let tic = tic::words(
             gpu.bytes(mem, tic_pool + tic_index as u64 * 32, 32)
                 .ok_or("texture header unreadable")?,
         )
-        .unwrap();
+        .ok_or("texture header unreadable")?;
         let tsc = tic::words(
             gpu.bytes(mem, tsc_pool + tsc_index as u64 * 32, 32)
                 .ok_or("sampler unreadable")?,
         )
-        .unwrap();
-        self.texture_words(gpu, mem, tic, tsc, dim, array, shadow)
+        .ok_or("sampler unreadable")?;
+        self.texture_words(gpu, mem, tic, tsc, dim, use_.array, use_.shadow)
     }
 
     /// The texture path from a TIC/TSC pair on: one image per (address, format, size), untiled at upload. The
@@ -1072,5 +1076,72 @@ pub(super) fn border_color(border: &[u32; 4]) -> vk::BorderColor {
         (true, _) => vk::BorderColor::FLOAT_OPAQUE_WHITE,
         (false, true) => vk::BorderColor::FLOAT_OPAQUE_BLACK,
         (false, false) => vk::BorderColor::FLOAT_TRANSPARENT_BLACK,
+    }
+}
+
+/// One 32-bit word of the constant bank a texture handle names.
+fn bank_word(
+    gpu: &Gpu,
+    mem: &GuestMemory,
+    cb: u64,
+    cb_size: u32,
+    word: u32,
+) -> Result<u32, String> {
+    if u64::from(word) * 4 + 4 > u64::from(cb_size) {
+        return Err(format!(
+            "texture handle word {word} outside its constant buffer"
+        ));
+    }
+    let bytes = gpu
+        .bytes(mem, cb + u64::from(word) * 4, 4)
+        .ok_or("texture handle unreadable")?;
+    bytes
+        .try_into()
+        .map(u32::from_le_bytes)
+        .map_err(|_| "texture handle unreadable".into())
+}
+
+/// The (texture id, sampler id) pair NVN's 128-slot layout encodes in two
+/// words: the texture-table entry holds the texture id in the handle's low 20
+/// bits and the sampler-table entry the sampler id in its high 12, so the
+/// handle the hardware decodes is their OR. A word that carries bits of the
+/// other half is not that layout, and splitting it either way would sample the
+/// wrong texture or the wrong sampler, so it is refused.
+fn handle_halves(texture: u32, sampler: u32) -> Result<(u32, u32), String> {
+    if texture & !0x000f_ffff != 0 {
+        return Err(format!(
+            "texture word {texture:#x} carries bits outside the texture id"
+        ));
+    }
+    if sampler & 0x000f_ffff != 0 {
+        return Err(format!(
+            "sampler word {sampler:#x} carries bits outside the sampler id"
+        ));
+    }
+    let handle = texture | sampler;
+    Ok((handle & 0xfffff, handle >> 20))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::handle_halves;
+
+    #[test]
+    fn the_separate_layout_splits_at_the_handle_halves() {
+        // BD: the texture word in the 0x168 table and the sampler word in the
+        // 0x568 one; the shader ORs them.
+        assert_eq!(handle_halves(0x0001_2345, 0x0000_0000), Ok((0x12345, 0)));
+        assert_eq!(handle_halves(0, 0x0ab0_0000), Ok((0, 0xab)));
+        assert_eq!(handle_halves(0x7, 0x0340_0000), Ok((7, 0x34)));
+    }
+
+    #[test]
+    fn a_word_that_is_not_its_half_is_refused() {
+        // A full packed handle in the texture word would smuggle its sampler
+        // id in through the OR.
+        assert!(handle_halves(0x0020_2007, 0).is_err());
+        // A sampler word with texture bits means the tables are not the ones
+        // this split assumes.
+        assert!(handle_halves(7, 0x0340_0001).is_err());
     }
 }

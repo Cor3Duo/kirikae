@@ -1249,12 +1249,25 @@ pub enum KObject {
     CodeMemory(Arc<CodeMemory>),
     SharedMemory(Arc<SharedMemory>),
     ResourceLimit(Arc<ResourceLimit>),
+    /// A PCIe A2 IO pool (`svcCreateIoPool`). Closing the handle is the
+    /// destroy path: there is no separate destroy SVC.
+    IoPool(Arc<crate::mem::IoPool>),
+    /// A claimed range of an IO pool (`svcCreateIoRegion`).
+    IoRegion(Arc<crate::mem::IoRegion>),
+    /// An IOMMU device-side page table (`svcCreateDeviceAddressSpace`).
+    DeviceAddressSpace(Arc<crate::mem::DeviceAddressSpace>),
 }
 
 pub struct HandleTable {
     objects: HashMap<u32, KObject>,
     /// Role of each shared memory handle (see [`SharedMemoryRole`]).
     shared_roles: HashMap<u32, SharedMemoryRole>,
+    /// The ceiling `svcSetUnsafeLimit` sets, in bytes, and the bytes currently
+    /// mapped with the unsafe physical calls. Both belong to the process: the
+    /// runtime runs one, and how much pool-0 memory it may map is a per-process
+    /// setting in Horizon.
+    unsafe_limit: u64,
+    unsafe_mapped: u64,
     next: u32,
     resource_limit: Option<u32>,
 }
@@ -1264,6 +1277,8 @@ impl Default for HandleTable {
         HandleTable {
             objects: HashMap::new(),
             shared_roles: HashMap::new(),
+            unsafe_limit: 0,
+            unsafe_mapped: 0,
             next: 0x0002_0001,
             resource_limit: None,
         }
@@ -1402,6 +1417,50 @@ impl HandleTable {
             Some(KObject::CodeMemory(m)) => Some(m.clone()),
             _ => None,
         }
+    }
+
+    pub fn io_pool(&self, handle: u32) -> Option<Arc<crate::mem::IoPool>> {
+        match self.objects.get(&handle) {
+            Some(KObject::IoPool(p)) => Some(p.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn io_region(&self, handle: u32) -> Option<Arc<crate::mem::IoRegion>> {
+        match self.objects.get(&handle) {
+            Some(KObject::IoRegion(r)) => Some(r.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn device_address_space(&self, handle: u32) -> Option<Arc<crate::mem::DeviceAddressSpace>> {
+        match self.objects.get(&handle) {
+            Some(KObject::DeviceAddressSpace(d)) => Some(d.clone()),
+            _ => None,
+        }
+    }
+
+    /// `svcSetUnsafeLimit`: the bytes of pool-0 memory the unsafe physical calls
+    /// may map. Horizon starts it at zero, so only a guest that raises it can
+    /// use `svcMapPhysicalMemoryUnsafe`.
+    pub fn set_unsafe_limit(&mut self, limit: u64) {
+        self.unsafe_limit = limit;
+    }
+
+    pub fn unsafe_limit(&self) -> u64 {
+        self.unsafe_limit
+    }
+
+    pub fn unsafe_mapped(&self) -> u64 {
+        self.unsafe_mapped
+    }
+
+    pub fn charge_unsafe(&mut self, bytes: u64) {
+        self.unsafe_mapped = self.unsafe_mapped.saturating_add(bytes);
+    }
+
+    pub fn release_unsafe(&mut self, bytes: u64) {
+        self.unsafe_mapped = self.unsafe_mapped.saturating_sub(bytes);
     }
 
     /// Sessions the process holds, which is what the

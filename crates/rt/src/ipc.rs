@@ -327,6 +327,23 @@ pub fn encode_tipc(result: u32, data: &[u8], copy: &[u32], moves: &[u32]) -> Vec
     out
 }
 
+/// `svcReplyAndReceive`'s reply validation. The HIPC page: "A reply must not
+/// use Send/Receive/Exchange data buffers, svcReplyAndReceive will return
+/// 0xE801." A buffer too short to hold `HeaderData` is an invalid pointer
+/// (`0xE601`). Returns 0 when the reply may be delivered.
+pub fn reply_result(msg: &[u8]) -> u32 {
+    let Some(bytes) = msg.get(..4) else {
+        return crate::horizon::RESULT_INVALID_POINTER as u32;
+    };
+    let h0 = u32::from_le_bytes(bytes.try_into().unwrap_or_default());
+    // Header0 bits 20-31 are SendCount, ReceiveCount and ExchangeCount.
+    if (h0 >> 20) & 0xfff != 0 {
+        crate::horizon::RESULT_INVALID_COMBINATION as u32
+    } else {
+        0
+    }
+}
+
 fn request(m: &Hipc, cmd: u32, args: Vec<u8>, objects: Vec<u32>, tipc: bool) -> Request {
     Request {
         cmd,
@@ -930,6 +947,58 @@ mod tests {
         assert!(m.c.is_empty());
         // raw is two words (8 bytes), plus the receive-list offset, rounded up.
         assert_eq!(m.inline_receive_offset(), Some(16));
+    }
+
+    #[test]
+    fn a_reply_may_not_carry_send_receive_or_exchange_buffers() {
+        assert_eq!(
+            reply_result(&[]),
+            crate::horizon::RESULT_INVALID_POINTER as u32,
+            "a reply with no HeaderData is an invalid pointer"
+        );
+        assert_eq!(reply_result(&[0u8; 4]), 0);
+        for shift in [20, 24, 28] {
+            let h0 = TYPE_REQUEST as u32 | 1 << shift;
+            assert_eq!(
+                reply_result(&h0.to_le_bytes()),
+                crate::horizon::RESULT_INVALID_COMBINATION as u32,
+                "Send/Receive/Exchange descriptor (bit {shift}) in a reply"
+            );
+        }
+        // Pointer descriptors are allowed: only the mapped buffers are refused.
+        let h0 = TYPE_REQUEST as u32 | 1 << 16;
+        assert_eq!(reply_result(&h0.to_le_bytes()), 0);
+    }
+
+    #[test]
+    fn descriptor_tags_match_the_hipc_page_bitfields() {
+        let map = encode_map(Buf {
+            addr: 0x12_3456_7890,
+            size: 0x1_0000_2000,
+        });
+        assert_eq!((map[0], map[1]), (0x2000, 0x3456_7890));
+        assert_eq!((map[2] >> 28) & 0xf, 2, "MapAddress32 bits 32-35");
+        assert_eq!((map[2] >> 2) & 0x7, 1, "MapAddress36 bits 36-38");
+        assert_eq!((map[2] >> 24) & 0xf, 1, "MapSizeHi bits 32-35");
+        assert_eq!(map[2] & 0x3, 0, "MapTransferAttribute");
+
+        let pointer = encode_pointer(Buf {
+            addr: 0x1_2345_6780,
+            size: 0x1234,
+        });
+        assert_eq!(pointer[1], 0x2345_6780);
+        assert_eq!(pointer[0] & 0xf, 0, "PointerIndex");
+        assert_eq!((pointer[0] >> 6) & 0x7, 0, "PointerAddress36 bits 36-38");
+        assert_eq!((pointer[0] >> 12) & 0xf, 1, "PointerAddress32 bits 32-35");
+        assert_eq!(pointer[0] >> 16, 0x1234, "PointerSize");
+
+        let list = encode_receive_list(Buf {
+            addr: 0x12_3456_7000,
+            size: 0x2345,
+        });
+        assert_eq!(list[0], 0x3456_7000);
+        assert_eq!(list[1] & 0x7f, 0x12, "ReceiveListAddressHi bits 32-38");
+        assert_eq!(list[1] >> 16, 0x2345, "ReceiveListSize");
     }
 
     #[test]

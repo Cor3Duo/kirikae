@@ -955,6 +955,9 @@ impl Lower<'_, '_> {
             Op::Vsat | Op::VsatFlag => self.vec_sat(op, args, t, &k),
             Op::Vmla | Op::Vmls => self.vec_mla(op, args, t, &k),
             Op::Vpmax | Op::Vpmin => self.vec_pair(op, args, t, &k),
+            Op::Vcnt => self.vec_cnt(args, t, &k),
+            Op::Vaddlp => self.vec_addlp(args, t, &k),
+            Op::Vaddv => self.vec_addv(args, t, &k),
             Op::FAdd32
             | Op::FSub32
             | Op::FMul32
@@ -1131,6 +1134,110 @@ impl Lower<'_, '_> {
             .band_imm_u(a, kirikae_a64::ops::lane_mask(esize) as i64);
         let rep = self.iconst(kirikae_a64::ops::lane_repeat_ones(esize));
         self.b.ins().imul(lane, rep)
+    }
+
+    /// `CNT`: the SWAR population count of `kirikae_a64::ops::vcnt`, with the byte
+    /// constants folded. `esize` is always a literal from the lifter.
+    fn vec_cnt(&mut self, args: &[Expr], t: &Temps, k: &impl Fn(usize) -> Option<u64>) -> Value {
+        let Some(esize) = k(1) else {
+            let v: Vec<Value> = args.iter().map(|a| self.expr(a, t)).collect();
+            return self.call_op(Op::Vcnt, &v);
+        };
+        if !matches!(esize, 8 | 16 | 32) {
+            let v: Vec<Value> = args.iter().map(|a| self.expr(a, t)).collect();
+            return self.call_op(Op::Vcnt, &v);
+        }
+        let a = self.expr(&args[0], t);
+        let one = self.b.ins().ushr_imm_u(a, 1);
+        let one = self
+            .b
+            .ins()
+            .band_imm_u(one, 0x5555_5555_5555_5555u64 as i64);
+        let x = self.b.ins().isub(a, one);
+        let lo = self.b.ins().band_imm_u(x, 0x3333_3333_3333_3333u64 as i64);
+        let hi = self.b.ins().ushr_imm_u(x, 2);
+        let hi = self.b.ins().band_imm_u(hi, 0x3333_3333_3333_3333u64 as i64);
+        let x = self.b.ins().iadd(lo, hi);
+        let hi = self.b.ins().ushr_imm_u(x, 4);
+        let x = self.b.ins().iadd(x, hi);
+        let x = self.b.ins().band_imm_u(x, 0x0f0f_0f0f_0f0f_0f0fu64 as i64);
+        if esize == 8 {
+            return x;
+        }
+        let byte = 0x00ff_00ff_00ff_00ffu64;
+        let lo = self.b.ins().band_imm_u(x, byte as i64);
+        let hi = self.b.ins().ushr_imm_u(x, 8);
+        let hi = self.b.ins().band_imm_u(hi, byte as i64);
+        let x = self.b.ins().iadd(lo, hi);
+        if esize == 16 {
+            return x;
+        }
+        let word = 0x0000_ffff_0000_ffffu64;
+        let lo = self.b.ins().band_imm_u(x, word as i64);
+        let hi = self.b.ins().ushr_imm_u(x, 16);
+        let hi = self.b.ins().band_imm_u(hi, word as i64);
+        self.b.ins().iadd(lo, hi)
+    }
+
+    /// `UADDLP`: adjacent lanes of one 64-bit half add into the next width. A lane and
+    /// its sum always stay inside the half, so one shift/mask/add per half is exact.
+    fn vec_addlp(&mut self, args: &[Expr], t: &Temps, k: &impl Fn(usize) -> Option<u64>) -> Value {
+        let Some(esize) = k(1) else {
+            let v: Vec<Value> = args.iter().map(|a| self.expr(a, t)).collect();
+            return self.call_op(Op::Vaddlp, &v);
+        };
+        let (keep, shift) = match esize {
+            8 => (0x00ff_00ff_00ff_00ffu64, 8),
+            16 => (0x0000_ffff_0000_ffffu64, 16),
+            32 => (0xffff_ffffu64, 32),
+            _ => {
+                let v: Vec<Value> = args.iter().map(|a| self.expr(a, t)).collect();
+                return self.call_op(Op::Vaddlp, &v);
+            }
+        };
+        let a = self.expr(&args[0], t);
+        let lo = self.b.ins().band_imm_u(a, keep as i64);
+        let hi = self.b.ins().ushr_imm_u(a, shift);
+        let hi = self.b.ins().band_imm_u(hi, keep as i64);
+        self.b.ins().iadd(lo, hi)
+    }
+
+    /// `ADDV`/`UADDLV`: every lane of one 64-bit half adds into a single value. The
+    /// widening result width and the `Q` = 1 second half are folded by the lifter.
+    fn vec_addv(&mut self, args: &[Expr], t: &Temps, k: &impl Fn(usize) -> Option<u64>) -> Value {
+        let Some(esize) = k(1) else {
+            let v: Vec<Value> = args.iter().map(|a| self.expr(a, t)).collect();
+            return self.call_op(Op::Vaddv, &v);
+        };
+        if !matches!(esize, 8 | 16 | 32 | 64) {
+            let v: Vec<Value> = args.iter().map(|a| self.expr(a, t)).collect();
+            return self.call_op(Op::Vaddv, &v);
+        }
+        let a = self.expr(&args[0], t);
+        if esize == 64 {
+            return a;
+        }
+        let byte = 0x00ff_00ff_00ff_00ffu64;
+        let word = 0x0000_ffff_0000_ffffu64;
+        let a = if esize == 8 {
+            let lo = self.b.ins().band_imm_u(a, byte as i64);
+            let hi = self.b.ins().ushr_imm_u(a, 8);
+            let hi = self.b.ins().band_imm_u(hi, byte as i64);
+            self.b.ins().iadd(lo, hi)
+        } else {
+            a
+        };
+        let a = if esize <= 16 {
+            let lo = self.b.ins().band_imm_u(a, word as i64);
+            let hi = self.b.ins().ushr_imm_u(a, 16);
+            let hi = self.b.ins().band_imm_u(hi, word as i64);
+            self.b.ins().iadd(lo, hi)
+        } else {
+            a
+        };
+        let low = self.b.ins().band_imm_u(a, 0xffff_ffffu64 as i64);
+        let high = self.b.ins().ushr_imm_u(a, 32);
+        self.b.ins().iadd(low, high)
     }
 
     /// Lane-wise wrapping multiply. A whole-half `imul` would mix lanes (the high half

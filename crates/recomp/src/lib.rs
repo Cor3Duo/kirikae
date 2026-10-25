@@ -2,6 +2,7 @@ pub mod clif;
 pub mod discover;
 pub mod ehframe;
 pub mod jump;
+pub mod profile;
 pub mod project;
 pub mod rust_backend;
 

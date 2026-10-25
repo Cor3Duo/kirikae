@@ -9,7 +9,10 @@ use crate::kernel::{
     Port, ResourceLimit, Session, SharedMapError, SharedMemory, SharedMemoryRole, ThreadContext,
     TransferMemory,
 };
-use crate::mem::{ADDR_MASK, MirrorError, PAGE, PhysicalError, perm, state};
+use crate::mem::{
+    ADDR_MASK, DEVICE_SPACE_LIMIT, DeviceAddressSpace, DeviceError, IO_POOL_BASE, IO_POOL_END,
+    IoPool, IoRegion, MirrorError, PAGE, PhysicalError, device_perm, io_mapping, perm, state,
+};
 use crate::process::Process;
 use crate::services::sm::Sm;
 use crate::threads;
@@ -19,6 +22,9 @@ pub const TICK_HZ: u64 = 19_200_000;
 pub const RESULT_SUCCESS: u64 = 0;
 pub const RESULT_NOT_IMPLEMENTED: u64 = 0x4201;
 pub const RESULT_INVALID_SIZE: u64 = 0xca01;
+/// `ResultOutOfMemory`; `svcSetHeapSize` reports it when the request does not
+/// fit the heap region (the misaligned and above-4-GiB cases are `0xca01`).
+pub const RESULT_OUT_OF_MEMORY: u64 = 0xd001;
 pub const RESULT_INVALID_ENUM: u64 = 0xf001;
 pub const RESULT_INVALID_ADDRESS: u64 = 0xcc01;
 pub const RESULT_INVALID_MEMORY_REGION: u64 = 0xdc01;
@@ -43,11 +49,31 @@ pub const ALIAS_BASE: u64 = 0x10_0000_0000;
 pub const ALIAS_SIZE: u64 = 0x10_0000_0000;
 pub const TOTAL_MEMORY: u64 = 0xcd50_0000;
 const HEAP_ALIGN: u64 = 0x20_0000;
+/// `svcSetHeapSize` accepts a size of at most 4 GiB (`0xca01` above it).
+const MAX_HEAP_SIZE: u64 = 0x1_0000_0000;
 
-/// Guest regions a process asks the kernel about. A 32-bit process cannot see
-/// anything above 4 GiB, so its heap, stack, TLS and alias live in the low half
-/// of the address space; the A64 layout is unchanged.
-#[derive(Clone, Copy, Debug)]
+/// Guest regions a process asks the kernel about.
+///
+/// The A64 layout is the 39-bit one the runtime has always used and does not
+/// change. A 32-bit process cannot see anything above 4 GiB, so its regions
+/// live in the low half and the heap region is the last one: `svcSetHeapSize`
+/// caps a request at 4 GiB and a 32-bit title asks for up to that, which only
+/// fits above the map region. The 32-bit ASLR layout documented for 1.0.0 puts
+/// the map region at `0x4000_0000` (1 GiB) with the heap region after it, so the
+/// runtime keeps that order:
+///
+/// ```text
+/// 0x0800_0000 code (the loader's LOAD_BASE) .. 0x2000_0000
+/// 0x2000_0000 stack region (256 MiB)
+/// 0x3000_0000 TLS (grows up to the map region)
+/// 0x4000_0000 map/alias region (1 GiB)
+/// 0x8000_0000 heap region (2 GiB, up to 4 GiB)
+/// ```
+///
+/// `tls_base` is the only region the kernel does not expose through
+/// `svcGetInfo`; it needs its own hole so a guest that maps the whole alias
+/// region cannot take it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Layout {
     pub aslr_base: u64,
     pub aslr_size: u64,
@@ -76,13 +102,13 @@ pub const fn layout(arch: kirikae_loader::Arch) -> Layout {
         kirikae_loader::Arch::A32 => Layout {
             aslr_base: ASLR_BASE,
             aslr_size: 0x1800_0000,
-            heap_base: 0x2000_0000,
-            heap_region_size: 0x2000_0000,
-            stack_base: 0x4000_0000,
-            stack_region_size: 0x2000_0000,
-            alias_base: 0x8000_0000,
-            alias_size: 0x8000_0000,
-            tls_base: 0x6000_0000,
+            heap_base: 0x8000_0000,
+            heap_region_size: 0x8000_0000,
+            stack_base: 0x2000_0000,
+            stack_region_size: 0x1000_0000,
+            alias_base: 0x4000_0000,
+            alias_size: 0x4000_0000,
+            tls_base: 0x3000_0000,
         },
     }
 }
@@ -175,6 +201,8 @@ fn dispatch(c: &mut Cpu, imm: u16) {
         // void calls that the retail kernel stubs out: they neither return a
         // result nor write guest memory. The runtime has no kernel trace
         // buffer, so ignoring them is the documented behavior.
+        0x39 => create_io_pool(c),
+        0x3a => create_io_region(c),
         0x3c | 0x3d => {}
         0x40 => create_session(c),
         0x41 => accept_session(c),
@@ -182,6 +210,11 @@ fn dispatch(c: &mut Cpu, imm: u16) {
         0x43 => reply_and_receive(c, c.x[1], c.x[2], c.x[3] as u32, c.x[4] as i64),
         0x44 => reply_and_receive_with_user_buffer(c),
         0x45 => threads::create_event(c),
+        0x46 => map_io_region(c),
+        0x47 => unmap_io_region(c),
+        0x48 => map_physical_memory_unsafe(c),
+        0x49 => unmap_physical_memory_unsafe(c),
+        0x4a => set_unsafe_limit(c),
         0x4b => create_code_memory(c),
         0x4c => control_code_memory(c),
         0x4d => sleep_system(c),
@@ -192,6 +225,11 @@ fn dispatch(c: &mut Cpu, imm: u16) {
         0x52 => unmap_transfer_memory(c),
         0x53 => create_interrupt_event(c),
         0x54 => query_physical_address(c),
+        0x55 => query_memory_mapping(c),
+        0x56 => create_device_address_space(c),
+        0x57 | 0x58 => attach_device_address_space(c, imm),
+        0x59..=0x5b => map_device_address_space(c, imm),
+        0x5c => unmap_device_address_space(c),
         0x5d..=0x5f => process_data_cache(c, imm),
         // The debug SVCs that need a `KDebug` object to attach to, stop or
         // touch another process keep the retail answers: a console without
@@ -247,27 +285,17 @@ fn dispatch(c: &mut Cpu, imm: u16) {
         0x30 => get_resource_limit_value(c, false),
         0x31 => get_resource_limit_value(c, true),
         0x36 => synchronize_preemption_state(c),
-        // IoPool/IoRegion (0x39 CreateIoPool, 0x3A CreateIoRegion, 0x46
-        // MapIoRegion, 0x47 UnmapIoRegion) stay unimplemented on purpose. The
-        // runtime has no device physical address space: `mem::map_physical`
-        // commits zero-filled guest RAM in the alias region and charges it to
-        // the memory budget, while device registers are modelled per block in
-        // gpu/host1x. An IoRegion over the PCIe aperture (0x12000000-0x1FFFFFFF)
-        // would therefore fabricate RAM instead of mapping device memory.
+        // The device families are served by the device memory model in `mem`:
+        // an IO pool is the PCIe A2 aperture (0x39/0x3A), an IO region is a
+        // claimed page range with a real host buffer behind it (0x46/0x47), and
+        // a device address space is an IOMMU page table that aliases guest
+        // pages of this process (0x55-0x5C). Register ranges
+        // (`MemoryMapping_IoRegister`) and any range the model cannot back are
+        // refused with the documented error instead of being faked; see
+        // `create_io_region` and `query_memory_mapping`.
         //
-        // For the same reason the unsafe pool-0 physical calls stay missing:
-        // 0x48 MapPhysicalMemoryUnsafe and 0x49 UnmapPhysicalMemoryUnsafe would
-        // hand the guest device pages that only exist as fabricated RAM, and 0x4A
-        // SetUnsafeLimit grants nothing without them (the regular pool ceiling is
-        // already LimitableResource_PhysicalMemoryMax).
-        //
-        // The device address space calls (0x55 QueryMemoryMapping, 0x56
-        // CreateDeviceAddressSpace .. 0x5C UnmapDeviceAddressSpace) depend on
-        // the same missing physical map and on an IOMMU, so they keep reporting
-        // 0x4201 rather than handing out synthetic physical addresses.
-        //
-        // 0x90/0x91 are the exception in the physical family: they allocate new
-        // guest pages, so they are served from the ASLR region as MemType_Insecure
+        // 0x90/0x91 are the insecure physical family: they allocate new guest
+        // pages, so they are served from the ASLR region as MemType_Insecure
         // (see `map_insecure_physical_memory`). Nothing here invents device
         // memory.
         _ => {
@@ -673,12 +701,15 @@ fn read_reply_handles(c: &mut Cpu, addr: u64, count: u64) -> Option<Vec<(u32, Wa
 
 /// Sends the reply the calling thread has in `buffer` to the session in
 /// service, if any. A host session replies inline, so there is nothing to send.
-fn send_reply(c: &Cpu, session: &Arc<Session>, buffer: (u64, u64)) {
+/// `Err` is the `svcReplyAndReceive` result: an unmapped reply buffer is
+/// `0xe601` and a reply with Send/Receive/Exchange descriptors is `0xe801`
+/// (HIPC page, Server).
+fn send_reply(c: &Cpu, session: &Arc<Session>, buffer: (u64, u64)) -> Result<(), u64> {
     let Some(link) = session.guest_server_link() else {
-        return;
+        return Ok(());
     };
     if !link.in_service() {
-        return;
+        return Ok(());
     }
     let p = c.process();
     let Some(bytes) = p.memory.read(buffer.0, buffer.1) else {
@@ -686,11 +717,16 @@ fn send_reply(c: &Cpu, session: &Arc<Session>, buffer: (u64, u64)) {
             "ReplyAndReceive: the reply buffer {:#x} is not mapped",
             buffer.0
         ));
-        return;
+        return Err(RESULT_INVALID_POINTER);
     };
+    if crate::ipc::reply_result(&bytes) != 0 {
+        p.warn_once("ReplyAndReceive: a reply may not carry Send/Receive/Exchange buffers".into());
+        return Err(RESULT_INVALID_COMBINATION);
+    }
     // The pair wakes the process itself, so a host service posting from its own
     // thread reaches the blocked client too.
     link.post_reply(bytes);
+    Ok(())
 }
 
 /// Where `svcReplyAndReceive` receives: the TLS message buffer or the user
@@ -754,10 +790,13 @@ fn send_reply_to_target(c: &mut Cpu, target: u32, buffer: (u64, u64)) -> bool {
     // `sched::block` holds the scheduler lock and may touch the table.
     let session = c.process().handles.lock().unwrap().session(target);
     match session {
-        Some(session) => {
-            send_reply(c, &session, buffer);
-            true
-        }
+        Some(session) => match send_reply(c, &session, buffer) {
+            Ok(()) => true,
+            Err(result) => {
+                c.x[0] = result;
+                false
+            }
+        },
         None => {
             c.x[0] = RESULT_INVALID_HANDLE;
             false
@@ -782,7 +821,10 @@ fn reply_and_receive_light(c: &mut Cpu) {
                 c.x[0] = RESULT_INVALID_HANDLE;
                 return;
             };
-            send_reply(c, &session, (c.tpidrro_el0, IPC_BUFFER_SIZE));
+            if let Err(result) = send_reply(c, &session, (c.tpidrro_el0, IPC_BUFFER_SIZE)) {
+                c.x[0] = result;
+                return;
+            }
             Waitable::Guest(link)
         }
         Some(KObject::Port(port)) => Waitable::Port(port),
@@ -933,6 +975,18 @@ fn close_handle(c: &mut Cpu) {
             Some(KObject::TransferMemory(tmem)) => {
                 release_transfer_memory(p, handle, &tmem);
             }
+            // An IoRegion owns guest pages while it is mapped. Closing the last
+            // handle writes them back and releases them, so a guest that closes
+            // the handle before unmapping does not leak them.
+            Some(KObject::IoRegion(region)) => {
+                let released = region.release(&p.memory);
+                if !released {
+                    p.warn_once(format!(
+                        "svcCloseHandle({handle:#x}): the IO region at {:#x} could not release its guest mapping",
+                        region.physical
+                    ));
+                }
+            }
             _ => {}
         }
         closed
@@ -946,28 +1000,47 @@ fn close_handle(c: &mut Cpu) {
 fn set_heap_size(c: &mut Cpu) {
     let size = c.x[1];
     let layout = c.process().layout;
-    if !size.is_multiple_of(HEAP_ALIGN) || size > layout.heap_region_size {
+    // SVC page, SetHeapSize: a misaligned size or one above 4 GiB is 0xca01;
+    // a size that does not fit the heap region is 0xd001 (OutOfMemory).
+    if !size.is_multiple_of(HEAP_ALIGN) || size > MAX_HEAP_SIZE {
         c.x[0] = RESULT_INVALID_SIZE;
+        return;
+    }
+    if size > layout.heap_region_size {
+        c.x[0] = RESULT_OUT_OF_MEMORY;
         return;
     }
     let p = c.process();
     let mut heap = p.heap.lock().unwrap();
     if size > *heap {
-        if p.memory
-            .map_as(
-                layout.heap_base + *heap,
-                size - *heap,
-                state::HEAP,
-                perm::RW,
-            )
-            .is_err()
-        {
+        if let Err(e) = p.memory.map_as(
+            layout.heap_base + *heap,
+            size - *heap,
+            state::HEAP,
+            perm::RW,
+        ) {
             drop(heap);
-            fatal(c, format!("could not map a {size:#x}-byte heap"));
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                // A live mapping sits where the heap would grow; the kernel
+                // reports the region's state, not a host failure.
+                p.warn_once(format!(
+                    "svcSetHeapSize({size:#x}): the heap region is not free: {e}"
+                ));
+                c.x[0] = RESULT_INVALID_MEMORY_STATE;
+            } else {
+                fatal(c, format!("could not map a {size:#x}-byte heap: {e}"));
+            }
             return;
         }
-        *heap = size;
+    } else if size < *heap {
+        // Shrinking gives the tail back, as the kernel does.
+        if let Err(e) = p.memory.unmap(layout.heap_base + size, *heap - size) {
+            drop(heap);
+            fatal(c, format!("could not shrink the heap to {size:#x}: {e}"));
+            return;
+        }
     }
+    *heap = size;
     c.x[0] = RESULT_SUCCESS;
     c.x[1] = layout.heap_base;
 }
@@ -1428,6 +1501,87 @@ fn unmap_physical_memory(c: &mut Cpu) {
     });
 }
 
+/// `svcMapPhysicalMemoryUnsafe` and `svcUnmapPhysicalMemoryUnsafe` take the same
+/// alias-region address as `svcMapPhysicalMemory`, but charge pool partition 0
+/// and are gated by `svcSetUnsafeLimit`. The runtime has one pool partition, so
+/// the bytes a guest maps here are ordinary host RAM it can back, never the
+/// device aperture: the range must lie inside the alias region and outside the
+/// PCIe window. A guest that tries the aperture gets the kernel's invalid
+/// range result rather than fabricated device memory.
+fn unsafe_physical_range(c: &mut Cpu) -> Option<(u64, u64)> {
+    let (addr, size) = (c.x[0], c.x[1]);
+    let layout = c.process().layout;
+    let error = if !addr.is_multiple_of(PAGE) {
+        RESULT_INVALID_ADDRESS
+    } else if size == 0 || !size.is_multiple_of(PAGE) {
+        RESULT_INVALID_SIZE
+    } else if addr.checked_add(size).is_none()
+        || addr < layout.alias_base
+        || addr + size > layout.alias_base + layout.alias_size
+        // The A64 alias region starts above the aperture, so this only rejects
+        // a layout whose alias covers 0x1200_0000..0x2000_0000.
+        || (addr < IO_POOL_END && addr + size > IO_POOL_BASE)
+    {
+        RESULT_INVALID_MEMORY_REGION
+    } else {
+        return Some((addr, addr + size));
+    };
+    c.x[0] = error;
+    None
+}
+
+fn map_physical_memory_unsafe(c: &mut Cpu) {
+    let Some((start, end)) = unsafe_physical_range(c) else {
+        return;
+    };
+    let size = end - start;
+    let p = c.process();
+    let (limit, used) = {
+        let table = p.handles.lock().unwrap();
+        (table.unsafe_limit(), table.unsafe_mapped())
+    };
+    if used.checked_add(size).is_none_or(|n| n > limit) {
+        p.warn_once(format!(
+            "svcMapPhysicalMemoryUnsafe({start:#x}, {size:#x}): {used:#x} bytes are already mapped through the unsafe calls and the limit is {limit:#x} (svcSetUnsafeLimit)"
+        ));
+        c.x[0] = RESULT_LIMIT_REACHED;
+        return;
+    }
+    let budget = TOTAL_MEMORY.saturating_sub(p.used_memory());
+    let r = p.memory.map_physical(start, end, budget);
+    physical_result(c, "svcMapPhysicalMemoryUnsafe", r, |_| {
+        // The allowance counts the range the guest asked for, not only the
+        // pages this call had to commit: it is a pool-0 budget, not a host
+        // allocation log.
+        p.physical
+            .fetch_add(size, std::sync::atomic::Ordering::Relaxed);
+        p.handles.lock().unwrap().charge_unsafe(size);
+    });
+}
+
+fn unmap_physical_memory_unsafe(c: &mut Cpu) {
+    let Some((start, end)) = unsafe_physical_range(c) else {
+        return;
+    };
+    let p = c.process();
+    let r = p.memory.unmap_physical(start, end);
+    physical_result(c, "svcUnmapPhysicalMemoryUnsafe", r, |held| {
+        p.physical
+            .fetch_sub(held, std::sync::atomic::Ordering::Relaxed);
+        p.handles.lock().unwrap().release_unsafe(held);
+    });
+}
+
+/// `svcSetUnsafeLimit` (0x4A): the ceiling for the unsafe physical calls. On
+/// hardware it starts at zero, so a guest that never calls this cannot use
+/// `svcMapPhysicalMemoryUnsafe`; the runtime keeps that rule.
+fn set_unsafe_limit(c: &mut Cpu) {
+    let limit = c.x[0];
+    c.process().handles.lock().unwrap().set_unsafe_limit(limit);
+    c.process().log_ipc(format!("SetUnsafeLimit({limit:#x})"));
+    ok(c);
+}
+
 /// `svcQueryPhysicalAddress` (0x54): the kernel returns the physical address of
 /// the page, the virtual base of the mapping that contains it and the mapping's
 /// size in X1-X3 (the SDK wrapper stores them in a `PhysicalMemoryInfo`).
@@ -1450,6 +1604,397 @@ fn query_physical_address(c: &mut Cpu) {
     c.x[1] = addr & !(PAGE - 1);
     c.x[2] = region.range.start;
     c.x[3] = region.range.end - region.range.start;
+}
+
+/// The largest `DeviceName` the SVC page documents (`TSECB1` = 0x25). Any other
+/// value is the kernel's invalid-enum result.
+const MAX_DEVICE_NAME: u32 = 0x25;
+
+/// The kernel frame `svcMapDeviceAddressSpaceAligned` (and the aligned path of
+/// `svcMapDeviceAddressSpace`) requires the process and device addresses to
+/// share.
+const DEVICE_ALIGN_MASK: u64 = (1 << 22) - 1;
+
+/// Turns a device-model refusal into the kernel's result code.
+fn device_error(p: &Process, name: &str, e: DeviceError) -> u64 {
+    match e {
+        DeviceError::Size => RESULT_INVALID_SIZE,
+        DeviceError::Address => RESULT_INVALID_ADDRESS,
+        DeviceError::Range | DeviceError::Registers => RESULT_INVALID_MEMORY_REGION,
+        DeviceError::State => RESULT_INVALID_MEMORY_STATE,
+        DeviceError::Permission => RESULT_INVALID_NEW_MEMORY_PERMISSION,
+        DeviceError::Host => {
+            p.warn_once(format!("{name}: the host refused the device backing store"));
+            RESULT_LIMIT_REACHED
+        }
+    }
+}
+
+/// `svcCreateIoPool` (0x39): the handle of the PCIe A2 pool, the aperture
+/// 0x1200_0000..0x2000_0000. The pool claims no bytes until regions are created
+/// inside it, so creating it costs nothing; closing the handle is the destroy
+/// path (there is no separate destroy SVC). The runtime models one aperture per
+/// process, so a second pool is refused while one, or any region of one, is
+/// still alive: the claim could otherwise be backed twice.
+fn create_io_pool(c: &mut Cpu) {
+    if c.x[1] as u32 != 0 {
+        // IoPoolType_PcieA2 is the only documented pool type.
+        c.x[0] = RESULT_INVALID_ENUM;
+        return;
+    }
+    let p = c.process();
+    let mut table = p.handles.lock().unwrap();
+    if table
+        .objects()
+        .any(|o| matches!(o, KObject::IoPool(_) | KObject::IoRegion(_)))
+    {
+        drop(table);
+        p.warn_once(
+            "svcCreateIoPool: the runtime models one PCIe A2 aperture per process; close every pool and region first"
+                .into(),
+        );
+        c.x[0] = RESULT_INVALID_STATE;
+        return;
+    }
+    let handle = table.insert(KObject::IoPool(IoPool::pcie_a2()));
+    drop(table);
+    p.log_ipc(format!("CreateIoPool(PcieA2) -> {handle:#x}"));
+    ok1(c, handle as u64);
+}
+
+/// `svcCreateIoRegion` (0x3A): claims `physical..physical+size` inside the pool
+/// with `mapping` and `perm`. A memory range gets a zero-filled host buffer, so
+/// the guest can map and use it; an `IoRegister` range is refused with the
+/// kernel's invalid-range result and a log, because there are no registers to
+/// map.
+fn create_io_region(c: &mut Cpu) {
+    let (handle, physical, size) = (c.x[1] as u32, c.x[2], c.x[3]);
+    let (mapping, permission) = (c.x[4] as u32, c.x[5] as u32);
+    let p = c.process();
+    let Some(pool) = p.handles.lock().unwrap().io_pool(handle) else {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    };
+    if mapping > io_mapping::MEMORY {
+        c.x[0] = RESULT_INVALID_ENUM;
+        return;
+    }
+    match IoRegion::new(pool, physical, size, mapping, permission) {
+        Ok(region) => {
+            let handle = p.handles.lock().unwrap().insert(KObject::IoRegion(region));
+            p.log_ipc(format!(
+                "CreateIoRegion({physical:#x}+{size:#x}, mapping={mapping}, perm={permission:#x}) -> {handle:#x}"
+            ));
+            ok1(c, handle as u64);
+        }
+        Err(DeviceError::Registers) => {
+            p.warn_once(format!(
+                "svcCreateIoRegion({physical:#x}+{size:#x}): MemoryMapping_IoRegister asks for device registers, which only the console has; the runtime backs Memory and Uncached regions only"
+            ));
+            c.x[0] = RESULT_INVALID_MEMORY_REGION;
+        }
+        Err(e) => c.x[0] = device_error(p, "svcCreateIoRegion", e),
+    }
+}
+
+/// `svcMapIoRegion` (0x46): exposes the region at `addr` with `perm`, which must
+/// be the permission the region was created with. The guest pages become
+/// `MemType_Io` and hold the region's contents; only one mapping exists per
+/// region at a time.
+fn map_io_region(c: &mut Cpu) {
+    let (handle, addr, size, permission) = (c.x[0] as u32, c.x[1], c.x[2], c.x[3] as u32);
+    let p = c.process();
+    let Some(region) = p.handles.lock().unwrap().io_region(handle) else {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    };
+    c.x[0] = match region.map(&p.memory, addr, size, permission) {
+        Ok(()) => {
+            p.log_ipc(format!(
+                "MapIoRegion({handle:#x}, {addr:#x}+{size:#x}, perm={permission:#x})"
+            ));
+            RESULT_SUCCESS
+        }
+        Err(e) => device_error(p, "svcMapIoRegion", e),
+    };
+}
+
+/// `svcUnmapIoRegion` (0x47): copies the guest pages back into the region and
+/// frees them.
+fn unmap_io_region(c: &mut Cpu) {
+    let (handle, addr, size) = (c.x[0] as u32, c.x[1], c.x[2]);
+    let p = c.process();
+    let Some(region) = p.handles.lock().unwrap().io_region(handle) else {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    };
+    c.x[0] = match region.unmap(&p.memory, addr, size) {
+        Ok(()) => RESULT_SUCCESS,
+        Err(e) => device_error(p, "svcUnmapIoRegion", e),
+    };
+}
+
+/// `svcQueryMemoryMapping` (0x55, 10.0.0+; it replaced `svcQueryIoMapping`):
+/// the virtual address behind a physical range, plus the size the caller asked
+/// for. The runtime's physical space is the guest's virtual space (guest RAM is
+/// identity mapped), so a mapped physical page resolves to its mapping base. In
+/// the PCIe aperture only a live `svcMapIoRegion` mapping can answer, which is
+/// the one place a device physical address has a guest view. Anything else is
+/// the kernel's not-found result; the kernel maps firmware regions here that
+/// the runtime does not have.
+fn query_memory_mapping(c: &mut Cpu) {
+    let (out_addr, out_size, physical, size) = (c.x[1], c.x[2], c.x[3], c.x[4]);
+    let p = c.process();
+    if out_addr == 0 || out_size == 0 {
+        c.x[0] = RESULT_INVALID_POINTER;
+        return;
+    }
+    if size == 0 || !size.is_multiple_of(PAGE) {
+        c.x[0] = RESULT_INVALID_SIZE;
+        return;
+    }
+    // A modern kernel only accepts a page-aligned physical address (the
+    // sub-page values name firmware regions), so an unaligned one is not found.
+    if !physical.is_multiple_of(PAGE) || physical.checked_add(size).is_none() {
+        c.x[0] = RESULT_NOT_FOUND;
+        return;
+    }
+    let found = if (IO_POOL_BASE..IO_POOL_END).contains(&physical) {
+        io_region_view(p, physical, size)
+    } else {
+        let r = p.memory.query(physical);
+        (r.state != state::FREE && r.range.end >= physical + size).then_some(r.range.start)
+    };
+    let Some(address) = found else {
+        p.warn_once(format!(
+            "svcQueryMemoryMapping({physical:#x}+{size:#x}): nothing in the runtime backs that physical range"
+        ));
+        c.x[0] = RESULT_NOT_FOUND;
+        return;
+    };
+    if !p.memory.is_mapped(out_addr, 8) || !p.memory.is_mapped(out_size, 8) {
+        c.x[0] = RESULT_INVALID_POINTER;
+        return;
+    }
+    if !p.memory.write(out_addr, &address.to_le_bytes())
+        || !p.memory.write(out_size, &size.to_le_bytes())
+    {
+        c.x[0] = RESULT_INVALID_POINTER;
+        return;
+    }
+    c.x[0] = RESULT_SUCCESS;
+}
+
+/// The guest view of a pool-backed physical range, when a live IoRegion covers
+/// it and is currently mapped.
+fn io_region_view(p: &Process, physical: u64, size: u64) -> Option<u64> {
+    let handles = p.handles.lock().unwrap();
+    handles.objects().find_map(|object| {
+        let KObject::IoRegion(region) = object else {
+            return None;
+        };
+        let at = region.mapped_at()?;
+        let end = physical.checked_add(size)?;
+        (physical >= region.physical && end <= region.physical + region.size)
+            .then(|| at + (physical - region.physical))
+    })
+}
+
+/// `svcCreateDeviceAddressSpace` (0x56): an IOMMU window `base..base+size` for
+/// `svcMapDeviceAddressSpace*`. The runtime caps it at
+/// [`DEVICE_SPACE_LIMIT`] and backs it with the guest's own pages when they are
+/// mapped into it.
+fn create_device_address_space(c: &mut Cpu) {
+    let (base, size) = (c.x[1], c.x[2]);
+    let error = if !base.is_multiple_of(PAGE) {
+        RESULT_INVALID_ADDRESS
+    } else if size == 0 || !size.is_multiple_of(PAGE) {
+        RESULT_INVALID_SIZE
+    } else if base
+        .checked_add(size)
+        .is_none_or(|end| end > DEVICE_SPACE_LIMIT)
+    {
+        RESULT_INVALID_MEMORY_REGION
+    } else {
+        RESULT_SUCCESS
+    };
+    if error != RESULT_SUCCESS {
+        c.x[0] = error;
+        return;
+    }
+    let p = c.process();
+    let handle = p
+        .handles
+        .lock()
+        .unwrap()
+        .insert(KObject::DeviceAddressSpace(DeviceAddressSpace::new(
+            base, size,
+        )));
+    p.log_ipc(format!(
+        "CreateDeviceAddressSpace({base:#x}+{size:#x}) -> {handle:#x}"
+    ));
+    ok1(c, handle as u64);
+}
+
+/// `svcAttachDeviceAddressSpace` (0x57) and `svcDetachDeviceAddressSpace`
+/// (0x58). The attachment is recorded per device name and duplicate attach or
+/// detach of a device that is not attached is the kernel's invalid state. No
+/// hardware device exists in the runtime, so nothing reads the address space
+/// until a synthetic device uses it.
+fn attach_device_address_space(c: &mut Cpu, imm: u16) {
+    let (device, handle) = (c.x[0] as u32, c.x[1] as u32);
+    if device > MAX_DEVICE_NAME {
+        c.x[0] = RESULT_INVALID_ENUM;
+        return;
+    }
+    let p = c.process();
+    let Some(das) = p.handles.lock().unwrap().device_address_space(handle) else {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    };
+    let attach = imm == 0x57;
+    let name = if attach {
+        "svcAttachDeviceAddressSpace"
+    } else {
+        "svcDetachDeviceAddressSpace"
+    };
+    let r = if attach {
+        das.attach(device)
+    } else {
+        das.detach(device)
+    };
+    c.x[0] = match r {
+        Ok(()) => {
+            if attach {
+                p.warn_once(format!(
+                    "svcAttachDeviceAddressSpace(device {device}): the runtime records the attachment, but no hardware device reads this address space"
+                ));
+            }
+            p.log_ipc(format!("{name}(device={device}, handle={handle:#x})"));
+            RESULT_SUCCESS
+        }
+        Err(DeviceError::State) => RESULT_INVALID_STATE,
+        Err(e) => device_error(p, name, e),
+    };
+}
+
+/// `svcMapDeviceAddressSpaceByForce` (0x59), `...Aligned` (0x5A) and
+/// `MapDeviceAddressSpace` (0x5B): alias a range of the current process at a
+/// device address. Only the current process exists, so only the
+/// current-process alias is a valid process handle.
+///
+/// 0x59 and 0x5A pass the permission in the low 16 bits of an option word; the
+/// high bits select an IO mapping the runtime cannot model, so they are refused
+/// as an invalid enum. 0x5A and 0x5B require the process and device addresses to
+/// share their 4 MiB frame, as the kernel does; 0x5B returns the mapped size in
+/// X1.
+fn map_device_address_space(c: &mut Cpu, imm: u16) {
+    let (handle, process, process_addr, size, device_addr, permission) = if imm == 0x5b {
+        (
+            c.x[1] as u32,
+            c.x[2] as u32,
+            c.x[3],
+            c.x[4],
+            c.x[5],
+            c.x[6] as u32,
+        )
+    } else {
+        let option = c.x[5] as u32;
+        (
+            c.x[0] as u32,
+            c.x[1] as u32,
+            c.x[2],
+            c.x[3],
+            c.x[4],
+            option & 0xffff,
+        )
+    };
+    let p = c.process();
+    if imm != 0x5b && (c.x[5] as u32) & !0xffff != 0 {
+        p.warn_once(format!(
+            "svc {imm:#04x}: the option word {:#x} asks for an IO mapping indicator the runtime cannot model",
+            c.x[5] as u32
+        ));
+        c.x[0] = RESULT_INVALID_ENUM;
+        return;
+    }
+    if process != CURRENT_PROCESS as u32 {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    }
+    if !process_addr.is_multiple_of(PAGE) || !device_addr.is_multiple_of(PAGE) {
+        c.x[0] = RESULT_INVALID_ADDRESS;
+        return;
+    }
+    if size == 0 || !size.is_multiple_of(PAGE) {
+        c.x[0] = RESULT_INVALID_SIZE;
+        return;
+    }
+    if process_addr.checked_add(size).is_none() {
+        c.x[0] = RESULT_INVALID_MEMORY_REGION;
+        return;
+    }
+    if imm != 0x59 && (process_addr & DEVICE_ALIGN_MASK) != (device_addr & DEVICE_ALIGN_MASK) {
+        c.x[0] = RESULT_INVALID_ADDRESS;
+        return;
+    }
+    if !device_perm(permission) {
+        c.x[0] = RESULT_INVALID_NEW_MEMORY_PERMISSION;
+        return;
+    }
+    let Some(das) = p.handles.lock().unwrap().device_address_space(handle) else {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    };
+    match das.map(&p.memory, process_addr, size, device_addr, permission) {
+        Ok(()) => {
+            p.log_ipc(format!(
+                "MapDeviceAddressSpace({device_addr:#x} <- {process_addr:#x}+{size:#x}, perm={permission:#x})"
+            ));
+            if imm == 0x5b {
+                ok1(c, size);
+            } else {
+                ok(c);
+            }
+        }
+        Err(e) => c.x[0] = device_error(p, "svcMapDeviceAddressSpace", e),
+    }
+}
+
+/// `svcUnmapDeviceAddressSpace` (0x5C): removes the device pages in the range
+/// from the address space. The guest pages are not touched; the device side
+/// simply stops resolving them. The device table is keyed by device address, so
+/// the guest range is only validated for alignment and overflow, not for still
+/// being mapped: unmapping a device range whose guest pages went away is valid
+/// cleanup, and refusing it would leave the device window allocated.
+fn unmap_device_address_space(c: &mut Cpu) {
+    let (handle, process, process_addr, size, device_addr) =
+        (c.x[0] as u32, c.x[1] as u32, c.x[2], c.x[3], c.x[4]);
+    let p = c.process();
+    if process != CURRENT_PROCESS as u32 {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    }
+    if !process_addr.is_multiple_of(PAGE) || !device_addr.is_multiple_of(PAGE) {
+        c.x[0] = RESULT_INVALID_ADDRESS;
+        return;
+    }
+    if size == 0 || !size.is_multiple_of(PAGE) {
+        c.x[0] = RESULT_INVALID_SIZE;
+        return;
+    }
+    if process_addr.checked_add(size).is_none() {
+        c.x[0] = RESULT_INVALID_MEMORY_REGION;
+        return;
+    }
+    let Some(das) = p.handles.lock().unwrap().device_address_space(handle) else {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    };
+    c.x[0] = match das.unmap(device_addr, size) {
+        Ok(()) => RESULT_SUCCESS,
+        Err(e) => device_error(p, "svcUnmapDeviceAddressSpace", e),
+    };
 }
 
 /// The MC/MC0/MC1 register offsets `svcReadWriteRegister` accepts. The three
@@ -1503,6 +2048,13 @@ fn query_memory(c: &mut Cpu) {
 /// The `MemoryInfo`/`PageInfo` pair `svcQueryMemory` (0x06) and
 /// `svcQueryProcessMemory` (0x76) report: a 0x28-byte `MemoryInfo` at `out` and
 /// the 32-bit `PageInfo` in W1 (the wrappers store it in their out pointer).
+///
+/// `State` carries the runtime's page tag, which is the low byte of the
+/// documented `MemoryType` (Switchbrew's table) and not the whole
+/// `MemoryState` word: reporting the documented flag bits makes MK8D's 32-bit
+/// rtld reject its own module scan (see
+/// `docs/plan/findings/switchbrew-core.md`). `Attribute`, `IpcRefCount` and
+/// `DeviceRefCount` are zero: the runtime does not track them.
 fn write_memory_info(c: &mut Cpu, out: u64, addr: u64) {
     let r = c.process().memory.query(addr);
     let mut info = [0u8; 0x28];
@@ -1542,15 +2094,21 @@ fn get_info(c: &mut Cpu) {
         14 => layout.stack_base,
         15 => layout.stack_region_size,
         16 => p.system_resource_size,
-        17 => (p.physical.load(std::sync::atomic::Ordering::Relaxed) / 512)
-            .next_multiple_of(PAGE)
-            .min(p.system_resource_size),
+        // InfoType_SystemResourceSizeUsed: the pages of the system resource the
+        // process has mapped so far, in bytes (`p.physical`). The old code
+        // divided by 512, which reported an eighth of the real usage.
+        17 => p.physical.load(std::sync::atomic::Ordering::Relaxed),
         18 => p.title_id,
+        19 => threads::PROCESS_ID,
         // InfoType_UserExceptionContextAddress: the exception frame lives at
         // the start of the thread's TLS region, which is TPIDRRO_EL0.
         20 => c.tpidrro_el0,
         21 => TOTAL_MEMORY - p.system_resource_size,
-        22 => p.used_memory() - p.system_resource_size,
+        // InfoType_SystemResourceSizeUsed: the memory in use outside the system
+        // resource. Subtracting `physical` here made SMBW compute a heap 32 MiB
+        // smaller and abort while loading its heap definition, so the value is
+        // the used memory minus the system resource size.
+        22 => p.used_memory().saturating_sub(p.system_resource_size),
         23 => 1,
         24 => 0x60,
         26 => 1,
@@ -2470,9 +3028,94 @@ fn output_debug_string(c: &mut Cpu) {
 }
 
 /// Layout of the user exception context at TPIDRRO_EL0, from the Horizon
-/// exception path: a 0x148-byte exception stack followed by the A64 frame.
+/// exception path: a 0x148-byte exception stack followed by the register
+/// frame, which is 0x78 bytes on A64 and 0x44 on A32.
 pub const EXCEPTION_FRAME_OFFSET: u64 = 0x148;
-const EXCEPTION_FRAME_SIZE: u64 = 0x78;
+/// `ExceptionFrameA64`: GPRs 0-8, lr, sp, pc, pstate, afsr0, afsr1, esr, far.
+const EXCEPTION_FRAME_SIZE_A64: u64 = 0x78;
+/// `ExceptionFrameA32`: GPRs 0-7, sp, lr, pc, tpidr_el0 (= 1), cpsr, afsr0,
+/// afsr1, esr, far.
+const EXCEPTION_FRAME_SIZE_A32: u64 = 0x44;
+
+/// The frame size the kernel writes for `arch`.
+fn exception_frame_size(arch: kirikae_loader::Arch) -> u64 {
+    match arch {
+        kirikae_loader::Arch::A64 => EXCEPTION_FRAME_SIZE_A64,
+        kirikae_loader::Arch::A32 => EXCEPTION_FRAME_SIZE_A32,
+    }
+}
+
+/// The `ExceptionFrameA64`/`ExceptionFrameA32` the kernel stores at
+/// `EXCEPTION_FRAME_OFFSET`. The 32-bit frame keeps the guest's registers in
+/// 4-byte fields and, as the SVC page documents, stores `tpidr_el0 = 1`.
+fn encode_exception_frame(arch: kirikae_loader::Arch, c: &Cpu, fault_pc: u64) -> Vec<u8> {
+    let mut frame = vec![0u8; exception_frame_size(arch) as usize];
+    let (gprs, lr_at, sp_at, pc_at, cpsr_at) = match arch {
+        kirikae_loader::Arch::A64 => (9, 0x48, 0x50, 0x58, 0x60),
+        kirikae_loader::Arch::A32 => (8, 0x24, 0x20, 0x28, 0x30),
+    };
+    let width = if arch == kirikae_loader::Arch::A32 {
+        4
+    } else {
+        8
+    };
+    for (i, reg) in c.x[..gprs].iter().enumerate() {
+        let at = i * width;
+        if width == 4 {
+            frame[at..at + 4].copy_from_slice(&(*reg as u32).to_le_bytes());
+        } else {
+            frame[at..at + 8].copy_from_slice(&reg.to_le_bytes());
+        }
+    }
+    let put = |frame: &mut Vec<u8>, at: usize, value: u64| {
+        if width == 4 {
+            frame[at..at + 4].copy_from_slice(&(value as u32).to_le_bytes());
+        } else {
+            frame[at..at + 8].copy_from_slice(&value.to_le_bytes());
+        }
+    };
+    // The A32 lr is r14; the runtime keeps it in x30 for both architectures.
+    put(&mut frame, lr_at, c.x[30]);
+    put(&mut frame, sp_at, c.sp);
+    put(&mut frame, pc_at, fault_pc);
+    put(&mut frame, cpsr_at, (c.nzcv as u32) as u64);
+    if arch == kirikae_loader::Arch::A32 {
+        // tpidr_el0 = 1 and far = the faulting address.
+        put(&mut frame, 0x2c, 1);
+        put(&mut frame, 0x40, fault_pc);
+    }
+    frame
+}
+
+/// Applies a frame written by [`encode_exception_frame`] back to `c`, which is
+/// what `svcReturnFromException` does with the crt0's edits. The runtime keeps
+/// TPIDR_EL0 alone: guests use it as their thread pointer and the frame carries
+/// no usable value for it.
+fn decode_exception_frame(arch: kirikae_loader::Arch, c: &mut Cpu, frame: &[u8]) {
+    let (gprs, lr_at, sp_at, pc_at, cpsr_at) = match arch {
+        kirikae_loader::Arch::A64 => (9, 0x48, 0x50, 0x58, 0x60),
+        kirikae_loader::Arch::A32 => (8, 0x24, 0x20, 0x28, 0x30),
+    };
+    let width = if arch == kirikae_loader::Arch::A32 {
+        4
+    } else {
+        8
+    };
+    let get = |at: usize| -> u64 {
+        if width == 4 {
+            u32::from_le_bytes(frame[at..at + 4].try_into().unwrap_or_default()) as u64
+        } else {
+            u64::from_le_bytes(frame[at..at + 8].try_into().unwrap_or_default())
+        }
+    };
+    for (i, reg) in c.x[..gprs].iter_mut().enumerate() {
+        *reg = get(i * width);
+    }
+    c.x[30] = get(lr_at);
+    c.sp = get(sp_at);
+    c.pc = get(pc_at);
+    c.nzcv = get(cpsr_at);
+}
 
 /// Description codes the kernel passes to the process entry point in X0.
 pub const EXCEPTION_INSTRUCTION_ABORT: u64 = 0x100;
@@ -2514,18 +3157,10 @@ fn deliver_exception(c: &mut Cpu, desc: u64, fault_pc: u64) -> bool {
         return false;
     };
     let frame_at = c.tpidrro_el0 + EXCEPTION_FRAME_OFFSET;
-    if !p.memory.is_mapped(frame_at, EXCEPTION_FRAME_SIZE) {
+    let frame = encode_exception_frame(p.arch, c, fault_pc);
+    if !p.memory.is_mapped(frame_at, frame.len() as u64) {
         return false;
     }
-    let mut frame = [0u8; EXCEPTION_FRAME_SIZE as usize];
-    for (i, reg) in c.x[..9].iter().enumerate() {
-        frame[i * 8..i * 8 + 8].copy_from_slice(&reg.to_le_bytes());
-    }
-    frame[0x48..0x50].copy_from_slice(&c.x[30].to_le_bytes());
-    frame[0x50..0x58].copy_from_slice(&c.sp.to_le_bytes());
-    frame[0x58..0x60].copy_from_slice(&fault_pc.to_le_bytes());
-    // The runtime keeps no syndrome registers; PSTATE is the flag word.
-    frame[0x60..0x64].copy_from_slice(&(c.nzcv as u32).to_le_bytes());
     if !p.memory.write(frame_at, &frame) {
         return false;
     }
@@ -2555,22 +3190,17 @@ fn return_from_exception(c: &mut Cpu) {
         c.halt();
         return;
     }
+    let p = c.process();
     let frame_at = c.tpidrro_el0 + EXCEPTION_FRAME_OFFSET;
-    let Some(frame) = c.process().memory.read(frame_at, EXCEPTION_FRAME_SIZE) else {
+    let size = exception_frame_size(p.arch);
+    let Some(frame) = c.process().memory.read(frame_at, size) else {
         fatal(
             c,
             format!("svcReturnFromException cannot read the frame at {frame_at:#x}"),
         );
         return;
     };
-    let word = |at: usize| u64::from_le_bytes(frame[at..at + 8].try_into().unwrap_or_default());
-    for (i, reg) in c.x[..9].iter_mut().enumerate() {
-        *reg = word(i * 8);
-    }
-    c.x[30] = word(0x48);
-    c.sp = word(0x50);
-    c.pc = word(0x58);
-    c.nzcv = u32::from_le_bytes(frame[0x60..0x64].try_into().unwrap_or_default()) as u64;
+    decode_exception_frame(p.arch, c, &frame);
 }
 
 /// A guest exception the interpreter or a lifted instruction could not
@@ -2666,11 +3296,25 @@ mod tests {
         expected_exit: i32,
         system_resource_size: u64,
     ) -> crate::process::RunResult {
+        run_entries_arch(
+            kirikae_loader::Arch::A64,
+            entries,
+            expected_exit,
+            system_resource_size,
+        )
+    }
+
+    fn run_entries_arch(
+        arch: kirikae_loader::Arch,
+        entries: Vec<Entry>,
+        expected_exit: i32,
+        system_resource_size: u64,
+    ) -> crate::process::RunResult {
         let entries: &'static [Entry] = Box::leak(entries.into_boxed_slice());
         let exe = kirikae_loader::Executable {
             modules: Vec::new(),
             entry: entries[0].addr,
-            arch: kirikae_loader::Arch::A64,
+            arch,
             title_id: None,
             main_stack_size: None,
             system_resource_size,
@@ -2695,6 +3339,406 @@ mod tests {
                 func: f,
             }],
             0,
+        );
+    }
+
+    extern "C" fn info_type22(c: &mut Cpu) {
+        let p = c.process();
+        p.physical
+            .store(0x1000, std::sync::atomic::Ordering::Relaxed);
+        let used = p.used_memory();
+        let system_resource = p.system_resource_size;
+        c.x[1] = 22;
+        c.x[2] = 0xffff_8001;
+        dispatch(c, 0x29);
+        record("info22", &[c.x[0], c.x[1], used, system_resource]);
+        c.halt();
+    }
+
+    #[test]
+    fn info_type22_reports_the_memory_outside_the_system_resource() {
+        run_guest(info_type22);
+        let got = observed("info22");
+        assert_eq!(got[0], RESULT_SUCCESS);
+        assert_eq!(
+            got[1],
+            got[2].saturating_sub(got[3]),
+            "type 22 is used memory minus the system resource size"
+        );
+        assert_ne!(
+            got[1],
+            got[2].saturating_sub(0x1000),
+            "a physical mapping must not be subtracted here"
+        );
+    }
+
+    fn run_a32_guest(f: GuestFn) {
+        run_entries_arch(
+            kirikae_loader::Arch::A32,
+            vec![Entry {
+                addr: GUEST_ENTRY,
+                func: f,
+            }],
+            0,
+            0,
+        );
+    }
+
+    /// The 32-bit layout: every region below 4 GiB, no overlaps, and a heap
+    /// region that fits the 0x7800_0000 (1920 MiB) request MK8D makes.
+    #[test]
+    fn the_32_bit_layout_keeps_every_region_below_4_gib() {
+        let l = layout(kirikae_loader::Arch::A32);
+        assert!(l.heap_region_size >= 0x7800_0000);
+        assert_eq!(l.heap_base + l.heap_region_size, 0x1_0000_0000);
+        let code_end = l.aslr_base + l.aslr_size;
+        let stack_end = l.stack_base + l.stack_region_size;
+        let alias_end = l.alias_base + l.alias_size;
+        assert_eq!(l.aslr_base, ASLR_BASE, "the loader loads at LOAD_BASE");
+        assert_eq!(code_end, l.stack_base, "the stack region follows the code");
+        assert!(
+            l.tls_base >= stack_end && l.tls_base < l.alias_base,
+            "TLS has its own hole between the stack and the map region"
+        );
+        assert_eq!(alias_end, l.heap_base, "the heap follows the map region");
+        for (name, start, end) in [
+            ("code", l.aslr_base, code_end),
+            ("stack", l.stack_base, stack_end),
+            ("tls", l.tls_base, l.alias_base),
+            ("alias", l.alias_base, alias_end),
+            ("heap", l.heap_base, l.heap_base + l.heap_region_size),
+        ] {
+            assert!(start < end, "{name} is not empty");
+            assert!(end <= 0x1_0000_0000, "{name} leaves the 32-bit space");
+        }
+    }
+
+    #[test]
+    fn the_64_bit_layout_is_unchanged() {
+        assert_eq!(
+            layout(kirikae_loader::Arch::A64),
+            Layout {
+                aslr_base: 0x0800_0000,
+                aslr_size: 0x7f_f800_0000,
+                heap_base: 0x2_0000_0000,
+                heap_region_size: 0x1_8000_0000,
+                stack_base: 0x4_0000_0000,
+                stack_region_size: 0x1_0000_0000,
+                alias_base: 0x10_0000_0000,
+                alias_size: 0x10_0000_0000,
+                tls_base: 0x4_8000_0000,
+            }
+        );
+    }
+
+    /// The 1920 MiB heap a 32-bit title asks for, and both SetHeapSize error
+    /// paths: misaligned/above 4 GiB is 0xca01, over the heap region is 0xd001.
+    extern "C" fn a32_heap(c: &mut Cpu) {
+        let p = c.process();
+        c.x[1] = 0x7800_0000;
+        dispatch(c, 0x01);
+        let base = c.x[1];
+        let mut grow = vec![c.x[0], base];
+        grow.push(p.memory.is_mapped(base, 1) as u64);
+        grow.push(p.memory.is_mapped(base + 0x7800_0000 - 1, 1) as u64);
+        grow.push(p.memory.is_mapped(base + 0x7800_0000, 1) as u64);
+        let r = p.memory.query(base + 0x1000);
+        grow.extend([r.state as u64, r.perm as u64]);
+        record("a32_grow", &grow);
+
+        // Shrinking gives the tail back.
+        c.x[1] = 0x20_0000;
+        dispatch(c, 0x01);
+        record(
+            "a32_shrink",
+            &[
+                c.x[0],
+                p.memory.is_mapped(base, 1) as u64,
+                p.memory.is_mapped(base + 0x20_0000 - 1, 1) as u64,
+                p.memory.is_mapped(base + 0x20_0000, 1) as u64,
+            ],
+        );
+
+        let mut errors = Vec::new();
+        for size in [0x78_0001u64, 0x1_0000_0000, 0x2_0000_0000, 0] {
+            c.x[1] = size;
+            dispatch(c, 0x01);
+            errors.push(c.x[0]);
+        }
+        record("a32_errors", &errors);
+        c.halt();
+    }
+
+    #[test]
+    fn a_32_bit_guest_can_take_the_heap_mk8d_asks_for() {
+        run_a32_guest(a32_heap);
+        let grow = observed("a32_grow");
+        assert_eq!(grow[0], RESULT_SUCCESS, "1920 MiB fits the 32-bit heap");
+        assert_eq!(
+            grow[1], 0x8000_0000,
+            "the heap region starts at 0x8000_0000"
+        );
+        assert_eq!(
+            &grow[2..5],
+            &[1, 1, 0],
+            "exactly the requested range is mapped"
+        );
+        assert_eq!(
+            (grow[5], grow[6]),
+            (state::HEAP as u64, perm::RW as u64),
+            "the heap is Normal/SHARED-able RW memory"
+        );
+        assert_eq!(
+            observed("a32_shrink"),
+            vec![RESULT_SUCCESS, 1, 1, 0],
+            "a smaller heap releases its tail"
+        );
+        assert_eq!(
+            observed("a32_errors"),
+            vec![
+                RESULT_INVALID_SIZE,  // not 2 MiB aligned
+                RESULT_OUT_OF_MEMORY, // 4 GiB: aligned, over the heap region
+                RESULT_INVALID_SIZE,  // above 4 GiB
+                RESULT_SUCCESS,       // a zero heap is a valid shrink
+            ]
+        );
+    }
+
+    const INFO_OUT: u64 = 0x0F60_0000;
+    const INFO_HEAP: u64 = 0x0F61_0000;
+    const INFO_CODE: u64 = 0x0F62_0000;
+
+    extern "C" fn memory_info_states(c: &mut Cpu) {
+        let p = c.process();
+        p.memory
+            .map_as(INFO_OUT, PAGE, state::HEAP, perm::RW)
+            .expect("the info page maps");
+        p.memory
+            .map_as(INFO_HEAP, PAGE, state::HEAP, perm::RW)
+            .expect("the heap page maps");
+        p.memory
+            .map_as(INFO_CODE, PAGE, state::CODE_STATIC, perm::RX)
+            .expect("the code page maps");
+        let mut out = Vec::new();
+        for addr in [INFO_HEAP, INFO_CODE, INFO_HEAP + PAGE] {
+            c.x[0] = INFO_OUT;
+            c.x[2] = addr;
+            dispatch(c, 0x06);
+            let info = p.memory.read(INFO_OUT, 0x28).unwrap_or_default();
+            let word =
+                |at: usize| u32::from_le_bytes(info[at..at + 4].try_into().unwrap_or_default());
+            let wide =
+                |at: usize| u64::from_le_bytes(info[at..at + 8].try_into().unwrap_or_default());
+            out.extend([c.x[0], c.x[1], wide(0), wide(8)]);
+            out.extend([word(0x10) as u64, word(0x18) as u64]);
+        }
+        record("memory_info", &out);
+        c.halt();
+    }
+
+    #[test]
+    fn query_memory_reports_the_memory_info_layout() {
+        run_guest(memory_info_states);
+        let got = observed("memory_info");
+        // `MemoryInfo`: base at 0, size at 8, state at 0x10, attribute at 0x14,
+        // permission at 0x18, reference counts at 0x1C/0x20, padding at 0x24.
+        // The state carries only the runtime's page tag (the MemoryType low
+        // byte); the documented flag bits are a known gap (findings doc).
+        assert_eq!(
+            &got[..6],
+            &[
+                RESULT_SUCCESS,
+                0,
+                INFO_HEAP,
+                PAGE,
+                state::HEAP as u64,
+                perm::RW as u64,
+            ],
+            "a Normal page with RW permission"
+        );
+        assert_eq!(
+            &got[6..12],
+            &[
+                RESULT_SUCCESS,
+                0,
+                INFO_CODE,
+                PAGE,
+                state::CODE_STATIC as u64,
+                perm::RX as u64,
+            ],
+            "a Code page with RX permission"
+        );
+        assert_eq!(
+            &got[12..18],
+            &[
+                RESULT_SUCCESS,
+                0,
+                INFO_HEAP + PAGE,
+                0xF000, // up to the next mapping
+                state::FREE as u64,
+                0,
+            ],
+            "an unmapped range reports the whole free region"
+        );
+    }
+
+    /// The exception frame is 0x78 bytes on A64 and 0x44 on A32, at the
+    /// documented offsets (`ExceptionFrameA64`/`ExceptionFrameA32`).
+    extern "C" fn exception_frames(c: &mut Cpu) {
+        let set = |c: &mut Cpu| {
+            c.x[0] = 0x10;
+            c.x[7] = 0x77;
+            c.x[8] = 0x88;
+            c.x[30] = 0x2222;
+            c.sp = 0x3333;
+            c.nzcv = 0x6000_0000;
+        };
+        let u32_at = |b: &[u8], at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+        let u64_at = |b: &[u8], at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap());
+        let mut out = Vec::new();
+
+        set(c);
+        let frame = encode_exception_frame(kirikae_loader::Arch::A64, c, 0x4444);
+        out.push(frame.len() as u64);
+        out.extend([
+            u64_at(&frame, 0),
+            u64_at(&frame, 0x40),
+            u64_at(&frame, 0x48),
+            u64_at(&frame, 0x50),
+            u64_at(&frame, 0x58),
+            u64_at(&frame, 0x60),
+        ]);
+        c.x = [0; 31];
+        decode_exception_frame(kirikae_loader::Arch::A64, c, &frame);
+        out.extend([c.x[8], c.sp, c.x[30], c.pc, c.nzcv]);
+
+        set(c);
+        let frame = encode_exception_frame(kirikae_loader::Arch::A32, c, 0x4444);
+        out.push(frame.len() as u64);
+        out.extend([
+            u32_at(&frame, 0) as u64,
+            u32_at(&frame, 0x1c) as u64,
+            u32_at(&frame, 0x20) as u64,
+            u32_at(&frame, 0x24) as u64,
+            u32_at(&frame, 0x28) as u64,
+            u32_at(&frame, 0x2c) as u64,
+            u32_at(&frame, 0x30) as u64,
+            u32_at(&frame, 0x40) as u64,
+        ]);
+        c.x = [0; 31];
+        decode_exception_frame(kirikae_loader::Arch::A32, c, &frame);
+        out.extend([c.x[0], c.x[7], c.sp, c.x[30], c.pc, c.nzcv]);
+        record("frames", &out);
+        c.halt();
+    }
+
+    #[test]
+    fn exception_frames_follow_the_process_architecture() {
+        run_guest(exception_frames);
+        let got = observed("frames");
+        assert_eq!(
+            &got[..7],
+            &[0x78, 0x10, 0x88, 0x2222, 0x3333, 0x4444, 0x6000_0000],
+            "ExceptionFrameA64: 0x78 bytes, GPRs, lr, sp, pc, pstate"
+        );
+        assert_eq!(
+            &got[7..12],
+            &[0x88, 0x3333, 0x2222, 0x4444, 0x6000_0000],
+            "the A64 frame restores x8, sp, lr, pc and pstate"
+        );
+        assert_eq!(
+            &got[12..21],
+            &[
+                0x44,
+                0x10,
+                0x77,
+                0x3333,
+                0x2222,
+                0x4444,
+                1,
+                0x6000_0000,
+                0x4444
+            ],
+            "ExceptionFrameA32: 0x44 bytes, r0, r7, sp, lr, pc, tpidr_el0 = 1, cpsr, far"
+        );
+        assert_eq!(
+            &got[21..],
+            &[0x10, 0x77, 0x3333, 0x2222, 0x4444, 0x6000_0000],
+            "the A32 frame restores r0, r7, sp, lr, pc and cpsr"
+        );
+    }
+
+    const REPLY_LIST: u64 = 0x0F70_1000;
+
+    /// A guest server whose reply carries a Send buffer: the HIPC page says
+    /// `svcReplyAndReceive` refuses it with 0xe801.
+    extern "C" fn reply_with_send_buffer(c: &mut Cpu) {
+        let p = c.process();
+        let link = GuestSession::new();
+        link.send(vec![0u8; 0x10]).expect("the request queues");
+        assert_eq!(
+            link.take_request().map(|r| r.len()),
+            Some(0x10),
+            "the pair is in service"
+        );
+        let handle = p
+            .handles
+            .lock()
+            .unwrap()
+            .insert(KObject::Session(Session::guest_server(link)));
+        p.memory
+            .map_as(REPLY_LIST, PAGE, state::HEAP, perm::RW)
+            .expect("the handle list maps");
+        p.memory.write(REPLY_LIST, &handle.to_le_bytes());
+        let h0 = crate::ipc::TYPE_REQUEST as u32 | 1 << 20;
+        let mut reply = h0.to_le_bytes().to_vec();
+        reply.extend_from_slice(&0u32.to_le_bytes());
+        p.memory.write(c.tpidrro_el0, &reply);
+        c.x[1] = REPLY_LIST;
+        c.x[2] = 1;
+        c.x[3] = handle as u64;
+        c.x[4] = 0;
+        dispatch(c, 0x43);
+        record("bad_reply", &[c.x[0]]);
+        c.halt();
+    }
+
+    #[test]
+    fn a_reply_cannot_carry_transfer_buffers() {
+        run_guest(reply_with_send_buffer);
+        assert_eq!(
+            observed("bad_reply"),
+            vec![RESULT_INVALID_COMBINATION],
+            "svcReplyAndReceive refuses Send/Receive/Exchange descriptors"
+        );
+    }
+
+    const WAIT_LIST: u64 = 0x0F71_1000;
+
+    extern "C" fn wait_counts(c: &mut Cpu) {
+        c.process()
+            .memory
+            .map_as(WAIT_LIST, PAGE, state::HEAP, perm::RW)
+            .expect("the handle list maps");
+        let mut out = Vec::new();
+        for count in [65i64, 0x41, -1] {
+            c.x[1] = WAIT_LIST;
+            c.x[2] = count as u64;
+            c.x[3] = 0;
+            dispatch(c, 0x18);
+            out.push(c.x[0]);
+        }
+        record("wait_counts", &out);
+        c.halt();
+    }
+
+    #[test]
+    fn wait_synchronization_refuses_more_than_0x40_handles() {
+        run_guest(wait_counts);
+        assert_eq!(
+            observed("wait_counts"),
+            vec![RESULT_TOO_MANY_HANDLES; 3],
+            "the SVC page caps HandlesNum at 0x40 (0xee01 OutOfRange)"
         );
     }
 
@@ -4131,7 +5175,7 @@ mod tests {
         let frame = c
             .process()
             .memory
-            .read(frame_at, EXCEPTION_FRAME_SIZE)
+            .read(frame_at, EXCEPTION_FRAME_SIZE_A64)
             .unwrap_or_default();
         record("frame", &words(&frame));
         let mut patched = frame;
@@ -5460,7 +6504,14 @@ mod tests {
         );
         assert_eq!(
             &got[17..22],
-            &[RESULT_SUCCESS, 0, 0x3_0000_0000, PAGE, 0x04]
+            &[
+                RESULT_SUCCESS,
+                0,
+                0x3_0000_0000,
+                PAGE,
+                state::CODE_MUTABLE as u64
+            ],
+            "svcQueryProcessMemory reports the page tag"
         );
         assert_eq!(got[22], RESULT_INVALID_HANDLE);
         assert_eq!(
@@ -5859,6 +6910,798 @@ mod tests {
             observed("terminate_self"),
             vec![1, 1],
             "svcTerminateProcess on the current process exits and halts it"
+        );
+    }
+
+    const IO_VA: u64 = 0x3_0000_0000;
+    const DEV_VA: u64 = 0x0040_0000;
+    const DEV_VA_B: u64 = 0x0040_1000;
+    const DEV_VA_C: u64 = 0x0040_2000;
+
+    /// Gives the guest a 2 MiB heap so the device tests have real guest pages.
+    fn map_io_heap(c: &mut Cpu) -> u64 {
+        c.x[1] = 0x20_0000;
+        dispatch(c, 0x01);
+        c.x[1]
+    }
+
+    extern "C" fn io_pool_lifecycle(c: &mut Cpu) {
+        let p = c.process();
+        let mut out = Vec::new();
+        c.x[1] = 1;
+        dispatch(c, 0x39);
+        out.push(c.x[0]);
+        c.x[1] = 0;
+        dispatch(c, 0x39);
+        let pool = c.x[1] as u32;
+        out.push(c.x[0]);
+        out.push(pool as u64);
+        c.x[1] = 0;
+        dispatch(c, 0x39);
+        out.push(c.x[0]);
+        record("io_pool", &out);
+
+        let mut errors = Vec::new();
+        for (handle, physical, size, mapping, permission) in [
+            (0xdead_u32, IO_POOL_BASE, PAGE, io_mapping::MEMORY, perm::RW),
+            (pool, IO_POOL_BASE, PAGE, 3, perm::RW),
+            (
+                pool,
+                IO_POOL_BASE - PAGE,
+                PAGE,
+                io_mapping::MEMORY,
+                perm::RW,
+            ),
+            (pool, IO_POOL_BASE, PAGE + 1, io_mapping::MEMORY, perm::RW),
+            (pool, IO_POOL_BASE + 1, PAGE, io_mapping::MEMORY, perm::RW),
+            (
+                pool,
+                IO_POOL_END - PAGE,
+                PAGE * 2,
+                io_mapping::MEMORY,
+                perm::RW,
+            ),
+            (pool, IO_POOL_BASE, PAGE, io_mapping::IO_REGISTER, perm::RW),
+            (pool, IO_POOL_BASE, PAGE, io_mapping::MEMORY, perm::RX),
+        ] {
+            c.x[1] = handle as u64;
+            c.x[2] = physical;
+            c.x[3] = size;
+            c.x[4] = mapping as u64;
+            c.x[5] = permission as u64;
+            dispatch(c, 0x3a);
+            errors.push(c.x[0]);
+        }
+        record("io_region_errors", &errors);
+
+        let mut regions = Vec::new();
+        for (physical, size) in [(IO_POOL_BASE, PAGE), (IO_POOL_BASE + PAGE, PAGE * 2)] {
+            c.x[1] = pool as u64;
+            c.x[2] = physical;
+            c.x[3] = size;
+            c.x[4] = io_mapping::MEMORY as u64;
+            c.x[5] = perm::RW as u64;
+            dispatch(c, 0x3a);
+            regions.push((c.x[0], c.x[1] as u32));
+        }
+        // A range that crosses both live claims is refused.
+        c.x[1] = pool as u64;
+        c.x[2] = IO_POOL_BASE;
+        c.x[3] = PAGE * 3;
+        c.x[4] = io_mapping::MEMORY as u64;
+        c.x[5] = perm::RW as u64;
+        dispatch(c, 0x3a);
+        let overlap = c.x[0];
+        let claimed = p
+            .handles
+            .lock()
+            .unwrap()
+            .io_pool(pool)
+            .expect("the pool handle is live")
+            .claimed();
+        record("io_claims", &[claimed]);
+        // Closing a region releases its claim.
+        c.x[0] = regions[0].1 as u64;
+        dispatch(c, 0x16);
+        let claimed = p
+            .handles
+            .lock()
+            .unwrap()
+            .io_pool(pool)
+            .expect("the pool handle is live")
+            .claimed();
+        record("io_claims_closed", &[claimed]);
+        // Closing the pool handle while a region lives keeps the aperture busy:
+        // a second pool would be backed twice, so it is refused.
+        c.x[0] = pool as u64;
+        dispatch(c, 0x16);
+        c.x[1] = 0;
+        dispatch(c, 0x39);
+        let busy = c.x[0];
+        c.x[0] = regions[1].1 as u64;
+        dispatch(c, 0x16);
+        c.x[1] = 0;
+        dispatch(c, 0x39);
+        record("io_recreate", &[overlap, busy, c.x[0], c.x[1]]);
+        c.halt();
+    }
+
+    #[test]
+    fn io_pools_claim_regions_and_are_destroyed_by_closing_the_handles() {
+        run_guest(io_pool_lifecycle);
+        let pool = observed("io_pool");
+        assert_eq!(pool[0], RESULT_INVALID_ENUM, "only IoPoolType_PcieA2");
+        assert_eq!(pool[1], RESULT_SUCCESS);
+        assert_ne!(pool[2], 0, "the pool handle is returned in X1");
+        assert_eq!(
+            pool[3], RESULT_INVALID_STATE,
+            "one aperture per process until its regions are gone"
+        );
+        assert_eq!(
+            observed("io_region_errors"),
+            vec![
+                RESULT_INVALID_HANDLE,
+                RESULT_INVALID_ENUM,
+                RESULT_INVALID_MEMORY_REGION,
+                RESULT_INVALID_SIZE,
+                RESULT_INVALID_ADDRESS,
+                RESULT_INVALID_MEMORY_REGION,
+                RESULT_INVALID_MEMORY_REGION,
+                RESULT_INVALID_NEW_MEMORY_PERMISSION,
+            ]
+        );
+        assert_eq!(observed("io_claims"), vec![PAGE * 3]);
+        assert_eq!(observed("io_claims_closed"), vec![PAGE * 2]);
+        let recreate = observed("io_recreate");
+        assert_eq!(
+            recreate[0], RESULT_INVALID_MEMORY_STATE,
+            "overlapping claim"
+        );
+        assert_eq!(
+            recreate[1], RESULT_INVALID_STATE,
+            "the aperture is still held"
+        );
+        assert_eq!(recreate[2], RESULT_SUCCESS, "the region released it");
+        assert_ne!(recreate[3], 0);
+    }
+
+    extern "C" fn io_region_memory(c: &mut Cpu) {
+        let p = c.process();
+        c.x[1] = 0;
+        dispatch(c, 0x39);
+        let pool = c.x[1] as u32;
+        c.x[1] = pool as u64;
+        c.x[2] = IO_POOL_BASE;
+        c.x[3] = PAGE * 2;
+        c.x[4] = io_mapping::MEMORY as u64;
+        c.x[5] = perm::RW as u64;
+        dispatch(c, 0x3a);
+        let region = c.x[1] as u32;
+        record("io_region_create", &[c.x[0], region as u64]);
+
+        let mut errors = Vec::new();
+        for (addr, size, permission) in [
+            (IO_VA, PAGE, perm::RW),
+            (IO_VA + 1, PAGE * 2, perm::RW),
+            (IO_VA, PAGE * 2, perm::R),
+        ] {
+            c.x[0] = region as u64;
+            c.x[1] = addr;
+            c.x[2] = size;
+            c.x[3] = permission as u64;
+            dispatch(c, 0x46);
+            errors.push(c.x[0]);
+        }
+        record("io_map_errors", &errors);
+
+        c.x[0] = region as u64;
+        c.x[1] = IO_VA;
+        c.x[2] = PAGE * 2;
+        c.x[3] = perm::RW as u64;
+        dispatch(c, 0x46);
+        let mapped = c.x[0];
+        let state_at = p.memory.query(IO_VA);
+        let zeros = p.memory.read(IO_VA, 4).unwrap_or_default();
+        assert!(p.memory.write(IO_VA, b"pool"));
+        assert!(p.memory.write(IO_VA + 4, b"page"));
+        let object = p
+            .handles
+            .lock()
+            .unwrap()
+            .io_region(region)
+            .expect("the region handle is live");
+        let device_read = object.read(&p.memory, 0, 8).unwrap_or_default();
+        let wrote = object.write(&p.memory, 4, b"DEV!");
+        let guest_sees = p.memory.read(IO_VA + 4, 4).unwrap_or_default();
+        record(
+            "io_region_device",
+            &[
+                mapped,
+                state_at.state as u64,
+                state_at.perm as u64,
+                eight(&zeros),
+                eight(&device_read),
+                wrote as u64,
+                eight(&guest_sees),
+            ],
+        );
+
+        c.x[0] = region as u64;
+        c.x[1] = IO_VA;
+        c.x[2] = PAGE * 2;
+        c.x[3] = perm::RW as u64;
+        dispatch(c, 0x46);
+        let twice = c.x[0];
+        c.x[0] = region as u64;
+        c.x[1] = IO_VA;
+        c.x[2] = PAGE;
+        dispatch(c, 0x47);
+        let bad_size = c.x[0];
+        c.x[0] = region as u64;
+        c.x[1] = IO_VA + PAGE;
+        c.x[2] = PAGE * 2;
+        dispatch(c, 0x47);
+        let bad_address = c.x[0];
+        c.x[0] = region as u64;
+        c.x[1] = IO_VA;
+        c.x[2] = PAGE * 2;
+        dispatch(c, 0x47);
+        let unmapped = c.x[0];
+        let gone = p.memory.is_mapped(IO_VA, 1);
+        record(
+            "io_region_unmap",
+            &[twice, bad_size, bad_address, unmapped, gone as u64],
+        );
+
+        // The contents survive to the next mapping.
+        c.x[0] = region as u64;
+        c.x[1] = IO_VA + 0x4000;
+        c.x[2] = PAGE * 2;
+        c.x[3] = perm::RW as u64;
+        dispatch(c, 0x46);
+        let remapped = c.x[0];
+        let kept = p.memory.read(IO_VA + 0x4000, 8).unwrap_or_default();
+        // Closing the handle while mapped releases the guest pages.
+        c.x[0] = region as u64;
+        dispatch(c, 0x16);
+        let released = !p.memory.is_mapped(IO_VA + 0x4000, 1);
+        record(
+            "io_region_persist",
+            &[remapped, eight(&kept), released as u64],
+        );
+        c.halt();
+    }
+
+    #[test]
+    fn an_io_region_maps_real_memory_and_survives_unmapping() {
+        run_guest(io_region_memory);
+        assert_eq!(
+            observed("io_region_create")[0],
+            RESULT_SUCCESS,
+            "a memory region inside the pool is backed"
+        );
+        assert_eq!(
+            observed("io_map_errors"),
+            vec![
+                RESULT_INVALID_SIZE,
+                RESULT_INVALID_ADDRESS,
+                RESULT_INVALID_NEW_MEMORY_PERMISSION,
+            ]
+        );
+        assert_eq!(
+            observed("io_region_device"),
+            vec![
+                RESULT_SUCCESS,
+                1, // MemType_Io
+                perm::RW as u64,
+                0, // zero-filled on the first mapping
+                eight(b"poolpage"),
+                1, // the device wrote through the guest mapping
+                eight(b"DEV!"),
+            ]
+        );
+        assert_eq!(
+            observed("io_region_unmap"),
+            vec![
+                RESULT_INVALID_MEMORY_STATE, // a second mapping
+                RESULT_INVALID_SIZE,
+                RESULT_INVALID_MEMORY_STATE, // the mapping is not at that address
+                RESULT_SUCCESS,
+                0, // the guest pages are free again
+            ]
+        );
+        assert_eq!(
+            observed("io_region_persist"),
+            vec![RESULT_SUCCESS, eight(b"poolDEV!"), 1]
+        );
+    }
+
+    extern "C" fn device_address_space(c: &mut Cpu) {
+        let p = c.process();
+        let heap = map_io_heap(c);
+        assert!(p.memory.write(heap, b"device page"));
+        assert!(p.memory.write(heap + PAGE, b"copy me"));
+
+        let mut create_errors = Vec::new();
+        for (base, size) in [
+            (1u64, PAGE),
+            (0, 0),
+            (0, PAGE + 1),
+            (0, DEVICE_SPACE_LIMIT + PAGE),
+        ] {
+            c.x[1] = base;
+            c.x[2] = size;
+            dispatch(c, 0x56);
+            create_errors.push(c.x[0]);
+        }
+        record("das_create_errors", &create_errors);
+        c.x[1] = 0;
+        c.x[2] = DEVICE_SPACE_LIMIT;
+        dispatch(c, 0x56);
+        let das = c.x[1] as u32;
+        record("das_create", &[c.x[0], das as u64]);
+
+        let mut attach = Vec::new();
+        c.x[0] = 8;
+        c.x[1] = das as u64;
+        dispatch(c, 0x57);
+        attach.push(c.x[0]);
+        c.x[0] = 8;
+        c.x[1] = das as u64;
+        dispatch(c, 0x57);
+        attach.push(c.x[0]);
+        c.x[0] = 0x26;
+        c.x[1] = das as u64;
+        dispatch(c, 0x57);
+        attach.push(c.x[0]);
+        c.x[0] = 29;
+        c.x[1] = das as u64;
+        dispatch(c, 0x58);
+        attach.push(c.x[0]);
+        c.x[0] = 8;
+        c.x[1] = 0xdead;
+        dispatch(c, 0x58);
+        attach.push(c.x[0]);
+        c.x[0] = 8;
+        c.x[1] = das as u64;
+        dispatch(c, 0x58);
+        attach.push(c.x[0]);
+        c.x[0] = 8;
+        c.x[1] = das as u64;
+        dispatch(c, 0x58);
+        attach.push(c.x[0]);
+        record("das_attach", &attach);
+
+        let mut errors = Vec::new();
+        for (imm, handle, process, guest, size, device, option) in [
+            // The option word's high bits ask for an IO mapping indicator.
+            (
+                0x59u16,
+                das as u64,
+                CURRENT_PROCESS,
+                heap,
+                PAGE,
+                DEV_VA,
+                (perm::RW as u64) | 0x1_0000,
+            ),
+            (
+                0x59,
+                das as u64,
+                0xdead,
+                heap,
+                PAGE,
+                DEV_VA,
+                perm::RW as u64,
+            ),
+            (
+                0x59,
+                das as u64,
+                CURRENT_PROCESS,
+                heap + 1,
+                PAGE,
+                DEV_VA,
+                perm::RW as u64,
+            ),
+            (
+                0x59,
+                das as u64,
+                CURRENT_PROCESS,
+                heap,
+                PAGE,
+                DEV_VA + 1,
+                perm::RW as u64,
+            ),
+            (
+                0x59,
+                das as u64,
+                CURRENT_PROCESS,
+                heap,
+                0,
+                DEV_VA,
+                perm::RW as u64,
+            ),
+            (
+                0x59,
+                das as u64,
+                CURRENT_PROCESS,
+                IO_VA,
+                PAGE,
+                DEV_VA,
+                perm::RW as u64,
+            ),
+            (
+                0x59,
+                das as u64,
+                CURRENT_PROCESS,
+                heap,
+                PAGE,
+                DEV_VA,
+                perm::RX as u64,
+            ),
+            // The aligned variant wants matching 4 MiB frames; the heap and
+            // 0x2000 do not share one.
+            (
+                0x5a,
+                das as u64,
+                CURRENT_PROCESS,
+                heap,
+                PAGE,
+                DEV_VA_C,
+                perm::RW as u64,
+            ),
+        ] {
+            c.x[0] = handle;
+            c.x[1] = process;
+            c.x[2] = guest;
+            c.x[3] = size;
+            c.x[4] = device;
+            c.x[5] = option;
+            dispatch(c, imm);
+            errors.push(c.x[0]);
+        }
+        // 0x5B reads its arguments from a different register layout.
+        c.x[0] = 0;
+        c.x[1] = 0xdead;
+        c.x[2] = CURRENT_PROCESS;
+        c.x[3] = heap;
+        c.x[4] = PAGE;
+        c.x[5] = DEV_VA;
+        c.x[6] = perm::RW as u64;
+        dispatch(c, 0x5b);
+        errors.push(c.x[0]);
+        record("das_map_errors", &errors);
+
+        // By force: no alignment requirement.
+        c.x[0] = das as u64;
+        c.x[1] = CURRENT_PROCESS;
+        c.x[2] = heap;
+        c.x[3] = PAGE;
+        c.x[4] = DEV_VA;
+        c.x[5] = perm::RW as u64;
+        dispatch(c, 0x59);
+        let forced = c.x[0];
+        // Aligned: both frames are 0x1000.
+        c.x[0] = das as u64;
+        c.x[1] = CURRENT_PROCESS;
+        c.x[2] = heap + PAGE;
+        c.x[3] = PAGE;
+        c.x[4] = DEV_VA_B;
+        c.x[5] = perm::R as u64;
+        dispatch(c, 0x5a);
+        let aligned = c.x[0];
+        // 0x5B maps too and reports the size.
+        c.x[1] = das as u64;
+        c.x[2] = CURRENT_PROCESS;
+        c.x[3] = heap + PAGE * 2;
+        c.x[4] = PAGE;
+        c.x[5] = DEV_VA_C;
+        c.x[6] = perm::RW as u64;
+        dispatch(c, 0x5b);
+        let sized = (c.x[0], c.x[1]);
+        record("das_map", &[forced, aligned, sized.0, sized.1]);
+
+        let object = p
+            .handles
+            .lock()
+            .unwrap()
+            .device_address_space(das)
+            .expect("the device address space handle is live");
+        let read = object.read(&p.memory, DEV_VA, 11).unwrap_or_default();
+        let readonly_write = object.write(&p.memory, DEV_VA_B, b"x");
+        let copied = object.copy(&p.memory, DEV_VA_C, DEV_VA_B, PAGE);
+        let dst = p.memory.read(heap + PAGE * 2, 7).unwrap_or_default();
+        let mapped_bytes = object.mapped_bytes();
+        record(
+            "das_device",
+            &[
+                eight(&read),
+                readonly_write as u64,
+                copied as u64,
+                eight(&dst),
+                mapped_bytes,
+            ],
+        );
+
+        let mut unmap = Vec::new();
+        c.x[0] = das as u64;
+        c.x[1] = CURRENT_PROCESS;
+        c.x[2] = heap + PAGE;
+        c.x[3] = PAGE;
+        c.x[4] = DEV_VA_B;
+        dispatch(c, 0x5c);
+        unmap.push(c.x[0]);
+        unmap.push(
+            p.handles
+                .lock()
+                .unwrap()
+                .device_address_space(das)
+                .expect("live")
+                .mapped_bytes(),
+        );
+        c.x[0] = das as u64;
+        c.x[1] = CURRENT_PROCESS;
+        c.x[2] = heap + PAGE;
+        c.x[3] = PAGE;
+        c.x[4] = DEV_VA_B;
+        dispatch(c, 0x5c);
+        unmap.push(c.x[0]);
+        c.x[0] = das as u64;
+        c.x[1] = 0xdead;
+        dispatch(c, 0x5c);
+        unmap.push(c.x[0]);
+        record("das_unmap", &unmap);
+        c.halt();
+    }
+
+    #[test]
+    fn a_device_address_space_aliases_guest_pages_for_a_synthetic_device() {
+        run_guest(device_address_space);
+        assert_eq!(
+            observed("das_create_errors"),
+            vec![
+                RESULT_INVALID_ADDRESS,
+                RESULT_INVALID_SIZE,
+                RESULT_INVALID_SIZE,
+                RESULT_INVALID_MEMORY_REGION,
+            ]
+        );
+        let create = observed("das_create");
+        assert_eq!(create[0], RESULT_SUCCESS);
+        assert_ne!(create[1], 0);
+        assert_eq!(
+            observed("das_attach"),
+            vec![
+                RESULT_SUCCESS,
+                RESULT_INVALID_STATE,
+                RESULT_INVALID_ENUM,
+                RESULT_INVALID_STATE,
+                RESULT_INVALID_HANDLE,
+                RESULT_SUCCESS,
+                RESULT_INVALID_STATE,
+            ]
+        );
+        assert_eq!(
+            observed("das_map_errors"),
+            vec![
+                RESULT_INVALID_ENUM,
+                RESULT_INVALID_HANDLE,
+                RESULT_INVALID_ADDRESS,
+                RESULT_INVALID_ADDRESS,
+                RESULT_INVALID_SIZE,
+                RESULT_INVALID_MEMORY_REGION,
+                RESULT_INVALID_NEW_MEMORY_PERMISSION,
+                RESULT_INVALID_ADDRESS,
+                RESULT_INVALID_HANDLE,
+            ]
+        );
+        assert_eq!(
+            observed("das_map"),
+            vec![RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, PAGE],
+            "0x5B reports the mapped size in X1"
+        );
+        assert_eq!(
+            observed("das_device"),
+            vec![
+                eight(b"device page"),
+                0, // the read-only mapping refuses a device write
+                1, // the synthetic device copied through the device window
+                eight(b"copy me"),
+                PAGE * 3,
+            ]
+        );
+        assert_eq!(
+            observed("das_unmap"),
+            vec![
+                RESULT_SUCCESS,
+                PAGE * 2,
+                RESULT_INVALID_MEMORY_STATE,
+                RESULT_INVALID_HANDLE
+            ]
+        );
+    }
+
+    extern "C" fn query_memory_mapping(c: &mut Cpu) {
+        let p = c.process();
+        let heap = map_io_heap(c);
+        c.x[1] = 0;
+        dispatch(c, 0x39);
+        let pool = c.x[1] as u32;
+        c.x[1] = pool as u64;
+        c.x[2] = IO_POOL_BASE;
+        c.x[3] = PAGE;
+        c.x[4] = io_mapping::MEMORY as u64;
+        c.x[5] = perm::RW as u64;
+        dispatch(c, 0x3a);
+        let region = c.x[1] as u32;
+        let out_addr = heap + 0x1000;
+        let out_size = heap + 0x2000;
+        let word = |p: &Process, at: u64| {
+            p.memory
+                .read(at, 8)
+                .map(|b| u64::from_le_bytes(b.try_into().unwrap_or([0; 8])))
+                .unwrap_or(0)
+        };
+        let mut out = Vec::new();
+        // Guest RAM: physical == virtual in this runtime.
+        c.x[1] = out_addr;
+        c.x[2] = out_size;
+        c.x[3] = heap + PAGE;
+        c.x[4] = PAGE;
+        dispatch(c, 0x55);
+        out.push(c.x[0]);
+        out.push(word(p, out_addr));
+        out.push(word(p, out_size));
+        // The aperture is not backed before a region is mapped there.
+        c.x[1] = out_addr;
+        c.x[2] = out_size;
+        c.x[3] = IO_POOL_BASE;
+        c.x[4] = PAGE;
+        dispatch(c, 0x55);
+        out.push(c.x[0]);
+        // Map the region: the pool range now resolves to its guest view.
+        c.x[0] = region as u64;
+        c.x[1] = IO_VA;
+        c.x[2] = PAGE;
+        c.x[3] = perm::RW as u64;
+        dispatch(c, 0x46);
+        c.x[1] = out_addr;
+        c.x[2] = out_size;
+        c.x[3] = IO_POOL_BASE;
+        c.x[4] = PAGE;
+        dispatch(c, 0x55);
+        out.push(c.x[0]);
+        out.push(word(p, out_addr));
+        // Validation and not-found paths.
+        for (physical, size) in [
+            (heap, 0),
+            (heap + 1, PAGE),
+            (u64::MAX - PAGE, PAGE * 2),
+            (0x3_4000_0000, PAGE),
+        ] {
+            c.x[1] = out_addr;
+            c.x[2] = out_size;
+            c.x[3] = physical;
+            c.x[4] = size;
+            dispatch(c, 0x55);
+            out.push(c.x[0]);
+        }
+        // Output pointers the guest cannot write.
+        c.x[1] = 0x3_4000_0000;
+        c.x[2] = out_size;
+        c.x[3] = heap;
+        c.x[4] = PAGE;
+        dispatch(c, 0x55);
+        out.push(c.x[0]);
+        c.x[1] = 0;
+        dispatch(c, 0x55);
+        out.push(c.x[0]);
+        record("query_mapping", &out);
+        c.halt();
+    }
+
+    #[test]
+    fn query_memory_mapping_reports_the_guest_view_of_a_physical_range() {
+        run_guest(query_memory_mapping);
+        let heap = HEAP_BASE;
+        assert_eq!(
+            observed("query_mapping"),
+            vec![
+                RESULT_SUCCESS,
+                heap,
+                PAGE,
+                RESULT_NOT_FOUND,
+                RESULT_SUCCESS,
+                IO_VA,
+                RESULT_INVALID_SIZE,
+                RESULT_NOT_FOUND, // unaligned physical address
+                RESULT_NOT_FOUND, // overflow
+                RESULT_NOT_FOUND, // unmapped RAM
+                RESULT_INVALID_POINTER,
+                RESULT_INVALID_POINTER,
+            ]
+        );
+    }
+
+    extern "C" fn unsafe_physical(c: &mut Cpu) {
+        let p = c.process();
+        let at = ALIAS_BASE + 0x1000_0000;
+        let mut out = Vec::new();
+        // The allowance starts at zero, as on hardware.
+        c.x[0] = at;
+        c.x[1] = PAGE * 2;
+        dispatch(c, 0x48);
+        out.push(c.x[0]);
+        out.push(p.memory.is_mapped(at, PAGE) as u64);
+        c.x[0] = PAGE * 2;
+        dispatch(c, 0x4a);
+        out.push(c.x[0]);
+        c.x[0] = at;
+        c.x[1] = PAGE * 2;
+        dispatch(c, 0x48);
+        out.push(c.x[0]);
+        out.push(p.memory.query(at).state as u64);
+        // One page more than the allowance.
+        c.x[0] = at + PAGE * 2;
+        c.x[1] = PAGE;
+        dispatch(c, 0x48);
+        out.push(c.x[0]);
+        // The documented validation.
+        c.x[0] = at;
+        c.x[1] = PAGE + 1;
+        dispatch(c, 0x48);
+        out.push(c.x[0]);
+        c.x[0] = at + 1;
+        c.x[1] = PAGE;
+        dispatch(c, 0x48);
+        out.push(c.x[0]);
+        c.x[0] = 0x1000;
+        c.x[1] = PAGE;
+        dispatch(c, 0x48);
+        out.push(c.x[0]);
+        // Unmap, remap a page, and refuse to unmap a page that is not heap.
+        c.x[0] = at;
+        c.x[1] = PAGE * 2;
+        dispatch(c, 0x49);
+        out.push(c.x[0]);
+        out.push(p.memory.query(at).state as u64);
+        c.x[0] = at;
+        c.x[1] = PAGE;
+        dispatch(c, 0x48);
+        out.push(c.x[0]);
+        // A page mapped with another state is not the unsafe family's to unmap.
+        assert!(
+            p.memory
+                .map_as(at + PAGE, PAGE, state::NORMAL, perm::RW)
+                .is_ok()
+        );
+        c.x[0] = at + PAGE;
+        c.x[1] = PAGE;
+        dispatch(c, 0x49);
+        out.push(c.x[0]);
+        record("unsafe", &out);
+        c.halt();
+    }
+
+    #[test]
+    fn unsafe_physical_memory_needs_the_limit_and_only_backs_guest_ram() {
+        run_guest(unsafe_physical);
+        assert_eq!(
+            observed("unsafe"),
+            vec![
+                RESULT_LIMIT_REACHED,
+                0,              // nothing was mapped
+                RESULT_SUCCESS, // svcSetUnsafeLimit
+                RESULT_SUCCESS,
+                state::HEAP as u64,
+                RESULT_LIMIT_REACHED,
+                RESULT_INVALID_SIZE,
+                RESULT_INVALID_ADDRESS,
+                RESULT_INVALID_MEMORY_REGION, // outside the alias region
+                RESULT_SUCCESS,
+                state::FREE as u64,
+                RESULT_SUCCESS,
+                RESULT_INVALID_MEMORY_STATE, // that page is not heap
+            ]
         );
     }
 }

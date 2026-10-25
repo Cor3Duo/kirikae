@@ -21,6 +21,28 @@
 //! returned sample count per channel, exactly like the hardware service. When
 //! the layout is unusable or a stream fails, the decoder reports the error and
 //! returns no samples instead of emitting wrong audio.
+//!
+//! # Work buffer
+//!
+//! `hwopus` work-buffer queries report the size of the libopus decoder state:
+//! `opus_decoder_get_size` for mono/stereo and
+//! `opus_multistream_decoder_get_size` for the multistream layout. That is the
+//! real state size of the decoder this service creates, it grows with the
+//! channel/stream count as the hardware's does, and the guest page-aligns it
+//! before creating the transfer memory. When the requested layout is unusable
+//! (or the build has no Opus backend) the query falls back to a documented
+//! 0x8000 rather than returning a size that cannot fit a stereo decoder.
+//!
+//! # Invalid packets
+//!
+//! A packet whose framing is broken or that libopus rejects is reported as a
+//! successful decode with zero samples: `DecodedDataSize` is the number of
+//! packet bytes that were consumed (the 8-byte header plus the declared
+//! payload, or all available bytes when the header is truncated) and
+//! `DecodedSampleCount` is 0. No PCM is written. The SDK uses the sample count
+//! to know how much audio it got, so a zero-sample reply is a valid empty
+//! frame and keeps the guest's ring accounting consistent; returning an
+//! invented error code would be less faithful than the hardware's own result.
 
 use std::sync::Mutex;
 
@@ -97,6 +119,75 @@ pub(crate) struct OpusDecoder {
 
 fn valid_rate(rate: u32) -> bool {
     matches!(rate, 8000 | 12_000 | 16_000 | 24_000 | 48_000)
+}
+
+/// Size reported when no usable libopus state can be sized for the request.
+/// It is the value the service used before the exact queries existed and is
+/// larger than a stereo `OpusDecoder`.
+pub(crate) const FALLBACK_WORK_BUFFER_SIZE: u32 = 0x8000;
+
+/// `GetWorkBufferSize`: bytes of libopus decoder state for a mono/stereo
+/// decoder. More than two channels clamps to the stereo state because the
+/// plain decoder cannot be opened for more; the multistream query covers the
+/// surround layouts. An unusable rate yields the documented fallback.
+pub(crate) fn work_buffer_size(sample_rate: u32, channels: u32) -> u32 {
+    if !valid_rate(sample_rate) {
+        return FALLBACK_WORK_BUFFER_SIZE;
+    }
+    #[cfg(feature = "opus")]
+    {
+        // SAFETY: `opus_decoder_get_size` is a pure size query; it takes no
+        // pointers and only returns the struct size (or a negative error).
+        let size = unsafe { opusic_sys::opus_decoder_get_size(channels.clamp(1, 2) as i32) };
+        if size > 0 {
+            return size as u32;
+        }
+    }
+    let _ = channels;
+    FALLBACK_WORK_BUFFER_SIZE
+}
+
+/// `GetWorkBufferSizeForMultiStream`: bytes of libopus multistream decoder
+/// state for the same layout [`OpusDecoder::new_multistream`] would create.
+/// An unusable layout yields the documented fallback.
+pub(crate) fn work_buffer_size_multistream(
+    sample_rate: u32,
+    channels: u32,
+    streams: u32,
+    coupled: u32,
+    mapping: &[u8],
+) -> u32 {
+    if !valid_rate(sample_rate) || !multistream_layout_valid(channels, streams, coupled, mapping) {
+        return FALLBACK_WORK_BUFFER_SIZE;
+    }
+    #[cfg(feature = "opus")]
+    {
+        // SAFETY: `opus_multistream_decoder_get_size` is a pure size query; it
+        // takes two integers and returns the struct size (or a negative error).
+        let size = unsafe {
+            opusic_sys::opus_multistream_decoder_get_size(streams as i32, coupled as i32)
+        };
+        if size > 0 {
+            return size as u32;
+        }
+    }
+    FALLBACK_WORK_BUFFER_SIZE
+}
+
+fn multistream_layout_valid(channels: u32, streams: u32, coupled: u32, mapping: &[u8]) -> bool {
+    let channels = channels as usize;
+    let streams = streams as usize;
+    let coupled = coupled as usize;
+    channels > 0
+        && channels <= 255
+        && streams > 0
+        && streams <= 255
+        && coupled <= streams
+        && streams + coupled <= 255
+        && mapping.len() >= channels
+        && mapping[..channels]
+            .iter()
+            .all(|&m| m == 255 || usize::from(m) < streams + coupled)
 }
 
 impl OpusDecoder {
@@ -186,23 +277,10 @@ impl OpusDecoder {
         let channels = channels as usize;
         let streams = streams as usize;
         let coupled = coupled as usize;
-        if channels == 0
-            || channels > 255
-            || streams == 0
-            || streams > 255
-            || coupled > streams
-            || streams + coupled > 255
-            || mapping.len() < channels
-        {
+        if !multistream_layout_valid(channels as u32, streams as u32, coupled as u32, mapping) {
             return failure(DecodeError::InvalidLayout);
         }
         let mapping = &mapping[..channels];
-        if mapping
-            .iter()
-            .any(|&m| m != 255 && usize::from(m) >= streams + coupled)
-        {
-            return failure(DecodeError::InvalidLayout);
-        }
         #[cfg(feature = "opus")]
         {
             let streams = streams as u8;
@@ -380,6 +458,42 @@ mod tests {
         assert_eq!(decoder.failure(), Some(DecodeError::InvalidLayout));
         let decoder = OpusDecoder::new_multistream(44_100, 6, 4, 2, &[0, 4, 1, 2, 3, 5]);
         assert_eq!(decoder.failure(), Some(DecodeError::UnsupportedRate));
+    }
+
+    #[cfg(feature = "opus")]
+    #[test]
+    fn the_work_buffer_is_the_libopus_state_size() {
+        let mono = work_buffer_size(48_000, 1);
+        let stereo = work_buffer_size(48_000, 2);
+        assert!(mono >= 4096, "mono state is {mono} bytes");
+        assert!(stereo >= 4096, "stereo state is {stereo} bytes");
+        assert!(mono < 1 << 20 && stereo < 1 << 20);
+        // More than two plain channels is still sized as stereo; the plain
+        // decoder cannot open them, but the guest must get a usable size.
+        assert_eq!(work_buffer_size(48_000, 6), stereo);
+        // An unusable rate reports the documented fallback.
+        assert_eq!(work_buffer_size(44_100, 2), FALLBACK_WORK_BUFFER_SIZE);
+        assert_eq!(work_buffer_size(48_000, 0), work_buffer_size(48_000, 1));
+
+        let mapping = [0u8, 4, 1, 2, 3, 5];
+        let surround = work_buffer_size_multistream(48_000, 6, 4, 2, &mapping);
+        assert!(
+            surround > stereo,
+            "6-channel multistream state {surround} must exceed stereo {stereo}"
+        );
+        assert!(surround < 4 << 20);
+        assert_eq!(
+            work_buffer_size_multistream(48_000, 6, 0, 0, &mapping),
+            FALLBACK_WORK_BUFFER_SIZE
+        );
+        assert_eq!(
+            work_buffer_size_multistream(48_000, 6, 4, 2, &[0, 1]),
+            FALLBACK_WORK_BUFFER_SIZE
+        );
+        assert_eq!(
+            work_buffer_size_multistream(44_100, 6, 4, 2, &mapping),
+            FALLBACK_WORK_BUFFER_SIZE
+        );
     }
 
     #[cfg(feature = "opus")]

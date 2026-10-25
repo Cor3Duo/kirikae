@@ -276,7 +276,7 @@ fn entry_density() {
 fn print_sources(stats: &DiscoveryStats, entries: usize) {
     let pct = |n: u64| 100.0 * n as f64 / entries.max(1) as f64;
     println!(
-        "entry sources: {} seeds ({:.1}%) · {} `bl` targets ({:.1}%) · {} `adr`/`adrp` references ({:.1}%) · {} promoted ({:.1}%, {} from a jump table)",
+        "entry sources: {} seeds ({:.1}%) · {} `bl` targets ({:.1}%) · {} `adr`/`adrp` references ({:.1}%) · {} promoted ({:.1}%, {} from a jump table) · {} data pointers",
         stats.seeds,
         pct(stats.seeds),
         stats.calls,
@@ -286,6 +286,7 @@ fn print_sources(stats: &DiscoveryStats, entries: usize) {
         stats.promoted,
         pct(stats.promoted),
         stats.promoted_cases,
+        stats.data_pointers,
     );
     println!(
         "indirect control flow reached: {} `blr` · {} `br`, {} with a resolved jump table ({} with no bound check, {} unresolved)",

@@ -192,11 +192,16 @@ impl Renderer {
         }
         self.lap(10, &mut lap);
         for &t in &s.shader.textures {
-            let (view, sampler) = match self.texture(
-                gpu, mem, regs, cbufs, t.slot, t.handle, t.dim, t.array, t.shadow,
-            ) {
+            let (view, sampler) = match self.texture(gpu, mem, regs, cbufs, &t) {
                 Ok(v) => v,
                 Err(why) => {
+                    // With the halves in separate words the draw names the
+                    // sampler itself; sampling with the default one reads the
+                    // image the shader asked for through a sampler it did not,
+                    // so the draw is skipped and the reason reported instead.
+                    if t.sampler.is_some() {
+                        return Err(format!("texture: {why}"));
+                    }
                     self.note_placeholder(&why);
                     let view_type = match (t.dim, t.array) {
                         (TexDim::Cube, false) => vk::ImageViewType::CUBE,

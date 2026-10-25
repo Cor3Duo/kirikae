@@ -17,6 +17,7 @@ use super::ir::{
     Target,
 };
 use super::opcode::Opcode;
+use super::{neon, vfp};
 use crate::bits::sext;
 
 /// Why a word is not a decoded instruction.
@@ -55,6 +56,64 @@ impl std::fmt::Display for DecodeError {
 
 impl std::error::Error for DecodeError {}
 
+/// Names the family a rejected word belongs to, in the terms the report needs: the
+/// class that is missing, not just "unsupported".
+pub fn describe_unsupported(word: u32) -> &'static str {
+    if word >> 28 == 0b1111 {
+        return match (word >> 25) & 0b111 {
+            // The two-register group holds the table lookups, `vswp`, `vdup` from a lane
+            // and the shift-by-immediate forms, none of which are modelled.
+            0b001 if word & 0x0fb0_0000 == 0x03b0_0000 => {
+                "an Advanced SIMD two-register encoding this slice does not model (the table lookups, `vswp`, `vdup` from a lane or a shift by immediate)"
+            }
+            0b001 => "an Advanced SIMD data-processing encoding this slice does not model",
+            0b010 if word & 0x0100_0000 == 0 => {
+                if word & 0x0080_0000 != 0 {
+                    "the single-lane Advanced SIMD transfers (`vld1.single` and friends) are outside the A32 slice"
+                } else {
+                    "an Advanced SIMD structure transfer this slice does not model"
+                }
+            }
+            0b010 => {
+                "the unconditional space (`cps`, `setend`, `pli` or a reserved hint) is outside the A32 slice"
+            }
+            _ => {
+                "the unconditional space (barriers, hints, PLD or Advanced SIMD) is outside the A32 slice"
+            }
+        };
+    }
+    match (word >> 25) & 0b111 {
+        0b110 | 0b111 => {
+            let cp = (word >> 8) & 0xf;
+            let data_processing = (word >> 24) & 0xf == 0xe;
+            let single = cp == 0b1010;
+            if cp == 0b1111 {
+                "a `cp15` transfer other than the thread pointers, the counters and `fpscr` is outside the A32 slice"
+            } else if cp != 0b1010 && cp != 0b1011 {
+                "coprocessor access other than VFP/NEON (MCR/MRC/CDP) is outside the A32 slice"
+            } else if data_processing && word & 0x10 == 0 && (word >> 16) & 0xf == 0xe {
+                "vcvt between floating point and fixed point is outside the A32 slice"
+            } else if data_processing && word & 0x10 != 0 && (word >> 21) & 0b111 == 0b000 && single
+            {
+                "the two-single vmov forms (`vmov Sd, Sd+1, Rt, Rt2`) are outside the A32 slice"
+            } else if !data_processing && (word >> 24) & 1 == 0 && word & 0x0010_0000 == 0 {
+                "this 64-bit VFP transfer is outside the A32 slice"
+            } else {
+                "this VFP encoding is outside the A32 slice"
+            }
+        }
+        // The divide, the parallel groups, the extends and the dual multiplies are all
+        // decoded; what is left of the media class is `umaal` and the reserved groups.
+        0b011 => "a media instruction outside the modelled families is outside the A32 slice",
+        0b100 => "ldm/stm with the S bit (user bank or exception return) is outside the A32 slice",
+        0b010 => "the unprivileged ldr/str forms (ldrt/strt) are outside the A32 slice",
+        0b001 => "the msr immediate or hint form is outside the A32 slice",
+        _ => {
+            "the miscellaneous space (umaal, the unprivileged forms or a reserved encoding) is outside the A32 slice"
+        }
+    }
+}
+
 /// Decodes one A32 instruction. `pc` is the address of `word` and is used to resolve
 /// direct branch targets.
 pub fn decode(pc: u32, word: u32) -> Result<Insn, DecodeError> {
@@ -88,8 +147,9 @@ pub fn decode(pc: u32, word: u32) -> Result<Insn, DecodeError> {
         0b011 => media(pc, word, cond),
         0b100 => block_transfer(pc, word, cond),
         0b101 => branch(pc, word, cond),
-        // 0b110 coprocessor load/store, 0b111 coprocessor data operations.
-        _ => Err(DecodeError::Unsupported),
+        // 0b110 coprocessor load/store and 0b111 coprocessor data operations, which
+        // for coprocessors 10 and 11 are VFP.
+        _ => vfp::decode(pc, word, cond),
     }
 }
 
@@ -107,6 +167,28 @@ fn insn(
         cond,
         opcode,
         sets_flags,
+        shape: None,
+        operands,
+    }
+}
+
+/// Builds an instruction of the VFP or Advanced SIMD classes: they never set the ARM
+/// flags implicitly and carry the element shape when they have one.
+pub(super) fn vinsn(
+    pc: u32,
+    word: u32,
+    cond: Cond,
+    opcode: Opcode,
+    shape: Option<super::ir::VecShape>,
+    operands: Vec<Operand>,
+) -> Insn {
+    Insn {
+        pc,
+        word,
+        cond,
+        opcode,
+        sets_flags: false,
+        shape,
         operands,
     }
 }
@@ -161,28 +243,98 @@ fn require_not_pc(reg: Reg) -> Result<Reg, DecodeError> {
 }
 
 fn unconditional(pc: u32, word: u32) -> Result<Insn, DecodeError> {
-    if (word >> 25) & 0b111 != 0b101 {
-        // `cps`, `setend`, `pld`/`pli`, Advanced SIMD, barriers and hints, coprocessor.
-        return Err(DecodeError::Unsupported);
+    match (word >> 25) & 0b111 {
+        // `blx` immediate: Align(PC, 4) + SignExtend(imm24) << 2 + H * 2. H contributes
+        // bit 1 of the target, so the branch lands on a halfword boundary inside Thumb
+        // code; the address keeps bit 0 clear and the state is implied.
+        0b101 => {
+            let half = (word >> 24) & 1;
+            let addr = (pc.wrapping_add(8) & !3)
+                .wrapping_add(branch_offset(word & 0x00ff_ffff))
+                .wrapping_add(half * 2);
+            Ok(insn(
+                pc,
+                word,
+                Cond::Al,
+                Opcode::Blx,
+                false,
+                vec![Operand::Target(Target {
+                    addr,
+                    state: ExecState::Thumb,
+                })],
+            ))
+        }
+        // The Advanced SIMD data-processing space (`0xF2`/`0xF3`, where bit 24 is the
+        // `i` bit) and, with bit 24 clear, the element and structure load/store space
+        // (`0xF4`).
+        0b001 => neon::decode(pc, word),
+        0b010 if word & 0x0100_0000 == 0 => neon::decode(pc, word),
+        // `0xF5`: `pld`, the barriers and the hints.
+        0b010 => hint_space(pc, word),
+        // `cps`, `setend`, `pli` and the coprocessor.
+        _ => Err(DecodeError::Unsupported),
     }
-    // `blx` immediate: Align(PC, 4) + SignExtend(imm24) << 2 + H * 2. H contributes
-    // bit 1 of the target, so the branch lands on a halfword boundary inside Thumb
-    // code; the address keeps bit 0 clear and the state is implied.
-    let half = (word >> 24) & 1;
-    let addr = (pc.wrapping_add(8) & !3)
-        .wrapping_add(branch_offset(word & 0x00ff_ffff))
-        .wrapping_add(half * 2);
-    Ok(insn(
-        pc,
-        word,
-        Cond::Al,
-        Opcode::Blx,
-        false,
-        vec![Operand::Target(Target {
-            addr,
-            state: ExecState::Thumb,
-        })],
-    ))
+}
+
+/// `1111 0101`: `pld` and the barrier and hint block.
+///
+/// The barriers promise an ordering this interpreter does not reorder, and the hints
+/// have no architectural effect at all, so both decode to their mnemonic and execute as
+/// no-ops. Decoding them keeps the report exact about what the guest ran.
+fn hint_space(pc: u32, word: u32) -> Result<Insn, DecodeError> {
+    // `1111 0101 0111 1111 1111 0000 01xx xxxx`: bits 7:4 select the barrier or the
+    // hint, and the low nibble is the barrier option or the hint number.
+    if word & 0x0fff_ff00 == 0x057f_f000 {
+        let low = word & 0xf;
+        let opcode = match (word >> 4) & 0xf {
+            0b0011 => match low {
+                0 => Opcode::Nop,
+                1 => Opcode::Yield,
+                2 => Opcode::Wfe,
+                3 => Opcode::Wfi,
+                4 => Opcode::Sev,
+                5 => Opcode::Sevl,
+                _ => return Err(DecodeError::Unallocated),
+            },
+            0b0100 => Opcode::Dsb,
+            0b0101 => Opcode::Dmb,
+            0b0110 => Opcode::Isb,
+            // The `clrex` option field is SBZ.
+            0b0111 if low == 0 => Opcode::Clrex,
+            _ => return Err(DecodeError::Unallocated),
+        };
+        return Ok(insn(
+            pc,
+            word,
+            Cond::Al,
+            opcode,
+            false,
+            vec![Operand::Imm(low)],
+        ));
+    }
+    // `1111 0101 U101 Rn 1111 imm12`: `pld`, a prefetch hint. It has no architectural
+    // effect and never faults, so the address is decoded for the report and the
+    // interpreter ignores it.
+    let op1 = (word >> 20) & 0x1f;
+    if op1 & 0b10111 == 0b10101 && (word >> 12) & 0xf == 0xf {
+        let mem = Mem {
+            base: reg((word >> 16) & 0xf),
+            offset: Offset::Imm((word & 0xfff) as u16),
+            add: (word >> 23) & 1 != 0,
+            pre_indexed: true,
+            writeback: false,
+            size: MemSize::Word,
+        };
+        return Ok(insn(
+            pc,
+            word,
+            Cond::Al,
+            Opcode::Pld,
+            false,
+            vec![Operand::Mem(mem)],
+        ));
+    }
+    Err(DecodeError::Unsupported)
 }
 
 /// Data-processing instructions with an immediate operand, including `movw`/`movt`,
@@ -643,10 +795,16 @@ fn long_multiply(pc: u32, word: u32, cond: Cond) -> Result<Insn, DecodeError> {
 
 /// `ldrex`, `strex` and their byte and halfword forms. The base carries no offset: the
 /// encoding's bit 11:8 and 3:0 fields are fixed.
+/// The exclusive accesses and the ARMv8 acquire/release forms, which share this space:
+/// bits 9:8 select the family (`11` `ldrex`/`strex`, `10` `ldaex`/`stlex`, `00` the
+/// plain `lda`/`ldab`/`ldah`). The ordering those promise is not modelled, because the
+/// interpreter does not reorder the guest's own accesses.
 fn exclusive(pc: u32, word: u32, cond: Cond) -> Result<Insn, DecodeError> {
-    if (word >> 8) & 0xf != 0xf {
-        return Err(DecodeError::Unpredictable);
-    }
+    let exclusive = match (word >> 8) & 0xf {
+        0b1111 | 0b1110 => true,
+        0b1100 => false,
+        _ => return Err(DecodeError::Unpredictable),
+    };
     let load = (word >> 20) & 1 != 0;
     let byte = (word >> 22) & 1 != 0;
     let half = (word >> 21) & 1 != 0;
@@ -657,6 +815,54 @@ fn exclusive(pc: u32, word: u32, cond: Cond) -> Result<Insn, DecodeError> {
         (true, true) => MemSize::Halfword,
         (false, true) => return Err(DecodeError::Unallocated),
     };
+    let mem = Mem {
+        base,
+        offset: Offset::Imm(0),
+        add: true,
+        pre_indexed: true,
+        writeback: false,
+        size,
+    };
+    if !exclusive {
+        // The plain forms name the data register in bits 3:0 and leave bits 15:12 as
+        // an SBZ field for the status register the exclusive form would use.
+        if load {
+            if word & 0xf != 0xf {
+                return Err(DecodeError::Unpredictable);
+            }
+            let rt = require_not_pc(reg((word >> 12) & 0xf))?;
+            let opcode = match size {
+                MemSize::Word => Opcode::Lda,
+                MemSize::Byte => Opcode::Ldab,
+                _ => Opcode::Ldah,
+            };
+            return Ok(insn(
+                pc,
+                word,
+                cond,
+                opcode,
+                false,
+                vec![Operand::Reg(rt), Operand::Mem(mem)],
+            ));
+        }
+        if (word >> 12) & 0xf != 0xf {
+            return Err(DecodeError::Unpredictable);
+        }
+        let rt = require_not_pc(reg(word & 0xf))?;
+        let opcode = match size {
+            MemSize::Word => Opcode::Stl,
+            MemSize::Byte => Opcode::Stlb,
+            _ => Opcode::Stlh,
+        };
+        return Ok(insn(
+            pc,
+            word,
+            cond,
+            opcode,
+            false,
+            vec![Operand::Reg(rt), Operand::Mem(mem)],
+        ));
+    }
     let (status, rt) = if load {
         if word & 0xf != 0xf {
             return Err(DecodeError::Unpredictable);
@@ -669,14 +875,6 @@ fn exclusive(pc: u32, word: u32, cond: Cond) -> Result<Insn, DecodeError> {
             return Err(DecodeError::Unpredictable);
         }
         (Some(status), rt)
-    };
-    let mem = Mem {
-        base,
-        offset: Offset::Imm(0),
-        add: true,
-        pre_indexed: true,
-        writeback: false,
-        size,
     };
     let opcode = match (load, size) {
         (true, MemSize::Word) => Opcode::Ldrex,
@@ -804,6 +1002,19 @@ fn media(pc: u32, word: u32, cond: Cond) -> Result<Insn, DecodeError> {
     }
     let group = (word >> 20) & 0x1f;
 
+    // The integer divide instructions share the media class: `op1` is `10011` for
+    // `udiv` and `10001` for `sdiv`, bits 15:12 are SBO and bits 7:4 are `0001`.
+    if matches!(group, 0b10001 | 0b10011) {
+        return divide(pc, word, cond, group == 0b10011);
+    }
+
+    // The dual multiplies and their multiply-accumulate forms: `0111 0000` for the
+    // 32-bit ones, `0111 0100` for the 64-bit accumulators and `0111 0101` for the
+    // top-word multiplies.
+    if matches!(group, 0b10000 | 0b10100 | 0b10101) {
+        return media_multiply(pc, word, cond, group);
+    }
+
     if let Some(opcode) = Opcode::parallel(group, nibble) {
         // Bits 11:8 are SBO in every parallel form.
         if (word >> 8) & 0xf != 0xf {
@@ -837,6 +1048,163 @@ fn media(pc: u32, word: u32, cond: Cond) -> Result<Insn, DecodeError> {
         0b01110 | 0b01111 => saturate_or_extend(pc, word, cond, ExtendFamily::Unsigned),
         0b11010..=0b11111 => bitfield(pc, word, cond),
         _ => Err(DecodeError::Unsupported),
+    }
+}
+
+/// `udiv`/`sdiv`: `cond 0111 00x1 Rd 1111 Rm 0001 Rn`. The 32-bit divide is a standard
+/// instruction of the architecture from ARMv7-A with the Divide extension on, which the
+/// Switch core has; it reads `Rn` as the dividend and `Rm` as the divisor and leaves the
+/// flags and Q untouched.
+fn divide(pc: u32, word: u32, cond: Cond, unsigned: bool) -> Result<Insn, DecodeError> {
+    if (word >> 12) & 0xf != 0xf || (word >> 4) & 0xf != 0b0001 {
+        return Err(DecodeError::Unpredictable);
+    }
+    let rd = require_not_pc(reg((word >> 16) & 0xf))?;
+    let rn = require_not_pc(reg(word & 0xf))?;
+    let rm = require_not_pc(reg((word >> 8) & 0xf))?;
+    Ok(insn(
+        pc,
+        word,
+        cond,
+        if unsigned { Opcode::Udiv } else { Opcode::Sdiv },
+        false,
+        vec![Operand::Reg(rd), Operand::Reg(rn), Operand::Reg(rm)],
+    ))
+}
+
+/// The media dual multiplies: `smuad`, `smlad`, `smlald`, `smmul` and their exchange,
+/// rounding and subtract forms.
+///
+/// `0111 0000` holds the 32-bit dual forms (with `Ra = 1111` selecting the plain
+/// multiplies), `0111 0100` the 64-bit accumulating pair and `0111 0101` the top-word
+/// multiplies. In all three, bits 7:6 pick the operation and bit 5 the exchange or
+/// rounding modifier.
+fn media_multiply(pc: u32, word: u32, cond: Cond, group: u32) -> Result<Insn, DecodeError> {
+    let form = (word >> 6) & 3;
+    let modifier = (word >> 5) & 1 != 0;
+    let rd = reg((word >> 16) & 0xf);
+    let ra = reg((word >> 12) & 0xf);
+    let rm = require_not_pc(reg((word >> 8) & 0xf))?;
+    let rn = require_not_pc(reg(word & 0xf))?;
+    match (group, form) {
+        // The plain multiplies name no accumulator.
+        (0b10000, 0 | 1) if ra == Reg::PC => {
+            let opcode = match (form, modifier) {
+                (0, false) => Opcode::Smuad,
+                (0, true) => Opcode::Smuadx,
+                (_, false) => Opcode::Smusd,
+                (_, true) => Opcode::Smusdx,
+            };
+            Ok(insn(
+                pc,
+                word,
+                cond,
+                opcode,
+                false,
+                vec![
+                    Operand::Reg(require_not_pc(rd)?),
+                    Operand::Reg(rn),
+                    Operand::Reg(rm),
+                ],
+            ))
+        }
+        (0b10000, 0 | 1) => {
+            let opcode = match (form, modifier) {
+                (0, false) => Opcode::Smlad,
+                (0, true) => Opcode::Smladx,
+                (_, false) => Opcode::Smlsd,
+                (_, true) => Opcode::Smlsdx,
+            };
+            Ok(insn(
+                pc,
+                word,
+                cond,
+                opcode,
+                false,
+                vec![
+                    Operand::Reg(require_not_pc(rd)?),
+                    Operand::Reg(rn),
+                    Operand::Reg(rm),
+                    Operand::Reg(ra),
+                ],
+            ))
+        }
+        // The 64-bit accumulators name `RdLo` in bits 19:16 and `RdHi` in 15:12.
+        (0b10100, 0 | 1) => {
+            if rd == Reg::PC || ra == Reg::PC || rd == ra {
+                return Err(DecodeError::Unpredictable);
+            }
+            let opcode = match (form, modifier) {
+                (0, false) => Opcode::Smlald,
+                (0, true) => Opcode::Smlaldx,
+                (_, false) => Opcode::Smlsld,
+                (_, true) => Opcode::Smlsldx,
+            };
+            Ok(insn(
+                pc,
+                word,
+                cond,
+                opcode,
+                false,
+                vec![
+                    Operand::Regs { lo: rd, hi: ra },
+                    Operand::Reg(rn),
+                    Operand::Reg(rm),
+                ],
+            ))
+        }
+        // `smmul` leaves the accumulator field as SBZ; `smmla` and `smmls` use it.
+        (0b10101, 0) if ra == Reg::PC => Ok(insn(
+            pc,
+            word,
+            cond,
+            if modifier {
+                Opcode::Smmulr
+            } else {
+                Opcode::Smmul
+            },
+            false,
+            vec![
+                Operand::Reg(require_not_pc(rd)?),
+                Operand::Reg(rn),
+                Operand::Reg(rm),
+            ],
+        )),
+        (0b10101, 0) => Ok(insn(
+            pc,
+            word,
+            cond,
+            if modifier {
+                Opcode::Smmlar
+            } else {
+                Opcode::Smmla
+            },
+            false,
+            vec![
+                Operand::Reg(require_not_pc(rd)?),
+                Operand::Reg(rn),
+                Operand::Reg(rm),
+                Operand::Reg(ra),
+            ],
+        )),
+        (0b10101, 3) if ra != Reg::PC => Ok(insn(
+            pc,
+            word,
+            cond,
+            if modifier {
+                Opcode::Smmlsr
+            } else {
+                Opcode::Smmls
+            },
+            false,
+            vec![
+                Operand::Reg(require_not_pc(rd)?),
+                Operand::Reg(rn),
+                Operand::Reg(rm),
+                Operand::Reg(ra),
+            ],
+        )),
+        _ => Err(DecodeError::Unallocated),
     }
 }
 
