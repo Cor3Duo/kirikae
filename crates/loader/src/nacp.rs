@@ -1,16 +1,6 @@
-//! `control.nacp` — the `nn::ns::ApplicationControlProperty` stored in the
-//! Control content (NCA content type 2).
-//!
-//! Offsets and language order follow Switchbrew's NACP page. The file is a
-//! fixed 0x4000-byte struct; only the fields the runtime can answer from a
-//! decrypted dump are decoded, and the raw bytes are kept so a service can hand
-//! the whole struct to the guest unchanged. Nothing here decrypts, verifies a
-//! signature or touches a key.
-
 use crate::Error;
 
 pub const NACP_SIZE: usize = 0x4000;
-/// Number of `ApplicationTitle` language entries in the 0x3000-byte table.
 pub const LANGUAGE_COUNT: usize = 16;
 const LANGUAGE_ENTRY_SIZE: usize = 0x300;
 const NAME_SIZE: usize = 0x200;
@@ -25,9 +15,6 @@ const USER_ACCOUNT_SAVE_DATA_JOURNAL_SIZE: usize = 0x3088;
 const DEVICE_SAVE_DATA_SIZE: usize = 0x3090;
 const DEVICE_SAVE_DATA_JOURNAL_SIZE: usize = 0x3098;
 
-/// The decoded fields of `control.nacp`. `raw` is the complete 0x4000-byte
-/// struct, which is what `GetApplicationControlData` and the two
-/// `GetApplicationControlProperty` commands return.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Nacp {
     pub raw: Vec<u8>,
@@ -38,8 +25,6 @@ pub struct Nacp {
     pub user_account_save_data_journal_size: u64,
     pub device_save_data_size: u64,
     pub device_save_data_journal_size: u64,
-    /// Bit per language entry that has at least one non-empty string, which is
-    /// what `GetApplicationDesiredLanguage` takes as its input.
     pub supported_language_flag: u32,
 }
 
@@ -88,8 +73,6 @@ impl Nacp {
         c_string(&self.raw[ISBN..ISBN + 0x25])
     }
 
-    /// The application name in language entry `language`, or `""` when the
-    /// entry is out of range or empty.
     pub fn name(&self, language: usize) -> String {
         let Some(at) = language_entry(language) else {
             return String::new();
@@ -97,7 +80,6 @@ impl Nacp {
         c_string(&self.raw[at..at + NAME_SIZE])
     }
 
-    /// The publisher in language entry `language`.
     pub fn publisher(&self, language: usize) -> String {
         let Some(at) = language_entry(language) else {
             return String::new();
@@ -105,8 +87,6 @@ impl Nacp {
         c_string(&self.raw[at + NAME_SIZE..at + NAME_SIZE + PUBLISHER_SIZE])
     }
 
-    /// The raw language entry (name and publisher) the guest expects in a
-    /// `NacpLanguageEntry`.
     pub fn language_entry(&self, language: usize) -> &[u8] {
         match language_entry(language) {
             Some(at) => &self.raw[at..at + LANGUAGE_ENTRY_SIZE],

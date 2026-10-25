@@ -1,26 +1,14 @@
-//! The `PackagedContentMeta` file (`.cnmt`) stored in a Meta NCA (content type
-//! 1), and the helpers to read it out of the NCA's PFS0.
-//!
-//! Layout from Switchbrew's CNMT page: a 0x20-byte
-//! `PackagedContentMetaHeader`, the type-specific extended header and
-//! `ContentCount` 0x38-byte `PackagedContentInfo` entries. The title version
-//! and type are what a loader needs to pick a base program or an update; the
-//! content ids map a meta to the NCA file names. Metadata only: nothing here
-//! decrypts or hashes a section.
-
 use crate::Error;
 
 pub const HEADER_SIZE: usize = 0x20;
 pub const CONTENT_INFO_SIZE: usize = 0x38;
 
-/// `NcmContentMetaType`.
 pub const META_APPLICATION: u8 = 1;
 pub const META_PATCH: u8 = 2;
 pub const META_ADD_ON_CONTENT: u8 = 3;
 pub const META_DELTA: u8 = 4;
 pub const META_DATA_PATCH: u8 = 5;
 
-/// `NcmContentType`.
 pub const CONTENT_PROGRAM: u8 = 0;
 pub const CONTENT_META: u8 = 1;
 pub const CONTENT_CONTROL: u8 = 2;
@@ -36,13 +24,9 @@ pub struct ContentInfo {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cnmt {
-    /// `PackagedContentMetaHeader::Id`: the meta's own title id (the
-    /// application id for an Application meta, the patch id for a Patch meta).
     pub id: u64,
     pub version: u32,
     pub meta_type: u8,
-    /// `ApplicationMetaExtendedHeader::PatchId` or
-    /// `PatchMetaExtendedHeader::ApplicationId`, when the type has one.
     pub application_id: Option<u64>,
     pub required_system_version: Option<u32>,
     pub contents: Vec<ContentInfo>,
@@ -72,17 +56,14 @@ impl Cnmt {
         let meta_type = bytes[0xc];
         let extended = u16_at(bytes, 0xe) as usize;
         let content_count = u16_at(bytes, 0x10) as usize;
-        // Only Application and Patch metas carry the fields the loader uses.
         let (application_id, required_system_version) = match meta_type {
             META_APPLICATION => {
-                // PatchId and RequiredSystemVersion.
                 let ext = bytes
                     .get(HEADER_SIZE..HEADER_SIZE + extended.max(0xc))
                     .ok_or(Error::Malformed("CNMT application header is truncated"))?;
                 (Some(u64_at(ext, 0)), Some(u32_at(ext, 8)))
             }
             META_PATCH => {
-                // ApplicationId and RequiredSystemVersion.
                 let ext = bytes
                     .get(HEADER_SIZE..HEADER_SIZE + extended.max(0xc))
                     .ok_or(Error::Malformed("CNMT patch header is truncated"))?;
@@ -107,8 +88,6 @@ impl Cnmt {
         for entry in entries.as_chunks::<CONTENT_INFO_SIZE>().0 {
             let mut content_id = [0u8; 16];
             content_id.copy_from_slice(&entry[0x20..0x30]);
-            // ContentType is at 0x36 in both the pre-15.0.0 (six-byte size)
-            // and the 15.0.0+ (five-byte size + attributes) entry layouts.
             contents.push(ContentInfo {
                 id: content_id,
                 content_type: entry[0x36],
@@ -124,7 +103,6 @@ impl Cnmt {
         })
     }
 
-    /// The content entry of `content_type`, if the meta lists one.
     pub fn content(&self, content_type: u8) -> Option<&ContentInfo> {
         self.contents
             .iter()
@@ -132,7 +110,6 @@ impl Cnmt {
     }
 }
 
-/// The 16-byte content id as the lower-case hex used in an NCA file name.
 pub fn content_id_hex(id: &[u8; 16]) -> String {
     use std::fmt::Write;
     let mut out = String::with_capacity(32);

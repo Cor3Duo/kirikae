@@ -8,17 +8,9 @@ use crate::{Error, Image, LOAD_BASE, align_up, cnmt, nacp, nca, nro, nso, pfs0};
 pub struct Module {
     pub name: String,
     pub image: Image,
-    /// The `ModuleId` from the NSO header: the build id the SDK reports to
-    /// `nn::ro`. Homebrew modules and synthetic test images may leave it zero.
     pub module_id: [u8; 32],
 }
 
-/// Instruction set of the program's code modules.
-///
-/// A Switch program is entirely A32 or entirely A64; `META.Flags0` bit 0
-/// (`Is64BitInstruction`) plus a code sample of `main` decide it in
-/// [`from_exefs`]. The interpreter needs the tag so it can decode the words it
-/// fetches; the recompiler and its backends still only accept A64.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Arch {
     #[default]
@@ -48,15 +40,10 @@ pub struct Executable {
     pub main_stack_size: Option<u64>,
     pub system_resource_size: u64,
     pub romfs: Option<RomFs>,
-    /// `control.nacp` from the Control content, when the dump carries one.
     pub nacp: Option<nacp::Nacp>,
-    /// `PackagedContentMetaHeader::Version` of the content meta that supplied
-    /// the program, or 0 when the dump has no CNMT.
     pub title_version: u32,
 }
 
-/// The extra ExeFS entries `read_source` carries for the runtime. They are
-/// metadata, not modules: `from_exefs` consumes them and never maps them.
 pub const NACP_FILE: &str = "control.nacp";
 pub const CNMT_FILE: &str = "content.cnmt";
 
@@ -146,14 +133,10 @@ pub fn from_exefs(
     })
 }
 
-/// META.Flags0 bit 0 is `Is64BitInstruction`: MK8D 1.0 and NSMBUDX have 0x04 (32-bit),
-/// while AArch64 titles have 0x07. The ACID flags do not indicate the architecture.
 fn npdm_is_aarch32(npdm: &[u8]) -> bool {
     npdm_u32(npdm, 0x0c).is_some_and(|flags| flags != 0 && flags & 1 == 0)
 }
 
-/// Fallback for a missing or zero META.Flags0: sample the code. AArch32
-/// modules are full of `bx lr` / `push {r11, lr}` and have no AArch64 frame prologues.
 fn looks_aarch32(image: &Image) -> bool {
     let start = (image.text.start - image.base) as usize;
     let end = (image.text.end - image.base) as usize;
@@ -167,7 +150,7 @@ fn looks_aarch32(image: &Image) -> bool {
 }
 
 fn npdm_title(npdm: &[u8]) -> Option<u64> {
-    let at = npdm_u32(npdm, 0x70)? as usize; // aci0_offset
+    let at = npdm_u32(npdm, 0x70)? as usize;
     let aci = npdm.get(at..at + 0x18)?;
     (&aci[..4] == b"ACI0")
         .then(|| u64::from_le_bytes(aci[0x10..0x18].try_into().unwrap()))
@@ -231,10 +214,6 @@ pub fn exefs_from_nsp(path: &Path) -> Result<(Files, u64, Option<RomFs>), Error>
             return Err(Error::Encrypted);
         }
     }
-    // The content metas say which program NCA belongs to which title version
-    // and where the Control content is. Highest version first; at the same
-    // version the Application meta (type 1) wins over a Patch (type 2), because
-    // an update's RomFS is BKTR and cannot be read yet.
     let mut metas = Vec::new();
     for entry in entries.iter().filter(|e| e.name.ends_with(".cnmt.nca")) {
         let Ok(nca) = nca::parse(&mut r, entry.offset) else {
@@ -271,8 +250,6 @@ pub fn exefs_from_nsp(path: &Path) -> Result<(Files, u64, Option<RomFs>), Error>
             return Ok(with_metadata(files, title, romfs, Some(bytes), nacp));
         }
     }
-    // A package without a usable CNMT (or with only an encrypted update) keeps
-    // the old content scan.
     for entry in &entries {
         if !entry.name.ends_with(".nca") || entry.name.contains(".cnmt.") {
             continue;
@@ -287,9 +264,6 @@ pub fn exefs_from_nsp(path: &Path) -> Result<(Files, u64, Option<RomFs>), Error>
     Err(Error::Malformed("no program NCA with an ExeFS"))
 }
 
-/// Adds the metadata the runtime answers `ns`/`arp`/`am` from to the ExeFS
-/// file list. `pack`/`unpack` carry them through unchanged and
-/// [`from_exefs`] consumes them.
 fn with_metadata(
     mut files: Files,
     title: u64,
@@ -306,7 +280,6 @@ fn with_metadata(
     (files, title, romfs)
 }
 
-/// The `.cnmt` file inside a Meta NCA's PFS0 section.
 fn meta_file<R: Read + Seek>(r: &mut R, nca: &nca::Nca) -> Option<Vec<u8>> {
     for section in nca.sections.iter().filter(|s| s.fs_type == nca::FS_PFS0) {
         if nca.check_plaintext(section).is_err() {
@@ -320,8 +293,6 @@ fn meta_file<R: Read + Seek>(r: &mut R, nca: &nca::Nca) -> Option<Vec<u8>> {
     None
 }
 
-/// The `control.nacp` of the Control content, from the selected meta when it
-/// lists one, otherwise from the first Control NCA in the package.
 fn control_file<R: Read + Seek>(
     r: &mut R,
     entries: &[pfs0::Entry],
@@ -357,7 +328,6 @@ fn control_file<R: Read + Seek>(
     None
 }
 
-/// The package entry whose name is the content id, `{id}.nca`.
 fn find_content<'a>(entries: &'a [pfs0::Entry], id: &[u8; 16]) -> Option<&'a pfs0::Entry> {
     let hex = cnmt::content_id_hex(id);
     entries
@@ -430,9 +400,6 @@ pub fn read_source(path: &Path) -> Result<Source, Error> {
             .iter()
             .find(|(n, _)| n == "main.npdm")
             .and_then(|(_, b)| npdm_title(b));
-        // An extracted dump may keep the control data next to the ExeFS or in
-        // the dump root. The NSP path puts the same two entries in `files` from
-        // the Control and Meta NCAs.
         for name in [NACP_FILE, CNMT_FILE] {
             let found = [
                 exefs.join(name),
@@ -461,9 +428,6 @@ pub fn read_source(path: &Path) -> Result<Source, Error> {
     Ok(Source::Single(std::fs::read(path)?))
 }
 
-/// Loads a program for recompilation. A32 titles are refused here because the
-/// A64 lifter and both backends cannot see their code; the interpreter path
-/// uses [`open`] and keeps the architecture tag instead.
 pub fn from_source(source: &Source) -> Result<Executable, Error> {
     let exe = from_source_any(source)?;
     if exe.arch.is_32_bit() {
@@ -474,8 +438,6 @@ pub fn from_source(source: &Source) -> Result<Executable, Error> {
     Ok(exe)
 }
 
-/// [`from_source`] without the architecture check: tools and the interpreter
-/// accept A32 programs and read [`Executable::arch`] to decide how to run them.
 pub fn from_source_any(source: &Source) -> Result<Executable, Error> {
     match source {
         Source::ExeFs(files, title, romfs) => from_exefs(files, *title, romfs.clone()),
@@ -621,8 +583,6 @@ mod tests {
         assert!(!npdm_is_aarch32(&npdm_with_flags(u32::MAX)));
     }
 
-    /// A minimal uncompressed NSO whose text is `code` and whose data segment
-    /// holds nothing. Enough for `nso::load` and the architecture tag.
     fn nso_with(code: &[u32]) -> Vec<u8> {
         let text_size = (code.len() * 4) as u32;
         let data_mem = text_size;
@@ -647,8 +607,6 @@ mod tests {
         file
     }
 
-    /// A minimal META header with only `Flags0` set; enough for the
-    /// architecture tag (`npdm_title` returns `None` without an ACI0).
     fn npdm_with_meta_flags(flags: u32) -> Vec<u8> {
         let mut npdm = vec![0u8; 0x80];
         npdm[..4].copy_from_slice(b"META");
@@ -697,7 +655,6 @@ mod tests {
 
     const APP_ID: u64 = 0x0100_0000_0000_0000;
 
-    /// A PFS0 with `files` in order, for the contents of an NCA section.
     fn pfs0(files: &[(&str, &[u8])]) -> Vec<u8> {
         let mut table = Vec::new();
         let mut strings = Vec::new();
@@ -721,8 +678,6 @@ mod tests {
         out
     }
 
-    /// A decrypted NCA ("DNCA") with one plaintext PFS0 section at 0x1000 and
-    /// no hash layers.
     fn nca(content_type: u8, title: u64, contents: &[(&str, &[u8])]) -> Vec<u8> {
         let section = pfs0(contents);
         let start = 0x1000usize;
@@ -735,7 +690,7 @@ mod tests {
         out[0x244..0x248].copy_from_slice(&((end / 0x200) as u32).to_le_bytes());
         let fs = 0x400;
         out[fs + 2] = nca::FS_PFS0;
-        out[fs + 3] = 2; // HierarchicalSha256Hash
+        out[fs + 3] = 2;
         out[fs + 4] = nca::CRYPTO_NONE;
         out[fs + 0x2c..fs + 0x30].copy_from_slice(&1u32.to_le_bytes());
         out[fs + 0x30..fs + 0x38].copy_from_slice(&0u64.to_le_bytes());
@@ -815,8 +770,6 @@ mod tests {
         let update_meta = cnmt(2, 0x2_0000, APP_ID, &update_contents);
         let base_meta_nca = nca(nca::CONTENT_META, APP_ID, &[("base.cnmt", &base_meta)]);
         let update_meta_nca = nca(nca::CONTENT_META, APP_ID, &[("update.cnmt", &update_meta)]);
-        // The update is listed *after* the base NCA: file order alone would
-        // pick the base, the content meta picks version 0x20000.
         let base_name = format!("{base_id:02x}").repeat(16) + ".nca";
         let update_name = format!("{update_id:02x}").repeat(16) + ".nca";
         let control_name = format!("{control_id:02x}").repeat(16) + ".nca";
