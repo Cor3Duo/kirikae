@@ -1,0 +1,16 @@
+{
+  "kirikae": "target/release/kirikae.exe",
+  "games": [
+    {
+      "name": "title-010015100b514000",
+      "source": "path/to/decrypted/dump",
+      "out": "out/title-010015100b514000",
+      "build_args": ["--profile"],
+      "build_timeout": 1800,
+      "scenarios": [
+        {"name": "boot", "seconds": 60},
+        {"name": "menu", "seconds": 120, "input": "2:PLUS,6:Z"}
+      ]
+    }
+  ]
+}
