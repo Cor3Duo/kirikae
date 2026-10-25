@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import batch  # noqa: E402
+import batch
 
 GAME_SCRIPT = r'''
 import json, os, sys, time
@@ -572,7 +572,6 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(rec["interpreted_after"], 2713811)
 
     def test_parse_profile_loop_without_a_first_frame(self) -> None:
-        # The CLI prints `first frame -` when the bound expired before the first present.
         line = (
             "kirikae: profile loop 1/1: compiled 0 addresses, new 16, interpreted 1266403328, "
             "build 48.1s, first frame - (timed out at 120s, 0 frames; run-1/run.log)"

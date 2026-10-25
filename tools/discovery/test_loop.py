@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import loop  # noqa: E402
+import loop
 
 FAKE_GAME = r'''
 import json, os, struct, sys, zlib

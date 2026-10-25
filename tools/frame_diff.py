@@ -175,7 +175,7 @@ def _ppm_pixels(data, name):
             pixels.append((r << 16) | (g << 8) | b)
         return width, height, pixels, 4
     bytes_per = 1 if maxval < 256 else 2
-    pos += 1  # the single whitespace byte after maxval
+    pos += 1
     need = width * height * 3 * bytes_per
     body = data[pos:pos + need]
     if len(body) < need:
@@ -221,8 +221,6 @@ def histogram_from(counter, bins=16):
 
 def analysis(image, threshold=8, bins=16):
     total = image.width * image.height
-    # One C-level pass over the pixels; every other statistic is a walk over the
-    # distinct colours, which is orders of magnitude cheaper than per-pixel Python.
     counter = Counter(image.pixels)
     sums = [0, 0, 0]
     nonblack = 0

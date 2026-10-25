@@ -267,7 +267,7 @@ def main(argv: list[str] | None = None) -> None:
     args = ap.parse_args(argv)
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:  # noqa: BLE001 - old consoles
+    except Exception:
         pass
 
     out = args.out or discovery_root() / args.game

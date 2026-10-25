@@ -205,7 +205,7 @@ def classify_frames(frames_dir: Path, fps: float) -> list[dict]:
         return []
     try:
         module = frame_diff_module()
-    except ImportError as e:  # noqa: BLE001 - evidence missing, not a crash
+    except ImportError as e:
         return [{"error": str(e)}]
     out = []
     for path in sorted(frames_dir.glob("frame*.png")):
@@ -216,7 +216,7 @@ def classify_frames(frames_dir: Path, fps: float) -> list[dict]:
             continue
         try:
             stats = module.analysis(module.load(path))
-        except Exception as e:  # noqa: BLE001 - a bad frame is a result, not a crash
+        except Exception as e:
             out.append({"file": path.name, "error": str(e)})
             continue
         out.append(

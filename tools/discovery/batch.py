@@ -90,8 +90,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SUMMARY_SCHEMA = 1
 CAPTURE_DEFAULT_FRAME = 120
-# `frame_diff.py` calls a frame black below 0.1 % non-black pixels; the status
-# must use the same threshold or the matrix and the tool would disagree.
 CAPTURE_BLACK_BELOW = 0.1
 
 STATS_FRAMES = re.compile(r"\[\s*\d+s\]\s+(\d+)\s+frames\s*\(\s*([\d.]+)\s+fps")
@@ -152,7 +150,6 @@ def load_state(path: Path) -> dict[str, dict]:
                 rec = json.loads(line)
                 prev = state.get(rec["game"])
                 if prev is not None:
-                    # The log is append-only: a boot-only record must not hide the build metrics.
                     for key in ("functions", "instructions", "reachable_total", "build_seconds", "title_id"):
                         if key not in rec and key in prev:
                             rec[key] = prev[key]
@@ -444,7 +441,7 @@ def classify_frame(path: Path) -> dict:
         module = frame_diff_module()
         image = module.load(path)
         stats = module.analysis(image)
-    except Exception as e:  # noqa: BLE001 - a bad frame is a result, not a crash
+    except Exception as e:
         return {"error": str(e)}
     return {
         "file": path.name,
@@ -505,7 +502,6 @@ def boot_game(
     if nvn:
         env["KIRIKAE_NVN"] = nvn
     if capture:
-        # A frame from an earlier run would be classified as this run's result.
         for stale in gdir.glob("frame_*.ppm"):
             try:
                 stale.unlink()
@@ -582,7 +578,6 @@ def boot_game(
             if cap.get("error"):
                 rec["note"] = f"capture unreadable: {cap['error']}"[:200]
             else:
-                # Booting is not seeing: the pixels decide the status.
                 rec["status"] = "black" if cap["black"] else "non-black"
                 was = rec.get("note") or ""
                 seen = "black" if cap["black"] else "visible"
@@ -631,7 +626,6 @@ def one_game(
         timeout = cfg.get("build_timeout", 1200)
         if loop:
             cmd += ["--profile-loop", str(loop["runs"]), "--run-seconds", f"{loop['seconds']:g}"]
-            # One bounded build and one bounded run per iteration, plus slack for the link.
             timeout = cfg.get(
                 "profile_loop_timeout",
                 timeout * loop["runs"] + (loop["seconds"] + 60) * loop["runs"],
@@ -838,7 +832,7 @@ def main(argv: list[str] | None = None) -> None:
     args = ap.parse_args(argv)
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
 
     if args.profile_loop and args.skip_build:
@@ -904,7 +898,7 @@ def main(argv: list[str] | None = None) -> None:
                 args.capture_frame,
                 args.recapture,
             )
-        except Exception as e:  # noqa: BLE001 - one bad game must not stop the batch
+        except Exception as e:
             rec = {
                 "game": game.name,
                 "slug": slugify(game.name),

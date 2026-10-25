@@ -26,7 +26,7 @@ def write_ppm(path, width, height, pixels):
 def write_png(path, width, height, pixels):
     raw = bytearray()
     for y in range(height):
-        raw.append(0)  # filter: none, as the runtime writes it
+        raw.append(0)
         for x in range(width):
             px = pixels[y * width + x]
             raw.extend(((px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF))
@@ -111,10 +111,10 @@ class AnalysisTest(unittest.TestCase):
         image = frame_diff.Image(2, 2, pixels, 4, "mixed")
         stats = frame_diff.analysis(image, bins=16)
         self.assertEqual(sum(stats["histogram"][0]), 4)
-        self.assertEqual(stats["histogram"][0][0], 2)  # two pure blacks
-        self.assertEqual(stats["histogram"][0][15], 2)  # white and pure red
-        self.assertEqual(stats["histogram"][1][15], 1)  # white
-        self.assertEqual(stats["histogram"][2][15], 1)  # white
+        self.assertEqual(stats["histogram"][0][0], 2)
+        self.assertEqual(stats["histogram"][0][15], 2)
+        self.assertEqual(stats["histogram"][1][15], 1)
+        self.assertEqual(stats["histogram"][2][15], 1)
 
     def test_identical_frames_are_identical(self):
         pixels = gradient(8, 6)
