@@ -1,33 +1,12 @@
-//! `friend:u` — friends, presence and notifications.
-//!
-//! The runtime models a console with no Nintendo Network account: there are no
-//! friends, no blocked users, no requests and no notifications. Every list
-//! query answers "empty", every service object the SDK asks for is a real one,
-//! and the notification queue's event exists but is never signalled. That is
-//! the offline shape the SDK expects; a short or zero-filled reply that leaves
-//! an object pointer null crashes the guest on the next virtual call.
-//!
-//! Command numbers and reply shapes follow the Switchbrew "Friend services"
-//! page (`nn::friends::detail::ipc::IServiceCreator`, `IFriendService`,
-//! `INotificationService`). Ryujinx has no `friend:u` implementation to compare
-//! against (its `HOS/Services` tree has no `Friend` folder), so the wire sizes
-//! were checked against the SDK proxies in the title's `sdk` module: the
-//! `Out<int>` of a list query is the entry count, `GetUserPresenceView` writes
-//! 0xe0 bytes and `LoadUserSetting` 0x800.
-
 use std::sync::{Arc, Mutex};
 
 use crate::cpu::Cpu;
 use crate::services::stub::unimplemented_named;
 use crate::services::{Reply, Request, Service};
 
-/// `nn::friends::detail::ipc::IServiceCreator`. `friend:u`, `friend:v`,
-/// `friend:m`, `friend:s` and `friend:a` all expose the same creator.
 pub struct FriendServiceCreator;
 
 impl FriendServiceCreator {
-    /// Creator command 1: one `INotificationService` per call, all of them
-    /// sharing the process' notification queue (one event, as on the console).
     fn create_notification_service(c: &Cpu) -> Reply {
         let p = c.process();
         let queue = p.service_state("friend:u/notifications", || Notifications {
@@ -52,8 +31,6 @@ impl Service for FriendServiceCreator {
     }
 }
 
-/// `nn::friends::detail::ipc::IDaemonSuspendSessionService`: no commands, but
-/// the object must exist because the creator returns a handle to it.
 struct DaemonSuspendSessionService;
 
 impl Service for DaemonSuspendSessionService {
@@ -66,15 +43,10 @@ impl Service for DaemonSuspendSessionService {
     }
 }
 
-/// The notification queue of one user. An offline console has nothing to
-/// deliver, so the event is never signalled and no notification is ever
-/// pending; the handle is shared by every `INotificationService` of the
-/// process, which is what `nn::friends::NotificationQueue` waits on.
 struct Notifications {
     event: u32,
 }
 
-/// `nn::friends::detail::ipc::INotificationService`.
 pub struct NotificationService {
     queue: Arc<Notifications>,
 }
@@ -86,15 +58,8 @@ impl Service for NotificationService {
 
     fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
         match req.cmd {
-            // GetEvent: the manual-clear event the queue waits on. With no
-            // notifications it stays unsignalled (`Reply::copy_handle`, as the
-            // page says this command returns an output handle).
             0 => Reply::ok().copy_handle(self.queue.event),
-            // Clear: drops every pending notification. There are none.
             1 => Reply::ok(),
-            // Pop: a `SizedNotificationInfo` (0x10 bytes on the wire). The
-            // queue is empty, so the sized structure is zero: no notification
-            // id and a zero payload length.
             2 => Reply::ok().bytes(&[0; SIZED_NOTIFICATION_INFO_SIZE]),
             _ => unimplemented_named(
                 "friend:u/INotificationService",
@@ -107,15 +72,10 @@ impl Service for NotificationService {
 }
 
 const SIZED_NOTIFICATION_INFO_SIZE: usize = 0x10;
-/// `nn::friends::UserPresenceView` as the SDK asks for it (`Out` size 0xe0).
 const USER_PRESENCE_VIEW_SIZE: usize = 0xe0;
-/// `nn::friends::UserSettingImpl` as the SDK asks for it (`Out` size 0x800).
 const USER_SETTING_SIZE: usize = 0x800;
 
-/// `nn::friends::detail::ipc::IFriendService`.
 pub struct FriendService {
-    /// The completion event is manual-clear: every request in this runtime is
-    /// answered synchronously, so it is created signalled and stays that way.
     completion: Mutex<Option<u32>>,
 }
 
@@ -131,51 +91,27 @@ impl FriendService {
         *slot.get_or_insert_with(|| c.process().create_event(true))
     }
 
-    /// Commands whose answer does not depend on the process. `None` means the
-    /// command is not part of the offline model and the caller reports the
-    /// CMIF unknown-command result.
     fn command(&self, req: &Request) -> Option<Reply> {
         match req.cmd {
-            // Cancel: the synchronous queries above have nothing to cancel.
             1 => Some(Reply::ok()),
-            // GetFriendListIds / GetFriendList: `Out<int>` count, no entries.
             10100 | 10101 => Some(empty_list()),
-            // UpdateFriendInfo: writes into the caller's OutArray; empty.
             10102 => Some(Reply::ok()),
-            // GetFriendProfileImage: `Out<int>` bytes written to the buffer.
             10110 => Some(Reply::ok().u32(0)),
-            // GetBlockedUserListIds: `Out<int>` count, no entries.
             10400 => Some(empty_list()),
-            // GetProfileList: only an OutArray (the ids came in); empty.
             10500 => Some(Reply::ok()),
-            // DeclareOpenOnlinePlaySession / DeclareCloseOnlinePlaySession /
-            // UpdateUserPresence: no output.
             10600 | 10601 | 10610 => Some(Reply::ok()),
-            // GetFriendCount / GetNewlyFriendCount.
             20100 | 20101 => Some(Reply::ok().u32(0)),
-            // SyncFriendList / RequestSyncFriendList: a synchronous empty sync.
             20103 | 20104 => Some(Reply::ok()),
-            // GetReceivedFriendRequestCount: (received, unread).
             20200 => Some(Reply::ok().u32(0).u32(0)),
-            // GetFriendRequestList / GetFriendCandidateList.
             20201 | 20300 => Some(empty_list()),
-            // GetBlockedUserList / SyncBlockedUserList.
             20400 => Some(empty_list()),
             20401 => Some(Reply::ok()),
-            // GetProfileExtraList: only an OutArray, like GetProfileList.
             20500 => Some(Reply::ok()),
-            // GetUserPresenceView: an all-zero view is "offline, no game".
             20600 => Some(Reply::ok().bytes(&[0; USER_PRESENCE_VIEW_SIZE])),
-            // GetPlayHistoryList.
             20700 => Some(empty_list()),
-            // LoadUserSetting: all-zero settings (nothing registered).
             20800 => Some(Reply::ok().bytes(&[0; USER_SETTING_SIZE])),
-            // SyncUserSetting: saved.
             20801 => Some(Reply::ok()),
-            // RequestListSummaryOverlayNotification: there is nothing to show.
             20900 => Some(Reply::ok()),
-            // Flag edits and presence/friend-request changes on an offline
-            // console: accepted, and there is no friend list to change.
             30100 | 30110 | 30120 | 30121 => Some(Reply::ok()),
             _ => None,
         }
@@ -188,8 +124,6 @@ impl Service for FriendService {
     }
 
     fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
-        // GetCompletionEvent: a manual-clear event, already signalled because
-        // every answer is immediate.
         if req.cmd == 0 {
             return Reply::ok().copy_handle(self.completion_event(c));
         }
@@ -205,8 +139,6 @@ impl Service for FriendService {
     }
 }
 
-/// A list query with no entries: the `Out<int>` count is zero and the SDK
-/// leaves its OutArray untouched.
 fn empty_list() -> Reply {
     Reply::ok().u32(0)
 }
@@ -269,9 +201,6 @@ mod tests {
     use crate::kernel::KObject;
     use crate::services::{Buf, harness, result};
 
-    /// Builds a domain CMIF request whose HIPC message also carries an SDK
-    /// pointer buffer and a copy handle, the descriptors the real
-    /// `CreateNotificationService` path can add.
     fn domain_request(
         cmd: u32,
         object: u32,
@@ -286,7 +215,7 @@ mod tests {
         body.extend_from_slice(args);
 
         let mut payload = Vec::new();
-        payload.push(1u8); // domain send
+        payload.push(1u8);
         payload.push(0);
         payload.extend_from_slice(&(body.len() as u16).to_le_bytes());
         for w in [object, 0, 0] {
@@ -323,9 +252,6 @@ mod tests {
         out
     }
 
-    /// Splits a CMIF domain reply into its object ids and SFCO payload. The
-    /// runtime puts the out-object ids after the CMIF data, so `data_len` is
-    /// the service data length the command answers with.
     fn domain_reply(msg: &[u8], data_len: usize) -> (u32, Vec<u32>, u32, Vec<u8>) {
         let m = crate::ipc::parse_hipc(msg).expect("reply parses");
         let pad = m.data_offset.next_multiple_of(16) - m.data_offset;
@@ -446,8 +372,6 @@ mod tests {
         extern "C" fn probe(c: &mut Cpu) {
             let handle = harness::session(c, Arc::new(FriendServiceCreator));
             convert_to_domain(c, handle);
-            // The shape the SDK uses: a type-0x9 pointer buffer for the
-            // arguments plus the copy handle it sends with the request.
             let pointer = Buf {
                 addr: 0x1_0000_2000,
                 size: 0x10,
@@ -575,7 +499,6 @@ mod tests {
                 "completion",
                 &[handle as u64, signaled as u64, r.data.len() as u64],
             );
-            // A second call reuses the same handle instead of leaking a new one.
             let again = service.call(
                 c,
                 &Request {
