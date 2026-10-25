@@ -19,13 +19,8 @@ REFERENCE = ROOT / "tools/reference/horizon.txt"
 MAXWELL_OPCODES = ROOT / "crates/maxwell/src/opcodes.rs"
 MAXWELL_TRANSLATE = ROOT / "crates/maxwell/src/translate.rs"
 NVN_DIR = ROOT / "crates/rt/src/nvn"
-# The batch matrix lives outside the repository (see tools/discovery/batch.py) and is read from
-# --compat, KIRIKAE_COMPAT or the discovery work folder, in that order. It is only included when
-# the file exists, so a fresh clone and a CI run without the artifact regenerate the same dashboard.
 STATUS_MD = ROOT / "docs/plan/STATUS.md"
 
-# NVN host table: `host::proc` takes the call over, `state::setter` feeds the state it records,
-# while `shadow::hook` and `resources::call` only observe or build resources on the driver path.
 NVN_HOST = NVN_DIR / "host.rs"
 NVN_STATE = NVN_DIR / "state.rs"
 NVN_SHADOW = NVN_DIR / "shadow.rs"
@@ -42,17 +37,12 @@ SHADER_CLASSES = {
     "control flow": "bra brx ssy sync pbk brk cont pcnt exit kil bar membar depbar nop cal jcal ret jmp jmx pret sam rtt bpt preexit ide ret",
 }
 
-# The Maxwell opcode table has no stage column (envytools' gm107 table lists encodings only), so
-# the stage split uses the instructions a stage alone encodes. Everything not listed here is
-# shared and counts in every stage; the denominator is always the whole table.
 SHADER_STAGES = {
     "vertex": (),
     "fragment": ("ipa", "pixld", "kil", "out"),
     "compute": ("bar", "membar", "cctl", "cctll", "cctlt"),
 }
 
-# Coarse families over the same mnemonics. Atomics are checked first so the surface atomics do
-# not also land in textures; control keeps the barrier ops; the rest is ALU.
 SHADER_FAMILIES = {
     "atomics": "atom atoms atomcas red sured suatom",
     "texture": "tex texs tld tlds tld4 tld4s txq txd txa tmml tmmls suld sust isberd",
@@ -71,8 +61,6 @@ NVN_FAMILY_LABELS = {
     "state": "state setters",
     "other": "other procs",
 }
-# Procs whose host arm only computes a return value (the device handle getters pack two ids).
-# They are implemented, but shown as constant like the services' fixed replies.
 NVN_CONSTANT_PREFIX = "Handle("
 
 NV_DEVICES = {
@@ -105,10 +93,6 @@ NV_SHORT = {
 FAMILY = {"appletOE": "am", "fsp-srv": "fs"}
 RUNTIME_ALIASES = {}
 
-# Services that answer every command but do not do the real work (silence, zeros or
-# fixed replies). Their commands stay "handled" in the data, but they are not counted
-# as implemented in the badges or the dashboard: the light-green cell means "returns
-# success/constants only". Keep this list in sync with the source and say why.
 SILENT_STUBS = {
     "hwopus": "decodes packet headers but writes silence",
     "nfp": "fake amiibo service, no NFC device",
@@ -271,12 +255,7 @@ def arms_in(src, regex, constants):
                 d[cid] = d.get(cid, True) and is_trivial(body)
     return found
 
-# A dispatch on the request command. `match code` is deliberately absent: `bsd/sys.rs` maps
-# host errno codes with it and `vi::transact` is scanned by name below, so following `code`
-# into a helper would count Winsock error numbers as IPC commands.
 SERVICE_DISPATCH = r"match (?:req\.cmd|\(self\.name, req\.cmd\)|cmd)\s*\{"
-# A call in a `call` body: `self.method(`, `module::fn(` or `fn(`. Definitions (`fn call(`) and
-# paths that start at a type (`Self::`, `Arc::new`) are not callees of the service.
 CALLEE = re.compile(r"(?<!fn )(?<![\w.])(?:(self)\.(\w+)|([a-z_]\w*)::(\w+)|([a-z_]\w*))\s*\(")
 
 
@@ -383,8 +362,6 @@ def delegated_arms(block, path, sources, consts_of, struct, depth=3):
     if depth <= 0:
         return merged
     for name, target, body in callee_bodies(block, path, sources, struct):
-        # A `*_command_name` helper is a diagnostic name table, not a dispatch: counting its
-        # arms as implemented inflates every service that names its unknown commands.
         if name.endswith("_command_name") or name.endswith("_name"):
             continue
         merge_arms(merged, arms_in(body, SERVICE_DISPATCH, consts_of[target]))
@@ -460,10 +437,6 @@ def scan_code(services=None, horizon=None):
             struct = m.group(1)
             block = src[m.end() - 1 : matching(src, m.end() - 1) + 1]
             lit = re.search(r'fn name\(&self\) -> String \{\s*"([^"]+)"\.into\(\)', block)
-            # A struct serves every name the registry constructs it with. `bsd:u`, `bsd:s` and
-            # `bsd:a` are three `Bsd::new` arms around one `impl Service`, so the same arms are
-            # the implementation of all three names; `mii:u`/`mii:e` and `ns:am`/`ns:am2` work
-            # the same way. An arm that names its interface (`(self.name, req.cmd)`) keeps it.
             defaults = [lit.group(1)] if lit else names_of.get(struct, [])
             if not defaults:
                 continue
@@ -958,14 +931,11 @@ def build_report():
                 trivial = [cid for cid in impl if arms[cid]]
                 extra = sorted(c for c in arms if c not in documented)
             else:
-                # No reference list for this group: its arms are handled but cannot be called
-                # implemented against a documented surface, so they are reported separately
-                # instead of counting themselves as 100 %.
                 impl, trivial, extra = {}, [], sorted(arms)
             total = documented if documented is not None else {}
             silent = key[1].split("/")[0].split(":")[0] in SILENT_STUBS
             if silent:
-                trivial = list(impl)  # handled, but only silence / fixed values
+                trivial = list(impl)
             groups.append(
                 {
                     "name": key[1],
@@ -995,9 +965,6 @@ def build_report():
                 "groups": groups,
             }
         )
-    # `implemented` counts every handled command; `real` subtracts the silent stubs, which is
-    # what the badges, the treemap and the console count. Both live in progress.json so a reader
-    # never has to guess which of the two a number means.
     for section in sections:
         section["real"] = implemented_real(section)
     counted = [s for s in sections if s["id"] in COUNTED_SECTIONS]
@@ -1680,8 +1647,6 @@ def self_test():
     split_module = synthetic(
         {
             "mod.rs": registry,
-            # `foo.rs` keeps its inherent impl in `foo/command.rs` and its dispatch table in
-            # `foo/table.rs`; the module is still one service.
             "split/mod.rs": split_call.replace("match req.cmd", "match table::dispatch(req.cmd)"),
             "split/table.rs": "pub(super) fn dispatch(cmd: u32) -> Option<Reply> {\n"
             "    match cmd {\n"
@@ -1722,8 +1687,6 @@ def self_test():
     check(set(ioctls.get(("ioctl", "/dev/nvmap")) or {}) == {1, 2, 3}, "ioctl arms in a split nvdrv folder")
     check(ioctls.get(("services", "nvdrv")) == {0: True}, "split nvdrv service arms")
 
-    # A folder service registered under two names is one implementation: `bsd:u`, `bsd:s` and
-    # `bsd:a` share the dispatch in `bsd/`, so each name has to be counted against the table.
     folder_tree = synthetic(
         {
             "mod.rs": """pub fn host_object(name: &str) -> Option<Arc<dyn Service>> {
@@ -1760,7 +1723,6 @@ def self_test():
         "a folder service registered under two names counts for both",
     )
 
-    # A helper that maps host codes is not a command table, even when the service delegates to it.
     errno_tree = synthetic(
         {
             "code.rs": """impl Service for Code {
@@ -1988,7 +1950,6 @@ def ci(out, dry_run=False, push=False, compat_path=None):
     if add.returncode != 0:
         print(f"ci: git add failed: {add.stderr.strip()}", file=sys.stderr)
         return add.returncode
-    # The workflow documents why this identity can write: `permissions: contents: write`.
     commit = git(
         "-c", f"user.name={BOT_NAME}", "-c", f"user.email={BOT_EMAIL}",
         "commit", "-m", PROGRESS_COMMIT, "--", rel,
@@ -2000,7 +1961,6 @@ def ci(out, dry_run=False, push=False, compat_path=None):
     if push:
         pushed = git("push")
         if pushed.returncode != 0:
-            # actions/checkout can leave a detached HEAD; push the commit to its branch then.
             branch = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
             if branch and branch != "HEAD":
                 pushed = git("push", "origin", f"HEAD:{branch}")
