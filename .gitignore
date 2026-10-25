@@ -36,6 +36,10 @@ frames/
 *-coverage/
 docs/progress-games/
 
+# Local analysis workspace: keys, ROMs, extracted game modules, decrypted RomFS.
+# Nothing in here may be committed or attached to a PR.
+/myswitch/
+
 # Local tooling.
 __pycache__/
 *.pyc

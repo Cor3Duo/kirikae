@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use kirikae_a64::{lift, Control};
-use kirikae_loader::{load, LOAD_BASE};
-use kirikae_recomp::project::{build, Backend, BuildOptions};
+use kirikae_a64::{Control, Insn, Stmt, lift};
+use kirikae_loader::{LOAD_BASE, load};
+use kirikae_recomp::project::{Backend, BuildOptions, build};
 use kirikae_recomp::rust_backend::emit_program;
-use kirikae_recomp::{discover, Image};
+use kirikae_recomp::{Image, discover};
 
 const USAGE: &str = "\
 kirikae: recompile Nintendo Switch executables into native programs
@@ -16,6 +16,8 @@ usage:
         [--fast-regs]                                keep guest registers in variables
                                                      (experimental; or KIRIKAE_FAST_REGS=1)
         [--plugin <crate dir>]                       link a crate whose install() runs first
+        [--split <dlls>]                             put the recompiled code in that many DLLs
+                                                     (default: only when one image would not fit)
         [--profile <file>]                           also compile the addresses a run had to
                                                      interpret (default: <dir>/<name>.profile,
                                                      written by the executable)
@@ -64,7 +66,10 @@ struct Args {
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
-    let mut out = Args { positional: Vec::new(), options: Vec::new() };
+    let mut out = Args {
+        positional: Vec::new(),
+        options: Vec::new(),
+    };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         if SWITCHES.contains(&a.as_str()) {
@@ -81,11 +86,17 @@ fn parse(args: &[String]) -> Result<Args, String> {
 
 impl Args {
     fn input(&self) -> Result<&str, String> {
-        self.positional.first().map(String::as_str).ok_or_else(|| format!("missing input file\n\n{USAGE}"))
+        self.positional
+            .first()
+            .map(String::as_str)
+            .ok_or_else(|| format!("missing input file\n\n{USAGE}"))
     }
 
     fn option(&self, names: &[&str]) -> Option<&str> {
-        self.options.iter().find(|(k, _)| names.contains(&k.as_str())).map(|(_, v)| v.as_str())
+        self.options
+            .iter()
+            .find(|(k, _)| names.contains(&k.as_str()))
+            .map(|(_, v)| v.as_str())
     }
 }
 
@@ -98,15 +109,25 @@ fn load_image(file: &[u8]) -> Result<Image, String> {
 }
 
 fn stem(path: &str) -> String {
-    Path::new(path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "game".into())
+    Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "game".into())
 }
 
 fn cmd_build(args: &[String]) -> Result<ExitCode, String> {
     let a = parse(args)?;
     let input = a.input()?;
-    let source = kirikae_loader::package::read_source(Path::new(input)).map_err(|e| e.to_string())?;
-    let name = a.option(&["--name"]).map(String::from).unwrap_or_else(|| stem(input));
-    let mut opts = BuildOptions::new(PathBuf::from(a.option(&["-o", "--out"]).unwrap_or(".")), &name);
+    let source =
+        kirikae_loader::package::read_source(Path::new(input)).map_err(|e| e.to_string())?;
+    let name = a
+        .option(&["--name"])
+        .map(String::from)
+        .unwrap_or_else(|| stem(input));
+    let mut opts = BuildOptions::new(
+        PathBuf::from(a.option(&["-o", "--out"]).unwrap_or(".")),
+        &name,
+    );
     opts.backend = match a.option(&["--backend"]) {
         None | Some("cranelift") => Backend::Cranelift,
         Some("rust") => Backend::Rust,
@@ -116,15 +137,32 @@ fn cmd_build(args: &[String]) -> Result<ExitCode, String> {
         opts.jobs = j.parse().map_err(|_| format!("bad job count `{j}`"))?;
     }
     opts.profile = a.option(&["--profile"]).map(PathBuf::from);
-    opts.plugins = a.options.iter().filter(|(k, _)| k == "--plugin").map(|(_, v)| PathBuf::from(v)).collect();
-    opts.fast_regs = a.option(&["--fast-regs"]).is_some() || std::env::var("KIRIKAE_FAST_REGS").is_ok_and(|v| v == "1");
+    opts.plugins = a
+        .options
+        .iter()
+        .filter(|(k, _)| k == "--plugin")
+        .map(|(_, v)| PathBuf::from(v))
+        .collect();
+    opts.fast_regs = a.option(&["--fast-regs"]).is_some()
+        || std::env::var("KIRIKAE_FAST_REGS").is_ok_and(|v| v == "1");
+    opts.split = match a.option(&["--split"]) {
+        Some(n) => Some(
+            n.parse()
+                .map_err(|_| format!("bad DLL count `{n}` (expected 2 or more)"))?,
+        ),
+        None => None,
+    };
     if opts.fast_regs && opts.backend != Backend::Cranelift {
         return Err("--fast-regs needs the Cranelift backend".into());
     }
     let started = std::time::Instant::now();
     let report = build(&source, &opts)?;
+    let dlls = match report.dlls {
+        0 | 1 => String::new(),
+        n => format!(" and {n} code DLLs"),
+    };
     println!(
-        "kirikae: recompiled {} functions ({} of {} instructions reachable) into {} in {:.0}s",
+        "kirikae: recompiled {} functions ({} of {} instructions reachable) into {}{dlls} in {:.0}s",
         report.functions,
         report.reachable,
         report.total,
@@ -137,9 +175,18 @@ fn cmd_build(args: &[String]) -> Result<ExitCode, String> {
 fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
     let a = parse(args)?;
     let exe = kirikae_loader::open(Path::new(a.input()?)).map_err(|e| e.to_string())?;
-    let r = kirikae_rt::run_executable(&exe, &[], kirikae_rt::RunOptions { capture_output: false })?;
+    let r = kirikae_rt::run_executable(
+        &exe,
+        &[],
+        kirikae_rt::RunOptions {
+            capture_output: false,
+        },
+    )?;
     if std::env::var_os("KIRIKAE_STATS").is_some() {
-        eprintln!("kirikae: {} interpreted instructions, exit code {}", r.interpreted, r.exit_code);
+        eprintln!(
+            "kirikae: {} interpreted instructions, exit code {}",
+            r.interpreted, r.exit_code
+        );
     }
     Ok(ExitCode::from(r.exit_code as u8))
 }
@@ -154,43 +201,72 @@ fn cmd_info(args: &[String]) -> Result<ExitCode, String> {
         println!("stack  {s:#x} (main thread)");
     }
     if exe.system_resource_size != 0 {
-        println!("sysres {:#x} (svcMapPhysicalMemory allowed)", exe.system_resource_size);
+        println!(
+            "sysres {:#x} (svcMapPhysicalMemory allowed)",
+            exe.system_resource_size
+        );
     }
     if let Some(r) = &exe.romfs {
         match kirikae_loader::romfs::Reader::open(r) {
             Ok(rd) => println!(
                 "romfs  {:#x} bytes{} at {:#x} in {}",
                 rd.size(),
-                if r.compression.is_some() { " (compressed)" } else { "" },
+                if r.compression.is_some() {
+                    " (compressed)"
+                } else {
+                    ""
+                },
                 r.offset,
                 r.path.display()
             ),
             Err(e) => println!("romfs  unreadable: {e}"),
         }
     }
-    println!("entry  {:#x}
-", exe.entry);
+    println!(
+        "entry  {:#x}
+",
+        exe.entry
+    );
     let mut total = Coverage::default();
     for m in &exe.modules {
         let image = &m.image;
         println!("{} @ {:#x}..{:#x}", m.name, image.base, image.end());
-        for (name, r) in [("text", &image.text), ("ro", &image.ro), ("data", &image.data), ("bss", &image.bss)] {
-            println!("  {name:<5} {:#x}..{:#x} ({:#x} bytes)", r.start, r.end, r.end - r.start);
+        for (name, r) in [
+            ("text", &image.text),
+            ("ro", &image.ro),
+            ("data", &image.data),
+            ("bss", &image.bss),
+        ] {
+            println!(
+                "  {name:<5} {:#x}..{:#x} ({:#x} bytes)",
+                r.start,
+                r.end,
+                r.end - r.start
+            );
         }
         let cov = coverage(image);
         println!(
-            "  decoder: {} words, {:.2}% lifted, {:.2}% SIMD/FP (not lifted yet), {:.2}% other",
+            "  decoder: {} words, {:.2}% lifted in IR, {:.2}% SIMD/FP via helper, {:.2}% SIMD/FP unsupported, {:.2}% other",
             cov.words,
             cov.pct(cov.lifted),
-            cov.pct(cov.simd),
+            cov.pct(cov.simd_helper),
+            cov.pct(cov.simd_failed),
             cov.pct(cov.other)
         );
         if exe.modules.len() == 1 {
             let prog = discover(image);
-            println!("
-{} functions reachable from the entry:", prog.functions.len());
+            println!(
+                "
+{} functions reachable from the entry:",
+                prog.functions.len()
+            );
             for f in &prog.functions {
-                println!("  {:#x}  {} blocks, {} instructions", f.entry, f.blocks.len(), f.insn_count());
+                println!(
+                    "  {:#x}  {} blocks, {} instructions",
+                    f.entry,
+                    f.blocks.len(),
+                    f.insn_count()
+                );
             }
         }
         total.add(&cov);
@@ -198,10 +274,11 @@ fn cmd_info(args: &[String]) -> Result<ExitCode, String> {
     if exe.modules.len() > 1 {
         println!(
             "
-all code: {} words, {:.2}% lifted, {:.2}% SIMD/FP, {:.2}% other",
+all code: {} words, {:.2}% lifted in IR, {:.2}% SIMD/FP via helper, {:.2}% SIMD/FP unsupported, {:.2}% other",
             total.words,
             total.pct(total.lifted),
-            total.pct(total.simd),
+            total.pct(total.simd_helper),
+            total.pct(total.simd_failed),
             total.pct(total.other)
         );
     }
@@ -212,7 +289,8 @@ all code: {} words, {:.2}% lifted, {:.2}% SIMD/FP, {:.2}% other",
 struct Coverage {
     words: u64,
     lifted: u64,
-    simd: u64,
+    simd_helper: u64,
+    simd_failed: u64,
     other: u64,
 }
 
@@ -224,7 +302,8 @@ impl Coverage {
     fn add(&mut self, o: &Coverage) {
         self.words += o.words;
         self.lifted += o.lifted;
-        self.simd += o.simd;
+        self.simd_helper += o.simd_helper;
+        self.simd_failed += o.simd_failed;
         self.other += o.other;
     }
 }
@@ -234,18 +313,41 @@ fn is_simd_fp(w: u32) -> bool {
     op0 & 0b0111 == 0b0111 || (op0 & 0b0101 == 0b0100 && w & (1 << 26) != 0)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Class {
+    /// The decoder produced IR the interpreter and the backends know how to run.
+    Lifted,
+    /// A SIMD/FP word that only exists as a call into the `a64` runtime helper.
+    SimdHelper,
+    /// A SIMD/FP word the decoder does not know, so running it faults the guest.
+    SimdUnsupported,
+    /// Anything else the decoder does not know.
+    Other,
+}
+
+fn classify(insn: &Insn) -> Class {
+    if insn.stmts.iter().any(|s| matches!(s, Stmt::Simd(_))) {
+        Class::SimdHelper
+    } else if insn.control() != Control::Undefined {
+        Class::Lifted
+    } else if is_simd_fp(insn.word) {
+        Class::SimdUnsupported
+    } else {
+        Class::Other
+    }
+}
+
 fn coverage(image: &Image) -> Coverage {
     let mut c = Coverage::default();
     let mut addr = image.text.start;
     while addr < image.text.end {
-        let w = image.word(addr).unwrap_or(0);
+        let insn = lift(addr, image.word(addr).unwrap_or(0));
         c.words += 1;
-        if lift(addr, w).control() != Control::Undefined {
-            c.lifted += 1;
-        } else if is_simd_fp(w) {
-            c.simd += 1;
-        } else {
-            c.other += 1;
+        match classify(&insn) {
+            Class::Lifted => c.lifted += 1,
+            Class::SimdHelper => c.simd_helper += 1,
+            Class::SimdUnsupported => c.simd_failed += 1,
+            Class::Other => c.other += 1,
         }
         addr += 4;
     }
@@ -397,5 +499,60 @@ fn cmd_dev(args: &[String]) -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
         _ => Err("dev commands: simd-cases, simd-check, romfs-ls, romfs-find, extract, module-dump, syms".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_ir_helper_unsupported_and_other() {
+        let scalar = lift(0, 0x8b02_0020); // add x0, x1, x2
+        assert_eq!(classify(&scalar), Class::Lifted);
+
+        let fp_ir = lift(0, 0x1e22_2820); // fadd s0, s1, s2, lifted to IR like any other op
+        assert!(is_simd_fp(fp_ir.word));
+        assert_eq!(classify(&fp_ir), Class::Lifted);
+
+        let neon_ir = lift(0, 0x4e22_8420); // add v0.4s, v1.4s, v2.4s, expanded to lane IR
+        assert!(is_simd_fp(neon_ir.word));
+        assert_eq!(classify(&neon_ir), Class::Lifted);
+
+        let helper = lift(0, 0x4e02_0020); // tbl v0.16b, {v1.16b}, v2.16b, run by the a64 helper
+        assert_eq!(helper.stmts, vec![Stmt::Simd(0x4e02_0020)]);
+        assert_eq!(classify(&helper), Class::SimdHelper);
+
+        let unsupported = lift(0, 0x1e00_0000); // unallocated SIMD/FP encoding
+        assert_eq!(unsupported.control(), Control::Undefined);
+        assert!(is_simd_fp(unsupported.word));
+        assert_eq!(classify(&unsupported), Class::SimdUnsupported);
+
+        let other = lift(0, 0x0000_0000);
+        assert_eq!(classify(&other), Class::Other);
+    }
+
+    #[test]
+    fn coverage_percentages_add_up() {
+        let one = Coverage {
+            words: 4,
+            lifted: 2,
+            simd_helper: 1,
+            simd_failed: 0,
+            other: 1,
+        };
+        let mut c = Coverage::default();
+        c.add(&one);
+        c.add(&one);
+        assert_eq!(
+            (
+                c.words,
+                c.pct(c.lifted),
+                c.pct(c.simd_helper),
+                c.pct(c.simd_failed),
+                c.pct(c.other)
+            ),
+            (8, 50.0, 25.0, 0.0, 25.0)
+        );
     }
 }

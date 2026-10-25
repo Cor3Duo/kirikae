@@ -2,8 +2,10 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 
 use kirikae_loader::Source;
-use kirikae_recomp::project::{build, Backend, BuildOptions, BuildReport};
-use kirikae_testkit::{hello_nro, parallel_threads_nro, threads_nro, HELLO_EXPECTED, THREADS_EXPECTED};
+use kirikae_recomp::project::{Backend, BuildOptions, BuildReport, build};
+use kirikae_testkit::{
+    HELLO_EXPECTED, THREADS_EXPECTED, hello_nro, parallel_threads_nro, threads_nro,
+};
 
 fn out_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("kirikae-e2e-{name}-{}", std::process::id()));
@@ -11,7 +13,12 @@ fn out_dir(name: &str) -> PathBuf {
     dir
 }
 
-fn build_and_run(file: &[u8], name: &str, backend: Backend, fast_regs: bool) -> (BuildReport, Output) {
+fn build_and_run(
+    file: &[u8],
+    name: &str,
+    backend: Backend,
+    fast_regs: bool,
+) -> (BuildReport, Output) {
     let mut opts = BuildOptions::new(out_dir(name), name);
     opts.backend = backend;
     opts.fast_regs = fast_regs;
@@ -21,13 +28,28 @@ fn build_and_run(file: &[u8], name: &str, backend: Backend, fast_regs: bool) -> 
 }
 
 fn run_built(report: &BuildReport, env: &[(&str, &str)]) -> Output {
-    let run = Command::new(&report.executable).env("KIRIKAE_STATS", "1").envs(env.iter().copied()).output().unwrap();
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    let run = Command::new(&report.executable)
+        .env("KIRIKAE_STATS", "1")
+        .envs(env.iter().copied())
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     run
 }
 
 fn interpreted(file: &[u8]) -> String {
-    let r = kirikae_rt::run(file, &[], kirikae_rt::RunOptions { capture_output: true }).unwrap();
+    let r = kirikae_rt::run(
+        file,
+        &[],
+        kirikae_rt::RunOptions {
+            capture_output: true,
+        },
+    )
+    .unwrap();
     String::from_utf8_lossy(&r.output).into_owned()
 }
 
@@ -103,4 +125,25 @@ fn cranelift_fast_regs_hello() {
 #[test]
 fn cranelift_fast_regs_threads() {
     check_threads(Backend::Cranelift, true, "threads-clif-fast");
+}
+
+#[test]
+fn cranelift_split_hello() {
+    let file = hello_nro();
+    assert_eq!(interpreted(&file), HELLO_EXPECTED);
+    let mut opts = BuildOptions::new(out_dir("hello-split"), "hello-split");
+    opts.split = Some(2);
+    let report = build(&Source::Single(file), &opts).unwrap();
+    assert_eq!(report.functions, 5);
+    assert_eq!(report.dlls, 2);
+    let dir = report.executable.parent().unwrap();
+    for i in 0..2 {
+        let dll = dir.join(format!("hello_split_chunk{i}.dll"));
+        assert!(dll.is_file(), "{} missing", dll.display());
+    }
+    let run = run_built(&report, &[]);
+    assert_eq!(String::from_utf8_lossy(&run.stdout), HELLO_EXPECTED);
+    let stats = String::from_utf8_lossy(&run.stderr);
+    assert!(stats.contains(" 0 interpreted instructions"), "{stats}");
+    let _ = std::fs::remove_dir_all(dir);
 }
