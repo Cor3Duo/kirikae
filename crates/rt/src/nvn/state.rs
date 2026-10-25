@@ -73,12 +73,18 @@ struct DepthStencil {
     faces: [[u8; 4]; 2],
 }
 
-const DEPTH_STENCIL_DEFAULTS: DepthStencil = DepthStencil { test: 0, write: 1, func: 2, stencil: 0, faces: [[8, 1, 1, 1]; 2] };
+const DEPTH_STENCIL_DEFAULTS: DepthStencil = DepthStencil {
+    test: 0,
+    write: 1,
+    func: 2,
+    stencil: 0,
+    faces: [[8, 1, 1, 1]; 2],
+};
 
 pub const ATTRIB_SIZE: u64 = 4;
 pub const STREAM_SIZE: u64 = 8;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Setter {
     ChannelMaskDefaults,
     ChannelMask,
@@ -154,7 +160,10 @@ impl Objects {
             ChannelMask => {
                 let m = self.channel_mask.entry(o).or_insert([0xf; 8]);
                 if let Some(t) = m.get_mut(a[1] as u32 as usize) {
-                    *t = on(a[2]) as u8 | (on(a[3]) as u8) << 1 | (on(a[4]) as u8) << 2 | (on(a[5]) as u8) << 3;
+                    *t = on(a[2]) as u8
+                        | (on(a[3]) as u8) << 1
+                        | (on(a[4]) as u8) << 2
+                        | (on(a[5]) as u8) << 3;
                 }
             }
             ColorDefaults => {
@@ -180,7 +189,10 @@ impl Objects {
                 self.depth_stencil.insert(o, DEPTH_STENCIL_DEFAULTS);
             }
             DepthTest | DepthWrite | DepthFunc | StencilTest | StencilFunc | StencilOp => {
-                let d = self.depth_stencil.entry(o).or_insert(DEPTH_STENCIL_DEFAULTS);
+                let d = self
+                    .depth_stencil
+                    .entry(o)
+                    .or_insert(DEPTH_STENCIL_DEFAULTS);
                 match s {
                     DepthTest => d.test = b(a[1]),
                     DepthWrite => d.write = b(a[1]),
@@ -233,26 +245,45 @@ impl Objects {
     }
 
     pub fn channel_mask(&mut self, o: u64) -> Vec<(Field, u64)> {
-        let Some(m) = self.channel_mask.get(&o).copied() else { return self.missed() };
-        (0..8).map(|t| (Field(Kind::ChannelMask, t), m[t as usize] as u64)).collect()
-    }
-
-    pub fn color(&mut self, o: u64) -> Vec<(Field, u64)> {
-        let Some(m) = self.color.get(&o).copied() else { return self.missed() };
-        (0..8).map(|t| (Field(Kind::BlendEnable, t), (m >> t & 1) as u64)).collect()
-    }
-
-    pub fn blend(&mut self, o: u64) -> Vec<(Field, u64)> {
-        let Some(v) = self.blend.get(&o).copied() else { return self.missed() };
-        let t = v[0];
-        [(Kind::BlendSrc, v[1]), (Kind::BlendDst, v[2]), (Kind::BlendSrcAlpha, v[3]), (Kind::BlendDstAlpha, v[4]), (Kind::BlendEquation, v[5]), (Kind::BlendEquationAlpha, v[6])]
-            .into_iter()
-            .map(|(k, x)| (Field(k, t), x as u64))
+        let Some(m) = self.channel_mask.get(&o).copied() else {
+            return self.missed();
+        };
+        (0..8)
+            .map(|t| (Field(Kind::ChannelMask, t), m[t as usize] as u64))
             .collect()
     }
 
+    pub fn color(&mut self, o: u64) -> Vec<(Field, u64)> {
+        let Some(m) = self.color.get(&o).copied() else {
+            return self.missed();
+        };
+        (0..8)
+            .map(|t| (Field(Kind::BlendEnable, t), (m >> t & 1) as u64))
+            .collect()
+    }
+
+    pub fn blend(&mut self, o: u64) -> Vec<(Field, u64)> {
+        let Some(v) = self.blend.get(&o).copied() else {
+            return self.missed();
+        };
+        let t = v[0];
+        [
+            (Kind::BlendSrc, v[1]),
+            (Kind::BlendDst, v[2]),
+            (Kind::BlendSrcAlpha, v[3]),
+            (Kind::BlendDstAlpha, v[4]),
+            (Kind::BlendEquation, v[5]),
+            (Kind::BlendEquationAlpha, v[6]),
+        ]
+        .into_iter()
+        .map(|(k, x)| (Field(k, t), x as u64))
+        .collect()
+    }
+
     pub fn depth_stencil(&mut self, o: u64) -> Vec<(Field, u64)> {
-        let Some(d) = self.depth_stencil.get(&o).copied() else { return self.missed() };
+        let Some(d) = self.depth_stencil.get(&o).copied() else {
+            return self.missed();
+        };
         let mut out = vec![
             (Field(Kind::DepthTest, 0), d.test as u64),
             (Field(Kind::DepthWrite, 0), d.write as u64),
@@ -261,21 +292,42 @@ impl Objects {
         ];
         for f in 0..2 {
             let x = d.faces[f];
-            out.extend([(Kind::StencilFunc, x[0]), (Kind::StencilFail, x[1]), (Kind::StencilDepthFail, x[2]), (Kind::StencilPass, x[3])].map(|(k, v)| (Field(k, f as u8), v as u64)));
+            out.extend(
+                [
+                    (Kind::StencilFunc, x[0]),
+                    (Kind::StencilFail, x[1]),
+                    (Kind::StencilDepthFail, x[2]),
+                    (Kind::StencilPass, x[3]),
+                ]
+                .map(|(k, v)| (Field(k, f as u8), v as u64)),
+            );
         }
         out
     }
 
     pub fn polygon(&mut self, o: u64) -> Vec<(Field, u64)> {
-        let Some(p) = self.polygon.get(&o).copied() else { return self.missed() };
-        vec![(Field(Kind::CullFace, 0), p[0] as u64), (Field(Kind::FrontFace, 0), p[1] as u64), (Field(Kind::PolygonOffsetEnables, 0), p[3] as u64)]
+        let Some(p) = self.polygon.get(&o).copied() else {
+            return self.missed();
+        };
+        vec![
+            (Field(Kind::CullFace, 0), p[0] as u64),
+            (Field(Kind::FrontFace, 0), p[1] as u64),
+            (Field(Kind::PolygonOffsetEnables, 0), p[3] as u64),
+        ]
     }
 
     pub fn attribs(&mut self, base: u64, count: u64) -> Vec<(Field, u64)> {
         let mut out = vec![(Field(Kind::AttribCount, 0), count.min(32))];
         for i in 0..count.min(32) {
             match self.attrib.get(&(base + i * ATTRIB_SIZE)).copied() {
-                Some(v) => out.extend([(Kind::AttribFormat, v[0]), (Kind::AttribOffset, v[1]), (Kind::AttribStream, v[2])].map(|(k, x)| (Field(k, i as u8), x))),
+                Some(v) => out.extend(
+                    [
+                        (Kind::AttribFormat, v[0]),
+                        (Kind::AttribOffset, v[1]),
+                        (Kind::AttribStream, v[2]),
+                    ]
+                    .map(|(k, x)| (Field(k, i as u8), x)),
+                ),
                 None => self.unknown += 1,
             }
         }
@@ -286,7 +338,10 @@ impl Objects {
         let mut out = vec![(Field(Kind::StreamCount, 0), count.min(16))];
         for i in 0..count.min(16) {
             match self.stream.get(&(base + i * STREAM_SIZE)).copied() {
-                Some(v) => out.extend([(Kind::StreamStride, v[0]), (Kind::StreamDivisor, v[1])].map(|(k, x)| (Field(k, i as u8), x))),
+                Some(v) => out.extend(
+                    [(Kind::StreamStride, v[0]), (Kind::StreamDivisor, v[1])]
+                        .map(|(k, x)| (Field(k, i as u8), x)),
+                ),
                 None => self.unknown += 1,
             }
         }
@@ -303,7 +358,12 @@ pub fn from_registers(regs: &[u32]) -> Vec<(Field, u64)> {
     let mut out = Vec::with_capacity(256);
     let mut put = |k: Kind, i: u8, v: u64| out.push((Field(k, i), v));
     let per_target = regs[0x4b9] & 1 == 1;
-    for (i, r) in [0x4b9].into_iter().chain(0x4cf..0x4d7).chain(0x780..0x787).enumerate() {
+    for (i, r) in [0x4b9]
+        .into_iter()
+        .chain(0x4cf..0x4d7)
+        .chain(0x780..0x787)
+        .enumerate()
+    {
         put(Kind::BlendRegister, i as u8, regs[r] as u64);
     }
     let ct = regs[reg::CT_SELECT];
@@ -323,11 +383,31 @@ pub fn from_registers(regs: &[u32]) -> Vec<(Field, u64)> {
         }
         let r = if per_target {
             let b = 0x780 + 8 * k as usize;
-            [regs[b], regs[b + 1], regs[b + 2], regs[b + 3], regs[b + 4], regs[b + 5], regs[b + 6]]
+            [
+                regs[b],
+                regs[b + 1],
+                regs[b + 2],
+                regs[b + 3],
+                regs[b + 4],
+                regs[b + 5],
+                regs[b + 6],
+            ]
         } else {
-            [regs[0x4cf], regs[0x4d0], regs[0x4d1], regs[0x4d2], regs[0x4d3], regs[0x4d4], regs[0x4d6]]
+            [
+                regs[0x4cf],
+                regs[0x4d0],
+                regs[0x4d1],
+                regs[0x4d2],
+                regs[0x4d3],
+                regs[0x4d4],
+                regs[0x4d6],
+            ]
         };
-        let (aop, asrc, adst) = if per_target || r[0] & 1 == 1 { (r[4], r[5], r[6]) } else { (r[1], r[2], r[3]) };
+        let (aop, asrc, adst) = if per_target || r[0] & 1 == 1 {
+            (r[4], r[5], r[6])
+        } else {
+            (r[1], r[2], r[3])
+        };
         put(Kind::BlendEquation, k, r[1] as u64);
         put(Kind::BlendSrc, k, r[2] as u64);
         put(Kind::BlendDst, k, r[3] as u64);
@@ -349,11 +429,30 @@ pub fn from_registers(regs: &[u32]) -> Vec<(Field, u64)> {
     let stencil = regs[0x4e0] & 1;
     put(Kind::StencilTest, 0, stencil as u64);
     let front = [regs[0x4e1], regs[0x4e2], regs[0x4e3], regs[0x4e4]];
-    let back = if regs[0x565] & 1 == 1 { [regs[0x566], regs[0x567], regs[0x568], regs[0x569]] } else { front };
+    let back = if regs[0x565] & 1 == 1 {
+        [regs[0x566], regs[0x567], regs[0x568], regs[0x569]]
+    } else {
+        front
+    };
     let two_sided = regs[0x565] & 1 == 1;
-    for (f, values) in [[0x4e5, 0x4e6, 0x4e7], if two_sided { [0x3d5, 0x3d7, 0x3d6] } else { [0x4e5, 0x4e6, 0x4e7] }].into_iter().enumerate().filter(|_| stencil == 1) {
+    for (f, values) in [
+        [0x4e5, 0x4e6, 0x4e7],
+        if two_sided {
+            [0x3d5, 0x3d7, 0x3d6]
+        } else {
+            [0x4e5, 0x4e6, 0x4e7]
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    .filter(|_| stencil == 1)
+    {
         put(Kind::StencilRef, f as u8, (regs[values[0]] & 0xff) as u64);
-        put(Kind::StencilValueMask, f as u8, (regs[values[1]] & 0xff) as u64);
+        put(
+            Kind::StencilValueMask,
+            f as u8,
+            (regs[values[1]] & 0xff) as u64,
+        );
         put(Kind::StencilMask, f as u8, (regs[values[2]] & 0xff) as u64);
     }
     put(Kind::DepthClamp, 0, regs[reg::VIEW_VOLUME_CLIP_CTRL] as u64);
@@ -365,15 +464,31 @@ pub fn from_registers(regs: &[u32]) -> Vec<(Field, u64)> {
         put(Kind::DepthBoundsMin, 0, regs[0x3e7] as u64);
         put(Kind::DepthBoundsMax, 0, regs[0x3e8] as u64);
     }
-    for (f, s) in [front, back].into_iter().enumerate().filter(|_| stencil == 1) {
+    for (f, s) in [front, back]
+        .into_iter()
+        .enumerate()
+        .filter(|_| stencil == 1)
+    {
         put(Kind::StencilFunc, f as u8, s[3] as u64);
         put(Kind::StencilFail, f as u8, s[0] as u64);
         put(Kind::StencilDepthFail, f as u8, s[1] as u64);
         put(Kind::StencilPass, f as u8, s[2] as u64);
     }
-    put(Kind::CullFace, 0, if regs[0x646] & 1 == 1 { regs[0x648] as u64 } else { 0 });
+    put(
+        Kind::CullFace,
+        0,
+        if regs[0x646] & 1 == 1 {
+            regs[0x648] as u64
+        } else {
+            0
+        },
+    );
     put(Kind::FrontFace, 0, regs[0x647] as u64);
-    put(Kind::PolygonOffsetEnables, 0, ((regs[0x370] & 1) | (regs[0x371] & 1) << 1 | (regs[0x372] & 1) << 2) as u64);
+    put(
+        Kind::PolygonOffsetEnables,
+        0,
+        ((regs[0x370] & 1) | (regs[0x371] & 1) << 1 | (regs[0x372] & 1) << 2) as u64,
+    );
     if regs[0x370..0x373].iter().any(|r| r & 1 == 1) {
         for (i, r) in [0x56f, 0x55b, 0x61f].into_iter().enumerate() {
             put(Kind::PolygonOffset, i as u8, regs[r] as u64);
@@ -395,18 +510,39 @@ pub fn from_registers(regs: &[u32]) -> Vec<(Field, u64)> {
         }
         put(Kind::StreamStride, s, (regs[base] & 0xfff) as u64);
         let instanced = regs[0x620 + s as usize] & 1 == 1;
-        put(Kind::StreamDivisor, s, if instanced { regs[base + 3] as u64 } else { 0 });
+        put(
+            Kind::StreamDivisor,
+            s,
+            if instanced { regs[base + 3] as u64 } else { 0 },
+        );
     }
     for i in 0..4u8 {
         put(Kind::BlendColor, i, regs[0x4c7 + i as usize] as u64);
     }
     let f = |r: usize| f32::from_bits(regs[r]);
-    let (sx, sy, ox, oy) = (f(reg::VIEWPORT_SCALE), f(reg::VIEWPORT_SCALE + 1), f(reg::VIEWPORT_SCALE + 3), f(reg::VIEWPORT_SCALE + 4));
-    for (i, v) in [ox - sx, oy - sy.abs(), 2.0 * sx, 2.0 * sy.abs()].into_iter().enumerate() {
+    let (sx, sy, ox, oy) = (
+        f(reg::VIEWPORT_SCALE),
+        f(reg::VIEWPORT_SCALE + 1),
+        f(reg::VIEWPORT_SCALE + 3),
+        f(reg::VIEWPORT_SCALE + 4),
+    );
+    for (i, v) in [ox - sx, oy - sy.abs(), 2.0 * sx, 2.0 * sy.abs()]
+        .into_iter()
+        .enumerate()
+    {
         put(Kind::Viewport, i as u8, v.round() as i64 as u64);
     }
     let (h, v) = (regs[reg::SCISSOR + 1], regs[reg::SCISSOR + 2]);
-    let scissor = if regs[reg::SCISSOR] & 1 == 1 { [h & 0xffff, v & 0xffff, (h >> 16).saturating_sub(h & 0xffff), (v >> 16).saturating_sub(v & 0xffff)] } else { [0, 0, u32::MAX, u32::MAX] };
+    let scissor = if regs[reg::SCISSOR] & 1 == 1 {
+        [
+            h & 0xffff,
+            v & 0xffff,
+            (h >> 16).saturating_sub(h & 0xffff),
+            (v >> 16).saturating_sub(v & 0xffff),
+        ]
+    } else {
+        [0, 0, u32::MAX, u32::MAX]
+    };
     for (i, x) in scissor.into_iter().enumerate() {
         put(Kind::Scissor, i as u8, x as u64);
     }
@@ -433,7 +569,11 @@ impl Learned {
         self.tables.get(&(kind, value)).map(|s| s.usual)
     }
 
-    pub fn add(&mut self, model: &[(Field, u64)], regs: &[(Field, u64)]) -> Vec<(Field, u64, u64, u64)> {
+    pub fn add(
+        &mut self,
+        model: &[(Field, u64)],
+        regs: &[(Field, u64)],
+    ) -> Vec<(Field, u64, u64, u64)> {
         let regs: HashMap<Field, u64> = regs.iter().copied().collect();
         let mut bad = Vec::new();
         for &(f, v) in model {
@@ -454,7 +594,11 @@ impl Learned {
                     1
                 }
             };
-            let best = seen.counts.iter().find(|c| c.0 == seen.usual).map_or(0, |c| c.1);
+            let best = seen
+                .counts
+                .iter()
+                .find(|c| c.0 == seen.usual)
+                .map_or(0, |c| c.1);
             if (n > best || seen.counts.len() == 1) && seen.usual != r {
                 seen.usual = r;
                 self.generation += 1;
@@ -479,7 +623,8 @@ impl Learned {
     }
 
     pub fn report(&self) -> String {
-        let mut kinds: std::collections::BTreeMap<Kind, Vec<(u64, &Seen)>> = std::collections::BTreeMap::new();
+        let mut kinds: std::collections::BTreeMap<Kind, Vec<(u64, &Seen)>> =
+            std::collections::BTreeMap::new();
         for (&(k, v), seen) in &self.tables {
             kinds.entry(k).or_default().push((v, seen));
         }
@@ -496,8 +641,16 @@ impl Learned {
                     format!("{v:#x}->{}", r.join("|"))
                 })
                 .collect();
-            out += &format!("kirikae:           {k:?}: {}{}
-", shown.join(" "), if rows.len() > 12 { format!(" (+{} values)", rows.len() - 12) } else { String::new() });
+            out += &format!(
+                "kirikae:           {k:?}: {}{}
+",
+                shown.join(" "),
+                if rows.len() > 12 {
+                    format!(" (+{} values)", rows.len() - 12)
+                } else {
+                    String::new()
+                }
+            );
         }
         out
     }

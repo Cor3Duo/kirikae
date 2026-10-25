@@ -113,7 +113,8 @@ impl Cpu {
         let (old_lo, old_hi) = (self.excl_lo, self.excl_hi);
         let p = self.host(addr);
         let stored = if !addr.is_multiple_of(size as u64) {
-            let same = self.load(size.min(8), addr) == old_lo && (size < 16 || self.ld64(addr + 8) == old_hi);
+            let same = self.load(size.min(8), addr) == old_lo
+                && (size < 16 || self.ld64(addr + 8) == old_hi);
             if same {
                 self.store(size.min(8), addr, lo);
                 if size == 16 {
@@ -122,14 +123,22 @@ impl Cpu {
             }
             same
         } else {
-            use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering::SeqCst};
+            use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering::SeqCst};
             // SAFETY: `p` is inside the guest reservation and aligned for the size.
             unsafe {
                 match size {
-                    1 => AtomicU8::from_ptr(p).compare_exchange(old_lo as u8, lo as u8, SeqCst, SeqCst).is_ok(),
-                    2 => AtomicU16::from_ptr(p.cast()).compare_exchange(old_lo as u16, lo as u16, SeqCst, SeqCst).is_ok(),
-                    4 => AtomicU32::from_ptr(p.cast()).compare_exchange(old_lo as u32, lo as u32, SeqCst, SeqCst).is_ok(),
-                    8 => AtomicU64::from_ptr(p.cast()).compare_exchange(old_lo, lo, SeqCst, SeqCst).is_ok(),
+                    1 => AtomicU8::from_ptr(p)
+                        .compare_exchange(old_lo as u8, lo as u8, SeqCst, SeqCst)
+                        .is_ok(),
+                    2 => AtomicU16::from_ptr(p.cast())
+                        .compare_exchange(old_lo as u16, lo as u16, SeqCst, SeqCst)
+                        .is_ok(),
+                    4 => AtomicU32::from_ptr(p.cast())
+                        .compare_exchange(old_lo as u32, lo as u32, SeqCst, SeqCst)
+                        .is_ok(),
+                    8 => AtomicU64::from_ptr(p.cast())
+                        .compare_exchange(old_lo, lo, SeqCst, SeqCst)
+                        .is_ok(),
                     _ => cas128(p, [old_lo, old_hi], [lo, hi]),
                 }
             }

@@ -26,22 +26,39 @@ impl Table {
 
     pub fn replace(&self, addr: u64, f: HostFn) {
         self.replaced.write().unwrap().insert(addr, f);
-        self.any_replaced.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.any_replaced
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn owns(&self, pc: u64) -> bool {
-        (BASE..BASE + 16 * SLOTS).contains(&pc) || (self.any_replaced.load(std::sync::atomic::Ordering::Relaxed) && self.replaced.read().unwrap().contains_key(&pc))
+        (BASE..BASE + 16 * SLOTS).contains(&pc)
+            || (self.any_replaced.load(std::sync::atomic::Ordering::Relaxed)
+                && self.replaced.read().unwrap().contains_key(&pc))
     }
 
     fn get(&self, pc: u64) -> Option<HostFn> {
         if (BASE..BASE + 16 * SLOTS).contains(&pc) {
-            return self.slots.read().unwrap().get(((pc - BASE) / 16) as usize).map(|s| s.1.clone());
+            return self
+                .slots
+                .read()
+                .unwrap()
+                .get(((pc - BASE) / 16) as usize)
+                .map(|s| s.1.clone());
         }
         self.replaced.read().unwrap().get(&pc).cloned()
     }
 
     pub fn name(&self, pc: u64) -> Option<String> {
-        (BASE..BASE + 16 * SLOTS).contains(&pc).then(|| self.slots.read().unwrap().get(((pc - BASE) / 16) as usize).map(|s| s.0.clone())).flatten()
+        (BASE..BASE + 16 * SLOTS)
+            .contains(&pc)
+            .then(|| {
+                self.slots
+                    .read()
+                    .unwrap()
+                    .get(((pc - BASE) / 16) as usize)
+                    .map(|s| s.0.clone())
+            })
+            .flatten()
     }
 }
 
@@ -50,7 +67,8 @@ pub extern "C" fn trampoline(c: &mut Cpu) {
     match c.process().hle.get(pc) {
         Some(f) => f(c),
         None => {
-            c.process().warn_once(format!("hle: no host function at {pc:#x}"));
+            c.process()
+                .warn_once(format!("hle: no host function at {pc:#x}"));
             c.pc = c.x[30];
         }
     }
@@ -63,7 +81,9 @@ pub fn call_guest(c: &mut Cpu, addr: u64, compiled: bool) {
     if compiled {
         match c.process().lookup_compiled(addr) {
             Some(f) => f(c),
-            None => c.process().warn_once(format!("hle: no recompiled function at {addr:#x} to call")),
+            None => c
+                .process()
+                .warn_once(format!("hle: no recompiled function at {addr:#x} to call")),
         }
     }
     crate::process::run_until(c, RETURN, sp);

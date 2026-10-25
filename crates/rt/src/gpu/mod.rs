@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::mem::GuestMemory;
 
@@ -92,7 +92,13 @@ impl Default for Gpu {
             reserved: Mutex::new((0, 0)),
             syncpoints: std::array::from_fn(|_| AtomicU32::new(0)),
             next_syncpoint: AtomicU32::new(16),
-            engines: Mutex::new(Engines { classes: [0; 8], regs: fxhash::FastMap::default(), inline: None, cb_upload: (0, Vec::new()), threed: Default::default() }),
+            engines: Mutex::new(Engines {
+                classes: [0; 8],
+                regs: fxhash::FastMap::default(),
+                inline: None,
+                cb_upload: (0, Vec::new()),
+                threed: Default::default(),
+            }),
             renderer: Mutex::new((None, false)),
             written: Mutex::new(Vec::new()),
             gpu_writes: Default::default(),
@@ -106,7 +112,13 @@ const BIG_PAGE: u64 = 0x2_0000;
 impl Gpu {
     pub fn nvmap_create(&self, size: u64) -> u32 {
         let h = self.next_handle.fetch_add(1, Ordering::Relaxed);
-        self.nvmaps.lock().unwrap().insert(h, NvMap { size, ..NvMap::default() });
+        self.nvmaps.lock().unwrap().insert(
+            h,
+            NvMap {
+                size,
+                ..NvMap::default()
+            },
+        );
         h
     }
 
@@ -156,16 +168,34 @@ impl Gpu {
         let mut maps = self.maps.lock().unwrap();
         MAPS_CHANGED.fetch_add(1, Ordering::Relaxed);
         let end = va + size;
-        let first = maps.range(..va).next_back().filter(|(s, m)| *s + m.size > va).map(|(s, _)| *s).unwrap_or(va);
-        let overlapping: Vec<(u64, Mapping)> = maps.range(first..end).map(|(s, m)| (*s, *m)).collect();
+        let first = maps
+            .range(..va)
+            .next_back()
+            .filter(|(s, m)| *s + m.size > va)
+            .map(|(s, _)| *s)
+            .unwrap_or(va);
+        let overlapping: Vec<(u64, Mapping)> =
+            maps.range(first..end).map(|(s, m)| (*s, *m)).collect();
         for (start, m) in overlapping {
             maps.remove(&start);
             if start < va {
-                maps.insert(start, Mapping { cpu: m.cpu, size: va - start });
+                maps.insert(
+                    start,
+                    Mapping {
+                        cpu: m.cpu,
+                        size: va - start,
+                    },
+                );
             }
             let m_end = start + m.size;
             if m_end > end {
-                maps.insert(end, Mapping { cpu: m.cpu + (end - start), size: m_end - end });
+                maps.insert(
+                    end,
+                    Mapping {
+                        cpu: m.cpu + (end - start),
+                        size: m_end - end,
+                    },
+                );
             }
         }
         maps.insert(va, Mapping { cpu, size });
@@ -178,10 +208,17 @@ impl Gpu {
     }
 
     pub fn translate(&self, va: u64) -> Option<u64> {
-        let (changes, me) = (MAPS_CHANGED.load(Ordering::Acquire), self as *const Self as usize);
+        let (changes, me) = (
+            MAPS_CHANGED.load(Ordering::Acquire),
+            self as *const Self as usize,
+        );
         let slot = mapping_slot(va);
         let hit = LAST_MAPPINGS.with_borrow(|last| {
-            last[slot].filter(|&(n, gpu, start, m)| (n, gpu) == (changes, me) && (start..start + m.size).contains(&va)).map(|(_, _, start, m)| m.cpu + (va - start))
+            last[slot]
+                .filter(|&(n, gpu, start, m)| {
+                    (n, gpu) == (changes, me) && (start..start + m.size).contains(&va)
+                })
+                .map(|(_, _, start, m)| m.cpu + (va - start))
         });
         if hit.is_some() {
             return hit;
@@ -217,12 +254,18 @@ impl Gpu {
 
     pub fn gpu_addresses_of(&self, cpu: u64) -> Vec<u64> {
         let maps = self.maps.lock().unwrap();
-        maps.iter().filter(|(_, m)| m.cpu == cpu).map(|(va, _)| *va).collect()
+        maps.iter()
+            .filter(|(_, m)| m.cpu == cpu)
+            .map(|(va, _)| *va)
+            .collect()
     }
 
     pub fn gpu_mappings_of(&self, cpu: u64) -> Vec<(u64, u64, u64, u64)> {
         let maps = self.maps.lock().unwrap();
-        maps.iter().filter(|(_, m)| (m.cpu..m.cpu + m.size).contains(&cpu)).map(|(va, m)| (va + (cpu - m.cpu), *va, m.cpu, m.size)).collect()
+        maps.iter()
+            .filter(|(_, m)| (m.cpu..m.cpu + m.size).contains(&cpu))
+            .map(|(va, m)| (va + (cpu - m.cpu), *va, m.cpu, m.size))
+            .collect()
     }
 
     fn read(&self, mem: &GuestMemory, va: u64, len: u64) -> Option<Vec<u8>> {
@@ -235,7 +278,9 @@ impl Gpu {
 
     fn write(&self, mem: &GuestMemory, va: u64, bytes: &[u8]) -> bool {
         self.cpu_access(va, bytes.len() as u64);
-        let Some(pieces) = self.pieces(va, bytes.len() as u64) else { return false };
+        let Some(pieces) = self.pieces(va, bytes.len() as u64) else {
+            return false;
+        };
         let mut done = 0;
         for (cpu, n) in pieces {
             if let Some(r) = self.renderer.lock().unwrap().0.as_mut() {
@@ -285,16 +330,35 @@ impl Gpu {
                 continue;
             }
             self.cpu_access(va, words * 4);
-            let plan = if crate::nvn::shadow::ON.load(Ordering::Relaxed) { crate::nvn::shadow::cp_entry(va, words) } else { None };
-            if let Some(p) = plan.as_ref().filter(|_| crate::nvn::exec::ON.load(Ordering::Relaxed))
+            let plan = if crate::nvn::shadow::ON.load(Ordering::Relaxed) {
+                crate::nvn::shadow::cp_entry(va, words)
+            } else {
+                None
+            };
+            if let Some(p) = plan
+                .as_ref()
+                .filter(|_| crate::nvn::exec::ON.load(Ordering::Relaxed))
                 && self.execute(mem, p)
             {
                 continue;
             }
-            let simulated = plan.as_ref().filter(|_| crate::nvn::exec::CHECK.load(Ordering::Relaxed)).and_then(|p| self.simulate(mem, p));
-            let before = (self.stats.draws.load(Ordering::Relaxed), self.stats.clears.load(Ordering::Relaxed));
-            let bytes = self.bytes(mem, va, words * 4).ok_or_else(|| format!("pushbuffer at GPU address {va:#x} is not mapped"))?;
-            let w: Vec<u32> = bytes.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)).collect();
+            let simulated = plan
+                .as_ref()
+                .filter(|_| crate::nvn::exec::CHECK.load(Ordering::Relaxed))
+                .and_then(|p| self.simulate(mem, p));
+            let before = (
+                self.stats.draws.load(Ordering::Relaxed),
+                self.stats.clears.load(Ordering::Relaxed),
+            );
+            let bytes = self
+                .bytes(mem, va, words * 4)
+                .ok_or_else(|| format!("pushbuffer at GPU address {va:#x} is not mapped"))?;
+            let w: Vec<u32> = bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| u32::from_le_bytes(*b))
+                .collect();
             self.run_pushbuffer(mem, &w);
             if crate::nvn::exec::CHECK.load(Ordering::Relaxed) {
                 crate::nvn::exec::segment_done();
@@ -305,11 +369,20 @@ impl Gpu {
                     crate::nvn::exec::checked(&regs, actual, &cbs, &eng.threed.constant_buffers);
                 }
                 drop(eng);
-                let differ = writes.iter().filter(|(at, w)| self.read(mem, **at, 4).is_none_or(|b| u32::from_le_bytes(b[..4].try_into().unwrap()) != **w)).count();
+                let differ = writes
+                    .iter()
+                    .filter(|(at, w)| {
+                        self.read(mem, **at, 4)
+                            .is_none_or(|b| u32::from_le_bytes(b[..4].try_into().unwrap()) != **w)
+                    })
+                    .count();
                 crate::nvn::exec::writes_checked(writes.len(), differ);
             }
             if let Some(plan) = plan {
-                let (draws, clears) = (self.stats.draws.load(Ordering::Relaxed) - before.0, self.stats.clears.load(Ordering::Relaxed) - before.1);
+                let (draws, clears) = (
+                    self.stats.draws.load(Ordering::Relaxed) - before.0,
+                    self.stats.clears.load(Ordering::Relaxed) - before.1,
+                );
                 crate::nvn::shadow::cp_entry_done(plan, draws, clears);
             }
         }
@@ -331,7 +404,9 @@ impl Gpu {
                         eprintln!("kirikae: rendering with Vulkan on {}", r.name);
                         guard.0 = Some(r);
                     }
-                    Err(e) => eprintln!("kirikae: Vulkan is not available ({e}); draws are not rendered"),
+                    Err(e) => {
+                        eprintln!("kirikae: Vulkan is not available ({e}); draws are not rendered")
+                    }
                 }
             }
         }
@@ -367,19 +442,39 @@ impl Gpu {
         guard.0.as_mut()?.read_pixels(cpu, width, height)
     }
 
-    pub fn present(&self, cpu: u64, width: u32, height: u32, flip_h: bool, flip_v: bool) -> vulkan::Presented {
+    pub fn present(
+        &self,
+        cpu: u64,
+        width: u32,
+        height: u32,
+        flip_h: bool,
+        flip_v: bool,
+    ) -> vulkan::Presented {
         let mut guard = self.renderer.lock().unwrap();
-        guard.0.as_mut().map_or(vulkan::Presented::NoSwapchain, |r| r.present(cpu, width, height, flip_h, flip_v))
+        guard
+            .0
+            .as_mut()
+            .map_or(vulkan::Presented::NoSwapchain, |r| {
+                r.present(cpu, width, height, flip_h, flip_v)
+            })
     }
 
     pub fn present_pixels(&self, width: u32, height: u32, pixels: &[u32]) -> vulkan::Presented {
         let mut guard = self.renderer.lock().unwrap();
-        guard.0.as_mut().map_or(vulkan::Presented::NoSwapchain, |r| r.present_pixels(width, height, pixels))
+        guard
+            .0
+            .as_mut()
+            .map_or(vulkan::Presented::NoSwapchain, |r| {
+                r.present_pixels(width, height, pixels)
+            })
     }
 
     pub fn rendered(&self, cpu: u64, width: u32, height: u32) -> bool {
         let guard = self.renderer.lock().unwrap();
-        guard.0.as_ref().is_some_and(|r| r.rendered(cpu, width, height))
+        guard
+            .0
+            .as_ref()
+            .is_some_and(|r| r.rendered(cpu, width, height))
     }
 
     pub fn dump_images(&self, dir: &std::path::Path, tag: u64) {
@@ -389,7 +484,12 @@ impl Gpu {
     }
 
     pub fn render_stats(&self) -> Option<vulkan::RenderStats> {
-        self.renderer.lock().unwrap().0.as_ref().map(|r| r.stats.clone())
+        self.renderer
+            .lock()
+            .unwrap()
+            .0
+            .as_ref()
+            .map(|r| r.stats.clone())
     }
 
     fn run_pushbuffer(&self, mem: &GuestMemory, w: &[u32]) {
@@ -426,12 +526,21 @@ impl Gpu {
         self.flush_cb_upload(mem, eng);
     }
 
-    fn simulate(&self, mem: &GuestMemory, plan: &crate::nvn::shadow::Plan) -> Option<(Vec<u32>, crate::nvn::shadow::Bindings, std::collections::BTreeMap<u64, u32>)> {
+    fn simulate(
+        &self,
+        mem: &GuestMemory,
+        plan: &crate::nvn::shadow::Plan,
+    ) -> Option<(
+        Vec<u32>,
+        crate::nvn::shadow::Bindings,
+        std::collections::BTreeMap<u64, u32>,
+    )> {
         use crate::nvn::exec::Step;
         let eng = self.engines.lock().unwrap();
         let mut regs = eng.regs.get(&CLASS_3D)?.clone();
         let mut cbs = eng.threed.constant_buffers;
-        let steps = crate::nvn::shadow::exec_steps(plan, &regs, &cbs, &|va, len| self.read(mem, va, len))?;
+        let steps =
+            crate::nvn::shadow::exec_steps(plan, &regs, &cbs, &|va, len| self.read(mem, va, len))?;
         let mut writes = std::collections::BTreeMap::new();
         for step in steps {
             match step {
@@ -440,9 +549,23 @@ impl Gpu {
                         regs[r] = regs[r] & !mask | v;
                     }
                 }
-                Step::Bind { group, slot, binding } => cbs[group][slot] = binding,
+                Step::Bind {
+                    group,
+                    slot,
+                    binding,
+                } => cbs[group][slot] = binding,
                 Step::Draw(d) => crate::nvn::exec::expect_draw(regs.clone(), cbs, d),
-                Step::Clear(v) => crate::nvn::exec::expect_draw(regs.clone(), [[None; threed::CB_SLOTS]; 5], threed::Draw { topology: crate::nvn::exec::CLEAR, first: v, count: 0, index_size: None, instance: 0 }),
+                Step::Clear(v) => crate::nvn::exec::expect_draw(
+                    regs.clone(),
+                    [[None; threed::CB_SLOTS]; 5],
+                    threed::Draw {
+                        topology: crate::nvn::exec::CLEAR,
+                        first: v,
+                        count: 0,
+                        index_size: None,
+                        instance: 0,
+                    },
+                ),
                 Step::Write { at, words } => {
                     for (i, w) in words.into_iter().enumerate() {
                         writes.insert(at + 4 * i as u64, w);
@@ -457,9 +580,15 @@ impl Gpu {
         use crate::nvn::exec::Step;
         let mut guard = self.engines.lock().unwrap();
         let eng = &mut *guard;
-        let Some(regs) = eng.regs.get(&CLASS_3D) else { return false };
+        let Some(regs) = eng.regs.get(&CLASS_3D) else {
+            return false;
+        };
         let cbs = eng.threed.constant_buffers;
-        let Some(steps) = crate::nvn::shadow::exec_steps(plan, regs, &cbs, &|va, len| self.read(mem, va, len)) else { return false };
+        let Some(steps) =
+            crate::nvn::shadow::exec_steps(plan, regs, &cbs, &|va, len| self.read(mem, va, len))
+        else {
+            return false;
+        };
         for step in steps {
             match step {
                 Step::Regs(values) => {
@@ -468,7 +597,11 @@ impl Gpu {
                         regs[r] = regs[r] & !mask | v;
                     }
                 }
-                Step::Bind { group, slot, binding } => eng.threed.constant_buffers[group][slot] = binding,
+                Step::Bind {
+                    group,
+                    slot,
+                    binding,
+                } => eng.threed.constant_buffers[group][slot] = binding,
                 Step::Write { at, words } => {
                     let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
                     self.write(mem, at, &bytes);
@@ -501,7 +634,12 @@ impl Gpu {
         if m >= threed::MACRO_CALL && eng.classes[sub as usize] == CLASS_3D {
             let index = (m - threed::MACRO_CALL) / 2;
             if m % 2 == 1
-                && let Some(p) = eng.threed.macros.pending.as_mut().filter(|p| p.index == index)
+                && let Some(p) = eng
+                    .threed
+                    .macros
+                    .pending
+                    .as_mut()
+                    .filter(|p| p.index == index)
             {
                 p.params.push(v);
                 return;
@@ -509,7 +647,11 @@ impl Gpu {
             let mut params = std::mem::take(&mut eng.threed.macros.spare);
             params.clear();
             params.push(v);
-            let previous = eng.threed.macros.pending.replace(threed::PendingMacro { sub, index, params });
+            let previous =
+                eng.threed
+                    .macros
+                    .pending
+                    .replace(threed::PendingMacro { sub, index, params });
             if let Some(p) = previous {
                 self.run_macro(mem, eng, p);
             }
@@ -522,7 +664,10 @@ impl Gpu {
     }
 
     fn run_macro(&self, mem: &GuestMemory, eng: &mut Engines, call: threed::PendingMacro) {
-        let (code, start) = (eng.threed.macros.code.clone(), eng.threed.macros.starts.get(call.index as usize).copied());
+        let (code, start) = (
+            eng.threed.macros.code.clone(),
+            eng.threed.macros.starts.get(call.index as usize).copied(),
+        );
         self.stats.macros.fetch_add(1, Ordering::Relaxed);
         struct Host<'a> {
             gpu: &'a Gpu,
@@ -533,22 +678,44 @@ impl Gpu {
         impl mme::Host for Host<'_> {
             fn write(&mut self, method: u32, value: u32) {
                 if method < threed::MACRO_CALL {
-                    self.gpu.method_direct(self.mem, self.eng, self.sub, method, value);
+                    self.gpu
+                        .method_direct(self.mem, self.eng, self.sub, method, value);
                 }
             }
             fn read(&mut self, method: u32) -> u32 {
-                self.eng.regs.get(&CLASS_3D).and_then(|r| r.get(method as usize)).copied().unwrap_or(0)
+                self.eng
+                    .regs
+                    .get(&CLASS_3D)
+                    .and_then(|r| r.get(method as usize))
+                    .copied()
+                    .unwrap_or(0)
             }
         }
         if let Some(start) = start {
-            let mut host = Host { gpu: self, mem, eng, sub: call.sub };
+            let mut host = Host {
+                gpu: self,
+                mem,
+                eng,
+                sub: call.sub,
+            };
             if let Err(e) = mme::run(&code, start as usize, &call.params, &mut host)
                 && trace()
             {
-                eprintln!("gpu: macro {} failed: {e:?} (params {:x?})", call.index, &call.params[..call.params.len().min(16)]);
+                eprintln!(
+                    "gpu: macro {} failed: {e:?} (params {:x?})",
+                    call.index,
+                    &call.params[..call.params.len().min(16)]
+                );
                 if let Some(dir) = std::env::var_os("KIRIKAE_SHADER_DUMP") {
-                    let bytes: Vec<u8> = code[start as usize..].iter().take(0x200).flat_map(|w| w.to_le_bytes()).collect();
-                    let _ = std::fs::write(std::path::Path::new(&dir).join(format!("macro{}.bin", call.index)), bytes);
+                    let bytes: Vec<u8> = code[start as usize..]
+                        .iter()
+                        .take(0x200)
+                        .flat_map(|w| w.to_le_bytes())
+                        .collect();
+                    let _ = std::fs::write(
+                        std::path::Path::new(&dir).join(format!("macro{}.bin", call.index)),
+                        bytes,
+                    );
                 }
             }
         }
@@ -557,7 +724,9 @@ impl Gpu {
 
     fn method_direct(&self, mem: &GuestMemory, eng: &mut Engines, sub: u32, m: u32, v: u32) {
         let class = eng.classes[sub as usize];
-        if !eng.cb_upload.1.is_empty() && !(class == CLASS_3D && threed::reg::LOAD_CONSTANT_BUFFER.contains(&m)) {
+        if !eng.cb_upload.1.is_empty()
+            && !(class == CLASS_3D && threed::reg::LOAD_CONSTANT_BUFFER.contains(&m))
+        {
             self.flush_cb_upload(mem, eng);
         }
         if m < 0x40 {
@@ -626,22 +795,36 @@ impl Gpu {
         let dst_pitch_layout = launch >> 8 & 1 == 1;
         if !(src_pitch_layout && dst_pitch_layout) {
             if trace() {
-                eprintln!("gpu: dma block-linear launch {launch:#x} src {src:#x} dst {dst:#x} pitch {pitch_in:#x}/{pitch_out:#x} len {len:#x} lines {lines} regs {:x?}", &regs[0x1c0..0x1d0]);
+                eprintln!(
+                    "gpu: dma block-linear launch {launch:#x} src {src:#x} dst {dst:#x} pitch {pitch_in:#x}/{pitch_out:#x} len {len:#x} lines {lines} regs {:x?}",
+                    &regs[0x1c0..0x1d0]
+                );
             }
             if remap {
                 return;
             }
             let side = |pitch_layout: bool, base: u64, at: usize, pitch: u64| {
                 if pitch_layout {
-                    Side::Pitch { base, pitch: if multi_line { pitch } else { 0 } }
+                    Side::Pitch {
+                        base,
+                        pitch: if multi_line { pitch } else { 0 },
+                    }
                 } else {
                     let origin = regs[at + 5];
-                    Side::BlockLinear { base, block_height_log2: regs[at] >> 4 & 0xf, width: regs[at + 1] as u64, x: (origin & 0xffff) as u64, y: (origin >> 16) as u64 }
+                    Side::BlockLinear {
+                        base,
+                        block_height_log2: regs[at] >> 4 & 0xf,
+                        width: regs[at + 1] as u64,
+                        x: (origin & 0xffff) as u64,
+                        y: (origin >> 16) as u64,
+                    }
                 }
             };
             let from = side(src_pitch_layout, src, 0x1ca, pitch_in);
             let to = side(dst_pitch_layout, dst, 0x1c3, pitch_out);
-            let Some(rows) = from.read(self, mem, len, lines) else { return };
+            let Some(rows) = from.read(self, mem, len, lines) else {
+                return;
+            };
             to.write(self, mem, &rows, len, lines);
             return;
         }
@@ -675,8 +858,17 @@ fn runs(x: u64, len: u64) -> impl Iterator<Item = (u64, usize)> {
 }
 
 enum Side {
-    Pitch { base: u64, pitch: u64 },
-    BlockLinear { base: u64, block_height_log2: u32, width: u64, x: u64, y: u64 },
+    Pitch {
+        base: u64,
+        pitch: u64,
+    },
+    BlockLinear {
+        base: u64,
+        block_height_log2: u32,
+        width: u64,
+        x: u64,
+        y: u64,
+    },
 }
 
 impl Side {
@@ -697,14 +889,21 @@ impl Side {
                 }
                 Some(out)
             }
-            Side::BlockLinear { base, block_height_log2, width, x, y } => {
+            Side::BlockLinear {
+                base,
+                block_height_log2,
+                width,
+                x,
+                y,
+            } => {
                 let (start, size) = Self::block_rows(block_height_log2, width, y, lines);
                 gpu.cpu_access(base + start, size);
                 let surface = gpu.bytes(mem, base + start, size)?;
                 let mut out = vec![0u8; (len * lines) as usize];
                 for l in 0..lines {
                     for (i, n) in runs(x, len) {
-                        let o = (block_linear_offset(x + i, y + l, width, block_height_log2) - start) as usize;
+                        let o = (block_linear_offset(x + i, y + l, width, block_height_log2)
+                            - start) as usize;
                         let d = (l * len + i) as usize;
                         if let Some(src) = surface.get(o..o + n) {
                             out[d..d + n].copy_from_slice(src);
@@ -724,13 +923,22 @@ impl Side {
                 }
                 gpu.written_behind(base, pitch * lines.saturating_sub(1) + len);
             }
-            Side::BlockLinear { base, block_height_log2, width, x, y } => {
+            Side::BlockLinear {
+                base,
+                block_height_log2,
+                width,
+                x,
+                y,
+            } => {
                 let (start, size) = Self::block_rows(block_height_log2, width, y, lines);
                 gpu.cpu_access(base + start, size);
-                let Some(mut surface) = gpu.read(mem, base + start, size) else { return };
+                let Some(mut surface) = gpu.read(mem, base + start, size) else {
+                    return;
+                };
                 for l in 0..lines {
                     for (i, n) in runs(x, len) {
-                        let o = (block_linear_offset(x + i, y + l, width, block_height_log2) - start) as usize;
+                        let o = (block_linear_offset(x + i, y + l, width, block_height_log2)
+                            - start) as usize;
                         let d = (l * len + i) as usize;
                         if let Some(dst) = surface.get_mut(o..o + n) {
                             dst.copy_from_slice(&rows[d..d + n]);
@@ -750,9 +958,14 @@ pub(crate) fn trace() -> bool {
         std::env::var_os("KIRIKAE_TRACE_GPU")?;
         let num = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<u64>().ok());
         let from = num("KIRIKAE_TRACE_GPU_FROM").unwrap_or(0);
-        Some((from, num("KIRIKAE_TRACE_GPU_COUNT").map_or(u64::MAX, |n| from.saturating_add(n))))
+        Some((
+            from,
+            num("KIRIKAE_TRACE_GPU_COUNT").map_or(u64::MAX, |n| from.saturating_add(n)),
+        ))
     });
-    range.is_some_and(|(from, to)| (from..to).contains(&crate::display::FRAMES.load(std::sync::atomic::Ordering::Relaxed)))
+    range.is_some_and(|(from, to)| {
+        (from..to).contains(&crate::display::FRAMES.load(std::sync::atomic::Ordering::Relaxed))
+    })
 }
 
 pub fn report_ticks() -> u64 {
@@ -782,7 +995,10 @@ pub fn freeze_frame_time() {
 
 pub fn gpu_ticks() -> u64 {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    START.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_nanos() as u64
 }
 
 pub fn block_linear_offset(x: u64, y: u64, width_bytes: u64, block_height_log2: u32) -> u64 {
@@ -792,7 +1008,10 @@ pub fn block_linear_offset(x: u64, y: u64, width_bytes: u64, block_height_log2: 
     let gob_in_block = (y % (8 * gobs_high)) / 8;
     let (gx, gy) = (x % 64, y % 8);
     let inner = (gx / 32) * 256 + (gy / 2) * 64 + ((gx % 32) / 16) * 32 + (gy % 2) * 16 + (gx % 16);
-    block_row * gobs_wide * gobs_high * 512 + (x / 64) * gobs_high * 512 + gob_in_block * 512 + inner
+    block_row * gobs_wide * gobs_high * 512
+        + (x / 64) * gobs_high * 512
+        + gob_in_block * 512
+        + inner
 }
 
 #[cfg(test)]

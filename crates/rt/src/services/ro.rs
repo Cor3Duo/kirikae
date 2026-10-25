@@ -36,7 +36,8 @@ impl Service for Ro {
                 let Some(image) = p.memory.read(nro, nro_size) else {
                     return Reply::err(RESULT_INVALID_ADDRESS);
                 };
-                let word = |o: usize| u32::from_le_bytes(image[o..o + 4].try_into().unwrap()) as u64;
+                let word =
+                    |o: usize| u32::from_le_bytes(image[o..o + 4].try_into().unwrap()) as u64;
                 if &image[0x10..0x14] != b"NRO0" {
                     return Reply::err(RESULT_INVALID_ADDRESS);
                 }

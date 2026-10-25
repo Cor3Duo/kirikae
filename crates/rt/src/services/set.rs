@@ -3,7 +3,8 @@ use crate::services::stub::unimplemented;
 use crate::services::{Reply, Request, Service};
 
 const LANGUAGES: [&str; 18] = [
-    "ja", "en-US", "fr", "de", "it", "es", "zh-CN", "ko", "nl", "pt", "ru", "zh-TW", "en-GB", "fr-CA", "es-419", "zh-Hans", "zh-Hant", "pt-BR",
+    "ja", "en-US", "fr", "de", "it", "es", "zh-CN", "ko", "nl", "pt", "ru", "zh-TW", "en-GB",
+    "fr-CA", "es-419", "zh-Hans", "zh-Hant", "pt-BR",
 ];
 const OLD_LANGUAGE_COUNT: usize = 15;
 const SYSTEM_LANGUAGE: &str = "en-US";
@@ -26,19 +27,26 @@ impl Service for Set {
         match req.cmd {
             0 => Reply::ok().u64(language_code(SYSTEM_LANGUAGE)),
             1 | 5 => {
-                let all = if req.cmd == 1 { OLD_LANGUAGE_COUNT } else { LANGUAGES.len() };
-                let Some(out) = req.out_buf(0) else { return Reply::ok().u32(0) };
+                let all = if req.cmd == 1 {
+                    OLD_LANGUAGE_COUNT
+                } else {
+                    LANGUAGES.len()
+                };
+                let Some(out) = req.out_buf(0) else {
+                    return Reply::ok().u32(0);
+                };
                 let n = all.min(out.size as usize / 8);
-                let codes: Vec<u8> = LANGUAGES[..n].iter().flat_map(|l| language_code(l).to_le_bytes()).collect();
+                let codes: Vec<u8> = LANGUAGES[..n]
+                    .iter()
+                    .flat_map(|l| language_code(l).to_le_bytes())
+                    .collect();
                 c.process().memory.write(out.addr, &codes);
                 Reply::ok().u32(n as u32)
             }
-            2 => {
-                match LANGUAGES.get(req.u32(0) as usize) {
-                    Some(l) => Reply::ok().u64(language_code(l)),
-                    None => Reply::err(RESULT_INVALID_LANGUAGE),
-                }
-            }
+            2 => match LANGUAGES.get(req.u32(0) as usize) {
+                Some(l) => Reply::ok().u64(language_code(l)),
+                None => Reply::err(RESULT_INVALID_LANGUAGE),
+            },
             3 => Reply::ok().u32(OLD_LANGUAGE_COUNT as u32),
             4 => Reply::ok().u32(REGION_USA),
             6 => Reply::ok().u32(LANGUAGES.len() as u32),

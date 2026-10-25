@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::cpu::Cpu;
-use crate::kernel::{KObject, Session};
+use crate::kernel::{GuestSession, KObject, SendError, Session};
 use crate::services::{Buf, Reply, Request, Service};
 
 pub const SFCI: u32 = u32::from_le_bytes(*b"SFCI");
@@ -37,13 +37,23 @@ pub struct Hipc {
 }
 
 fn word(msg: &[u8], i: usize) -> Result<u32, &'static str> {
-    msg.get(i * 4..i * 4 + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).ok_or("message is truncated")
+    msg.get(i * 4..i * 4 + 4)
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+        .ok_or("message is truncated")
 }
 
 pub fn parse_hipc(msg: &[u8]) -> Result<Hipc, &'static str> {
     let (h0, h1) = (word(msg, 0)?, word(msg, 1)?);
-    let mut m = Hipc { kind: h0 as u16, ..Hipc::default() };
-    let (nx, na, nb, nw) = ((h0 >> 16) & 0xf, (h0 >> 20) & 0xf, (h0 >> 24) & 0xf, (h0 >> 28) & 0xf);
+    let mut m = Hipc {
+        kind: h0 as u16,
+        ..Hipc::default()
+    };
+    let (nx, na, nb, nw) = (
+        (h0 >> 16) & 0xf,
+        (h0 >> 20) & 0xf,
+        (h0 >> 24) & 0xf,
+        (h0 >> 28) & 0xf,
+    );
     let ndata = (h1 & 0x3ff) as usize;
     let recv_mode = (h1 >> 10) & 0xf;
     let recv_offset = ((h1 >> 20) & 0x7ff) as usize;
@@ -67,26 +77,44 @@ pub fn parse_hipc(msg: &[u8]) -> Result<Hipc, &'static str> {
     for _ in 0..nx {
         let (d0, d1) = (word(msg, i)?, word(msg, i + 1)?);
         let addr = d1 as u64 | (((d0 >> 12) & 0xf) as u64) << 32 | (((d0 >> 6) & 0x7) as u64) << 36;
-        m.x.push(Buf { addr, size: (d0 >> 16) as u64 });
+        m.x.push(Buf {
+            addr,
+            size: (d0 >> 16) as u64,
+        });
         i += 2;
     }
     for (count, list) in [(na, &mut m.a), (nb, &mut m.b), (nw, &mut m.w)] {
         for _ in 0..count {
             let (d0, d1, d2) = (word(msg, i)?, word(msg, i + 1)?, word(msg, i + 2)?);
-            let addr = d1 as u64 | (((d2 >> 28) & 0xf) as u64) << 32 | (((d2 >> 2) & 0x7) as u64) << 36;
+            let addr =
+                d1 as u64 | (((d2 >> 28) & 0xf) as u64) << 32 | (((d2 >> 2) & 0x7) as u64) << 36;
             let size = d0 as u64 | (((d2 >> 24) & 0xf) as u64) << 32;
             list.push(Buf { addr, size });
             i += 3;
         }
     }
     m.data_offset = i * 4;
-    m.data = msg.get(i * 4..(i + ndata) * 4).ok_or("data words run past the message")?.to_vec();
+    m.data = msg
+        .get(i * 4..(i + ndata) * 4)
+        .ok_or("data words run past the message")?
+        .to_vec();
     if recv_mode >= 2 {
-        let count = if recv_mode == 2 { 1 } else { recv_mode as usize - 2 };
-        let mut j = if recv_offset != 0 { recv_offset } else { i + ndata };
+        let count = if recv_mode == 2 {
+            1
+        } else {
+            recv_mode as usize - 2
+        };
+        let mut j = if recv_offset != 0 {
+            recv_offset
+        } else {
+            i + ndata
+        };
         for _ in 0..count {
             let (e0, e1) = (word(msg, j)?, word(msg, j + 1)?);
-            m.c.push(Buf { addr: e0 as u64 | ((e1 & 0xffff) as u64) << 32, size: (e1 >> 16) as u64 });
+            m.c.push(Buf {
+                addr: e0 as u64 | ((e1 & 0xffff) as u64) << 32,
+                size: (e1 >> 16) as u64,
+            });
             j += 2;
         }
     }
@@ -101,7 +129,9 @@ pub struct Cmif {
 }
 
 fn u32_in(b: &[u8], off: usize) -> Result<u32, &'static str> {
-    b.get(off..off + 4).map(|s| u32::from_le_bytes(s.try_into().unwrap())).ok_or("CMIF payload is truncated")
+    b.get(off..off + 4)
+        .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
+        .ok_or("CMIF payload is truncated")
 }
 
 pub fn parse_cmif(m: &Hipc, domain: bool) -> Result<Cmif, &'static str> {
@@ -110,19 +140,33 @@ pub fn parse_cmif(m: &Hipc, domain: bool) -> Result<Cmif, &'static str> {
     let mut dom = None;
     if domain {
         let hdr = p.get(..16).ok_or("domain header is truncated")?;
-        let (kind, nin, size) = (hdr[0], hdr[1] as usize, u16::from_le_bytes([hdr[2], hdr[3]]) as usize);
+        let (kind, nin, size) = (
+            hdr[0],
+            hdr[1] as usize,
+            u16::from_le_bytes([hdr[2], hdr[3]]) as usize,
+        );
         let object = u32_in(hdr, 4)?;
         if kind == DOMAIN_CLOSE {
-            return Ok(Cmif { domain: Some((kind, object, Vec::new())), cmd: 0, args: Vec::new() });
+            return Ok(Cmif {
+                domain: Some((kind, object, Vec::new())),
+                cmd: 0,
+                args: Vec::new(),
+            });
         }
-        let objects = (0..nin).map(|k| u32_in(p, 16 + size + 4 * k)).collect::<Result<Vec<_>, _>>()?;
+        let objects = (0..nin)
+            .map(|k| u32_in(p, 16 + size + 4 * k))
+            .collect::<Result<Vec<_>, _>>()?;
         dom = Some((kind, object, objects));
         p = p.get(16..16 + size).ok_or("domain payload is truncated")?;
     }
     if u32_in(p, 0)? != SFCI {
         return Err("missing SFCI magic");
     }
-    Ok(Cmif { domain: dom, cmd: u32_in(p, 8)?, args: p.get(16..).unwrap_or(&[]).to_vec() })
+    Ok(Cmif {
+        domain: dom,
+        cmd: u32_in(p, 8)?,
+        args: p.get(16..).unwrap_or(&[]).to_vec(),
+    })
 }
 
 fn push_words(out: &mut Vec<u8>, words: &[u32]) {
@@ -136,14 +180,23 @@ fn frame(copy: &[u32], moves: &[u32], data_words: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(0x100);
     push_words(&mut out, &[0, data_words as u32 | (special as u32) << 31]);
     if special {
-        push_words(&mut out, &[(copy.len() as u32) << 1 | (moves.len() as u32) << 5]);
+        push_words(
+            &mut out,
+            &[(copy.len() as u32) << 1 | (moves.len() as u32) << 5],
+        );
         push_words(&mut out, copy);
         push_words(&mut out, moves);
     }
     out
 }
 
-pub fn encode_cmif(result: u32, data: &[u8], copy: &[u32], moves: &[u32], domain_objects: Option<&[u32]>) -> Vec<u8> {
+pub fn encode_cmif(
+    result: u32,
+    data: &[u8],
+    copy: &[u32],
+    moves: &[u32],
+    domain_objects: Option<&[u32]>,
+) -> Vec<u8> {
     let mut payload = Vec::new();
     if let Some(ids) = domain_objects {
         push_words(&mut payload, &[ids.len() as u32, 0, 0, 0]);
@@ -192,10 +245,19 @@ fn request(m: &Hipc, cmd: u32, args: Vec<u8>, objects: Vec<u32>) -> Request {
 }
 
 fn new_session(c: &Cpu, object: Arc<dyn Service>) -> u32 {
-    c.process().handles.lock().unwrap().insert(KObject::Session(Session::new(object)))
+    c.process()
+        .handles
+        .lock()
+        .unwrap()
+        .insert(KObject::Session(Session::new(object)))
 }
 
-fn call(c: &mut Cpu, object: &Arc<dyn Service>, req: &Request, domain: Option<&Arc<Session>>) -> (Reply, Vec<u32>) {
+fn call(
+    c: &mut Cpu,
+    object: &Arc<dyn Service>,
+    req: &Request,
+    domain: Option<&Arc<Session>>,
+) -> (Reply, Vec<u32>) {
     let p = c.process();
     let name = object.name();
     p.log_ipc(format!("{name} cmd {}", req.cmd));
@@ -221,14 +283,20 @@ fn control(c: &mut Cpu, session: &Arc<Session>, cmd: u32, args: &[u8]) -> Reply 
     match cmd {
         0 => Reply::ok().u32(session.convert_to_domain()),
         1 => {
-            let id = args.get(..4).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()));
+            let id = args
+                .get(..4)
+                .map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()));
             match session.domain_object(id) {
                 Some(o) => Reply::ok().move_handle(new_session(c, o)),
                 None => Reply::err(RESULT_BAD_MESSAGE),
             }
         }
         2 | 4 => {
-            let h = p.handles.lock().unwrap().insert(KObject::Session(session.clone()));
+            let h = p
+                .handles
+                .lock()
+                .unwrap()
+                .insert(KObject::Session(session.clone()));
             Reply::ok().move_handle(h)
         }
         3 => Reply::ok().bytes(&POINTER_BUFFER_SIZE.to_le_bytes()),
@@ -240,26 +308,120 @@ pub fn send_sync_request(c: &mut Cpu, handle: u32, addr: u64, size: u64) -> u64 
     let _prof = crate::prof::enter(crate::prof::Cat::Ipc);
     let p = c.process();
     let Some(session) = p.handles.lock().unwrap().session(handle) else {
-        p.warn_once(format!("SendSyncRequest on invalid handle {handle:#x} from {}", p.describe(c.x[30])));
+        p.warn_once(format!(
+            "SendSyncRequest on invalid handle {handle:#x} from {}",
+            p.describe(c.x[30])
+        ));
         return RESULT_INVALID_HANDLE;
     };
-    let Some(msg) = p.memory.read(addr, size) else { return RESULT_INVALID_HANDLE };
+    if session.guest_server_link().is_some() {
+        p.warn_once(format!(
+            "SendSyncRequest on the server end of a guest session from {}",
+            p.describe(c.x[30])
+        ));
+        return RESULT_INVALID_HANDLE;
+    }
+    let Some(msg) = p.memory.read(addr, size) else {
+        return crate::horizon::RESULT_INVALID_POINTER;
+    };
+    if let Some(link) = session.guest_client_link() {
+        return send_to_guest_server(c, &link, addr, size, msg);
+    }
     let response = match respond(c, handle, &session, &msg) {
         Ok(r) => r,
         Err(why) => {
-            p.warn_once(format!("malformed IPC message ({why}) from {}", p.describe(c.x[30])));
+            p.warn_once(format!(
+                "malformed IPC message ({why}) from {}",
+                p.describe(c.x[30])
+            ));
             encode_cmif(RESULT_BAD_MESSAGE, &[], &[], &[], None)
         }
     };
     if response.len() as u64 > size {
-        p.warn_once(format!("IPC response of {} bytes does not fit the {size}-byte message buffer", response.len()));
+        p.warn_once(format!(
+            "IPC response of {} bytes does not fit the {size}-byte message buffer",
+            response.len()
+        ));
         return RESULT_INVALID_HANDLE;
     }
     p.memory.write(addr, &response);
     0
 }
 
-fn respond(c: &mut Cpu, handle: u32, session: &Arc<Session>, msg: &[u8]) -> Result<Vec<u8>, &'static str> {
+/// `svcSendSyncRequest` on the client end of a guest session pair. The request
+/// goes to the rendezvous ([`GuestSession`]) and the caller blocks until the
+/// server replies, the server end is closed (`0xf601`) or the thread is
+/// cancelled (`0xec01`). A host server uses the same three calls
+/// (`take_request`, `post_reply`) from its own thread.
+fn send_to_guest_server(
+    c: &mut Cpu,
+    link: &GuestSession,
+    addr: u64,
+    size: u64,
+    msg: Vec<u8>,
+) -> u64 {
+    use crate::horizon::{
+        RESULT_BUSY, RESULT_CANCELLED, RESULT_INVALID_POINTER, RESULT_REMOTE_DEAD,
+    };
+    use std::sync::atomic::Ordering;
+
+    let p = c.process();
+    match link.send(msg) {
+        Ok(()) => {}
+        Err(SendError::Busy) => return RESULT_BUSY,
+        Err(SendError::RemoteDead) => return RESULT_REMOTE_DEAD,
+    }
+    let me = c.thread.clone();
+    let what = || {
+        format!(
+            "SendSyncRequest on a guest session from {}",
+            p.describe(c.x[30])
+        )
+    };
+    let ended = crate::sched::block(c, -1, what, |_| {
+        if me.cancelled.swap(false, Ordering::Relaxed) {
+            return Some(Err(RESULT_CANCELLED));
+        }
+        if let Some(reply) = link.take_reply() {
+            return Some(Ok(reply));
+        }
+        if !link.server_open() {
+            return Some(Err(RESULT_REMOTE_DEAD));
+        }
+        None
+    });
+    match ended {
+        Some(Ok(reply)) => {
+            if reply.len() as u64 > size {
+                p.warn_once(format!(
+                    "a guest server replied with {} bytes into a {size}-byte buffer",
+                    reply.len()
+                ));
+                return RESULT_INVALID_POINTER;
+            }
+            if p.memory.write(addr, &reply) {
+                0
+            } else {
+                RESULT_INVALID_POINTER
+            }
+        }
+        Some(Err(result)) => {
+            link.withdraw();
+            result
+        }
+        None => {
+            link.withdraw();
+            RESULT_CANCELLED
+        }
+    }
+}
+
+fn respond(
+    c: &mut Cpu,
+    handle: u32,
+    session: &Arc<Session>,
+    msg: &[u8],
+) -> Result<Vec<u8>, &'static str> {
     let m = parse_hipc(msg)?;
     match m.kind {
         TYPE_CLOSE => {
@@ -270,12 +432,23 @@ fn respond(c: &mut Cpu, handle: u32, session: &Arc<Session>, msg: &[u8]) -> Resu
             let object = session.object().ok_or("session has no object")?;
             let req = request(&m, (k - TYPE_TIPC_BASE) as u32, m.data.clone(), Vec::new());
             let (r, _) = call(c, &object, &req, None);
-            Ok(encode_tipc(r.result, &r.data, &r.copy_handles, &r.move_handles))
+            Ok(encode_tipc(
+                r.result,
+                &r.data,
+                &r.copy_handles,
+                &r.move_handles,
+            ))
         }
         TYPE_CONTROL | TYPE_CONTROL_CTX => {
             let cmif = parse_cmif(&m, false)?;
             let r = control(c, session, cmif.cmd, &cmif.args);
-            Ok(encode_cmif(r.result, &r.data, &r.copy_handles, &r.move_handles, None))
+            Ok(encode_cmif(
+                r.result,
+                &r.data,
+                &r.copy_handles,
+                &r.move_handles,
+                None,
+            ))
         }
         TYPE_REQUEST | TYPE_REQUEST_CTX => {
             let domain = session.is_domain();
@@ -283,8 +456,19 @@ fn respond(c: &mut Cpu, handle: u32, session: &Arc<Session>, msg: &[u8]) -> Resu
             match cmif.domain {
                 None => {
                     let object = session.object().ok_or("session has no object")?;
-                    let (r, _) = call(c, &object, &request(&m, cmif.cmd, cmif.args, Vec::new()), None);
-                    Ok(encode_cmif(r.result, &r.data, &r.copy_handles, &r.move_handles, None))
+                    let (r, _) = call(
+                        c,
+                        &object,
+                        &request(&m, cmif.cmd, cmif.args, Vec::new()),
+                        None,
+                    );
+                    Ok(encode_cmif(
+                        r.result,
+                        &r.data,
+                        &r.copy_handles,
+                        &r.move_handles,
+                        None,
+                    ))
                 }
                 Some((DOMAIN_CLOSE, id, _)) => {
                     session.domain_remove(id);
@@ -292,11 +476,23 @@ fn respond(c: &mut Cpu, handle: u32, session: &Arc<Session>, msg: &[u8]) -> Resu
                 }
                 Some((DOMAIN_SEND, id, objects)) => {
                     let Some(object) = session.domain_object(id) else {
-                        c.process().warn_once(format!("domain request to unknown object {id}"));
+                        c.process()
+                            .warn_once(format!("domain request to unknown object {id}"));
                         return Ok(encode_cmif(RESULT_BAD_MESSAGE, &[], &[], &[], Some(&[])));
                     };
-                    let (r, ids) = call(c, &object, &request(&m, cmif.cmd, cmif.args, objects), Some(session));
-                    Ok(encode_cmif(r.result, &r.data, &r.copy_handles, &r.move_handles, Some(&ids)))
+                    let (r, ids) = call(
+                        c,
+                        &object,
+                        &request(&m, cmif.cmd, cmif.args, objects),
+                        Some(session),
+                    );
+                    Ok(encode_cmif(
+                        r.result,
+                        &r.data,
+                        &r.copy_handles,
+                        &r.move_handles,
+                        Some(&ids),
+                    ))
                 }
                 Some(_) => Err("unknown domain message type"),
             }
@@ -309,7 +505,14 @@ fn respond(c: &mut Cpu, handle: u32, session: &Arc<Session>, msg: &[u8]) -> Resu
 pub mod client {
     use super::*;
 
-    pub fn cmif(kind: u16, cmd: u32, args: &[u8], domain_object: Option<u32>, pid: bool, copy: &[u32]) -> Vec<u8> {
+    pub fn cmif(
+        kind: u16,
+        cmd: u32,
+        args: &[u8],
+        domain_object: Option<u32>,
+        pid: bool,
+        copy: &[u32],
+    ) -> Vec<u8> {
         let mut payload = Vec::new();
         let mut body = Vec::new();
         push_words(&mut body, &[SFCI, 1, cmd, 0]);
@@ -324,7 +527,10 @@ pub mod client {
         let data_words = (16 + payload.len()).div_ceil(4);
         let special = pid || !copy.is_empty();
         let mut out = Vec::new();
-        push_words(&mut out, &[kind as u32, data_words as u32 | (special as u32) << 31]);
+        push_words(
+            &mut out,
+            &[kind as u32, data_words as u32 | (special as u32) << 31],
+        );
         if special {
             push_words(&mut out, &[pid as u32 | (copy.len() as u32) << 1]);
             if pid {
@@ -359,7 +565,14 @@ mod tests {
 
     #[test]
     fn request_round_trip() {
-        let msg = client::cmif(TYPE_REQUEST, 1, &0x3a6d73u64.to_le_bytes(), None, true, &[0x1234]);
+        let msg = client::cmif(
+            TYPE_REQUEST,
+            1,
+            &0x3a6d73u64.to_le_bytes(),
+            None,
+            true,
+            &[0x1234],
+        );
         let m = parse_hipc(&msg).unwrap();
         assert_eq!(m.kind, TYPE_REQUEST);
         assert_eq!(m.pid, Some(0));
@@ -391,7 +604,10 @@ mod tests {
 
         let r = encode_tipc(0, &[], &[], &[0x20009]);
         let m = parse_hipc(&r).unwrap();
-        assert_eq!((m.move_handles.clone(), &m.data[..4]), (vec![0x20009], &[0u8; 4][..]));
+        assert_eq!(
+            (m.move_handles.clone(), &m.data[..4]),
+            (vec![0x20009], &[0u8; 4][..])
+        );
     }
 
     #[test]
@@ -401,7 +617,19 @@ mod tests {
         let words = [0x0011_0004u32, 0, x0, 0x2345_6780, 0x100, 0x8000_0000, a2];
         let msg: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
         let m = parse_hipc(&msg).unwrap();
-        assert_eq!(m.x, vec![Buf { addr: 0x1_2345_6780, size: 0x40 }]);
-        assert_eq!(m.a, vec![Buf { addr: 0x1_8000_0000, size: 0x100 }]);
+        assert_eq!(
+            m.x,
+            vec![Buf {
+                addr: 0x1_2345_6780,
+                size: 0x40
+            }]
+        );
+        assert_eq!(
+            m.a,
+            vec![Buf {
+                addr: 0x1_8000_0000,
+                size: 0x100
+            }]
+        );
     }
 }

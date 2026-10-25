@@ -1,8 +1,19 @@
+pub mod buffers;
 pub mod encode;
+pub mod error;
 pub mod exec;
+pub mod formats;
+pub mod host;
+pub mod objects;
+pub mod pools;
+pub mod record;
+pub mod replay;
 pub mod resources;
+pub mod samplers;
 pub mod shadow;
 pub mod state;
+pub mod textures;
+pub mod va;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -29,6 +40,11 @@ pub fn install(p: &'static Process) {
             encode::ON.store(true, Ordering::Relaxed);
             true
         }
+        Some("record") => {
+            record::ON.store(true, Ordering::Relaxed);
+            replay::ACTIVE.store(true, Ordering::Relaxed);
+            false
+        }
         Some("exec") => {
             exec::ON.store(true, Ordering::Relaxed);
             true
@@ -43,7 +59,14 @@ pub fn install(p: &'static Process) {
         p.warn_once("nvn: the game exports no nvnBootstrapLoader".into());
         return;
     };
-    let trace = TRACE.get_or_init(|| Arc::new(Trace { shadow, ..Default::default() })).clone();
+    let trace = TRACE
+        .get_or_init(|| {
+            Arc::new(Trace {
+                shadow,
+                ..Default::default()
+            })
+        })
+        .clone();
     shadow::ON.store(shadow, Ordering::Relaxed);
     p.hle.replace(
         boot,
@@ -77,7 +100,12 @@ fn wrap(p: &'static Process, trace: &Arc<Trace>, name: &str, real: u64) -> u64 {
         )
     } else {
         let calls = Arc::new(AtomicU64::new(0));
-        trace.functions.lock().unwrap().push((name.to_string(), calls.clone()));
+        trace
+            .functions
+            .lock()
+            .unwrap()
+            .push((name.to_string(), calls.clone()));
+        let hosted = host::proc(name);
         match shadow::hook(name).filter(|_| trace.shadow) {
             Some(hook) => {
                 let trace = trace.clone();
@@ -85,7 +113,15 @@ fn wrap(p: &'static Process, trace: &Arc<Trace>, name: &str, real: u64) -> u64 {
                     name,
                     Arc::new(move |c| {
                         calls.fetch_add(1, Ordering::Relaxed);
-                        shadow::run(hook, c, real, &|n| trace.real.lock().unwrap().get(n).copied());
+                        if let Some(proc) = hosted
+                            && host::apply(proc, c, real)
+                        {
+                            c.pc = c.x[30];
+                            return;
+                        }
+                        shadow::run(hook, c, real, &|n| {
+                            trace.real.lock().unwrap().get(n).copied()
+                        });
                     }),
                 )
             }
@@ -104,7 +140,15 @@ fn wrap(p: &'static Process, trace: &Arc<Trace>, name: &str, real: u64) -> u64 {
                 name,
                 Arc::new(move |c| {
                     calls.fetch_add(1, Ordering::Relaxed);
-                    c.pc = real;
+                    let took = match hosted {
+                        Some(proc) => host::apply(proc, c, real),
+                        None => false,
+                    };
+                    if took {
+                        c.pc = c.x[30];
+                    } else {
+                        c.pc = real;
+                    }
                 }),
             ),
         }
@@ -118,6 +162,8 @@ pub fn report(frames: u64) {
     shadow::report();
     encode::report();
     exec::report();
+    host::report();
+    replay::report(frames);
     static LAST: Mutex<Vec<u64>> = Mutex::new(Vec::new());
     let functions = trace.functions.lock().unwrap();
     let mut last = LAST.lock().unwrap();
@@ -131,15 +177,34 @@ pub fn report(frames: u64) {
         })
         .collect();
     let total: u64 = rows.iter().map(|r| r.0).sum();
-    let used = functions.iter().filter(|f| f.1.load(Ordering::Relaxed) > 0).count();
+    let used = functions
+        .iter()
+        .filter(|f| f.1.load(Ordering::Relaxed) > 0)
+        .count();
     rows.sort_by_key(|r| std::cmp::Reverse(r.0));
     let per = |n: u64| n as f64 / frames.max(1) as f64;
-    let top: Vec<String> = rows.iter().take(25).filter(|r| r.0 > 0).map(|(n, name)| format!("{} {:.0}", name.trim_start_matches("nvn"), per(*n))).collect();
-    eprintln!("kirikae:         nvn: {:.0} calls per frame, {used} of {} functions used: {}", per(total), functions.len(), top.join(", "));
+    let top: Vec<String> = rows
+        .iter()
+        .take(25)
+        .filter(|r| r.0 > 0)
+        .map(|(n, name)| format!("{} {:.0}", name.trim_start_matches("nvn"), per(*n)))
+        .collect();
+    eprintln!(
+        "kirikae:         nvn: {:.0} calls per frame, {used} of {} functions used: {}",
+        per(total),
+        functions.len(),
+        top.join(", ")
+    );
     if let Ok(exe) = std::env::current_exe() {
-        let mut all: Vec<(u64, &str)> = functions.iter().map(|(name, calls)| (calls.load(Ordering::Relaxed), name.as_str())).collect();
+        let mut all: Vec<(u64, &str)> = functions
+            .iter()
+            .map(|(name, calls)| (calls.load(Ordering::Relaxed), name.as_str()))
+            .collect();
         all.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
-        let text: String = all.iter().map(|(n, name)| format!("{n:>12} {name}\n")).collect();
+        let text: String = all
+            .iter()
+            .map(|(n, name)| format!("{n:>12} {name}\n"))
+            .collect();
         let _ = std::fs::write(exe.with_extension("nvn.txt"), text);
     }
 }

@@ -1,17 +1,68 @@
 use ash::vk;
 use kirikae_maxwell::{Kind, Stage};
 
-use crate::gpu::formats::ColorFormat;
-use crate::gpu::threed::{CB_SLOTS, Draw, address, reg};
-use crate::gpu::{Gpu, formats};
-use crate::mem::GuestMemory;
 use super::Renderer;
 use super::buffers::instanced_stream;
 use super::descriptors::{Descriptor, FRAGMENT_BASE, STORAGE_OFFSET, VERTEX_BASE};
 use super::images::{IDENTITY, ImageKey, aspect_of, color_surface};
-use super::pipeline::alpha_test_func;
+use super::pipeline::{ShaderModule, alpha_test_func};
+use crate::gpu::formats::ColorFormat;
+use crate::gpu::threed::{CB_SLOTS, Draw, address, reg};
+use crate::gpu::{Gpu, formats};
+use crate::mem::GuestMemory;
 
 pub(super) type TargetAsk = (u64, vk::Format, u32, u32, u64);
+
+/// What to do with a draw whose shader still has untranslated instructions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Unsupported {
+    /// Every instruction was translated.
+    Complete,
+    /// Something is missing, but `KIRIKAE_DRAW_PARTIAL` asks to draw anyway.
+    Partial,
+    /// Something is missing and there is no opt-in: skip the draw.
+    Skip,
+}
+
+pub(super) fn unsupported_policy(shader: &ShaderModule, partial: bool) -> Unsupported {
+    match (shader.shader.unsupported.is_empty(), partial) {
+        (true, _) => Unsupported::Complete,
+        (false, true) => Unsupported::Partial,
+        (false, false) => Unsupported::Skip,
+    }
+}
+
+/// Applies [`unsupported_policy`]: logs the first report per shader, records
+/// the gap in coverage and tells the caller whether the draw may run.
+pub(super) fn admit_shader(shader: &ShaderModule, partial: bool) -> Result<(), String> {
+    let policy = unsupported_policy(shader, partial);
+    if policy == Unsupported::Complete {
+        return Ok(());
+    }
+    let why = format!(
+        "shader {:#x} uses {:?}",
+        shader.va, shader.shader.unsupported
+    );
+    if shader.report_once() {
+        match policy {
+            Unsupported::Partial => eprintln!(
+                "kirikae: drawing {why} anyway (KIRIKAE_DRAW_PARTIAL); its output may be wrong"
+            ),
+            _ => eprintln!(
+                "kirikae: draw skipped: {why}; set KIRIKAE_DRAW_PARTIAL=1 to draw it anyway"
+            ),
+        }
+    }
+    crate::usage::draw_untranslated(
+        shader.va,
+        &shader.shader.unsupported,
+        policy == Unsupported::Partial,
+    );
+    match policy {
+        Unsupported::Skip => Err(why),
+        _ => Ok(()),
+    }
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct RenderTargets {
@@ -59,7 +110,14 @@ pub(super) fn changed<T: PartialEq>(slot: &mut Option<T>, v: T) -> bool {
 }
 
 impl Renderer {
-    pub fn dispatch(&mut self, gpu: &Gpu, mem: &GuestMemory, regs: &[u32], qmd: &crate::gpu::compute::Qmd, va: u64) -> bool {
+    pub fn dispatch(
+        &mut self,
+        gpu: &Gpu,
+        mem: &GuestMemory,
+        regs: &[u32],
+        qmd: &crate::gpu::compute::Qmd,
+        va: u64,
+    ) -> bool {
         let start = std::time::Instant::now();
         let ok = self.try_dispatch(gpu, mem, regs, qmd, va);
         self.stats.draw_time += start.elapsed();
@@ -80,19 +138,37 @@ impl Renderer {
         ok.is_ok()
     }
 
-    pub(super) fn try_dispatch(&mut self, gpu: &Gpu, mem: &GuestMemory, regs: &[u32], qmd: &crate::gpu::compute::Qmd, va: u64) -> Result<(), String> {
+    pub(super) fn try_dispatch(
+        &mut self,
+        gpu: &Gpu,
+        mem: &GuestMemory,
+        regs: &[u32],
+        qmd: &crate::gpu::compute::Qmd,
+        va: u64,
+    ) -> Result<(), String> {
         self.guest = mem;
         self.split();
         let mut cbufs = [None; CB_SLOTS];
         cbufs[..crate::gpu::compute::QMD_CBUFS].copy_from_slice(&qmd.cbufs);
-        let cs = self.shader(gpu, mem, regs, va, Stage::Compute, cbufs, [Kind::Float; 32], [Kind::Float; 8], Some(qmd))?;
-        if !cs.shader.unsupported.is_empty() && crate::env_var!("KIRIKAE_DRAW_PARTIAL").is_none() {
-            return Err(format!("shader {:#x} uses {:?}", cs.va, cs.shader.unsupported));
-        }
+        let cs = self.shader(
+            gpu,
+            mem,
+            regs,
+            va,
+            Stage::Compute,
+            cbufs,
+            [Kind::Float; 32],
+            [Kind::Float; 8],
+            Some(qmd),
+        )?;
+        admit_shader(&cs, crate::env_var!("KIRIKAE_DRAW_PARTIAL").is_some())?;
         let mut bindings = Vec::new();
         Self::shader_bindings(&cs, VERTEX_BASE, &mut bindings);
         if cs.shader.probe {
-            bindings.push((VERTEX_BASE + STORAGE_OFFSET + 16, vk::DescriptorType::STORAGE_BUFFER));
+            bindings.push((
+                VERTEX_BASE + STORAGE_OFFSET + 16,
+                vk::DescriptorType::STORAGE_BUFFER,
+            ));
         }
         let (set_layout, layout) = self.layout(&bindings, vk::ShaderStageFlags::COMPUTE);
         let pipeline = match self.compute_pipelines.get(&(cs.module, layout)) {
@@ -100,9 +176,18 @@ impl Renderer {
             None => {
                 let start = std::time::Instant::now();
                 let info = [vk::ComputePipelineCreateInfo::default()
-                    .stage(vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(cs.module).name(c"main"))
+                    .stage(
+                        vk::PipelineShaderStageCreateInfo::default()
+                            .stage(vk::ShaderStageFlags::COMPUTE)
+                            .module(cs.module)
+                            .name(c"main"),
+                    )
                     .layout(layout)];
-                let p = unsafe { self.device.create_compute_pipelines(self.pipeline_cache, &info, None) }.map_err(|(_, e)| format!("compute pipeline: {e:?}"))?[0];
+                let p = unsafe {
+                    self.device
+                        .create_compute_pipelines(self.pipeline_cache, &info, None)
+                }
+                .map_err(|(_, e)| format!("compute pipeline: {e:?}"))?[0];
                 self.stats.pipelines += 1;
                 self.stats.shader_time += start.elapsed();
                 self.compute_pipelines.insert((cs.module, layout), p);
@@ -112,33 +197,71 @@ impl Renderer {
         self.begin();
         self.end_rendering();
         let mut descriptors = Vec::new();
-        self.shader_descriptors(gpu, mem, regs, cbufs, &cs, VERTEX_BASE, Stage::Compute, &mut descriptors)?;
+        self.shader_descriptors(
+            gpu,
+            mem,
+            regs,
+            cbufs,
+            &cs,
+            VERTEX_BASE,
+            Stage::Compute,
+            &mut descriptors,
+        )?;
         let threads = qmd.threads() * qmd.grid.iter().map(|&n| n.max(1) as u64).product::<u64>();
         let probe = if cs.shader.probe {
             let size = (threads * 16).min(16 << 20);
-            let offset = self.ring_copy(&vec![0; size as usize], 16).ok_or("ring full")?;
-            descriptors.push(Descriptor::Buffer(VERTEX_BASE + STORAGE_OFFSET + 16, vk::DescriptorType::STORAGE_BUFFER, self.ring.buffer, offset, size));
+            let offset = self
+                .ring_copy(&vec![0; size as usize], 16)
+                .ok_or("ring full")?;
+            descriptors.push(Descriptor::Buffer(
+                VERTEX_BASE + STORAGE_OFFSET + 16,
+                vk::DescriptorType::STORAGE_BUFFER,
+                self.ring.buffer,
+                offset,
+                size,
+            ));
             Some((offset, size))
         } else {
             None
         };
         self.barrier();
-        unsafe { self.device.cmd_bind_pipeline(self.cmd, vk::PipelineBindPoint::COMPUTE, pipeline) };
+        unsafe {
+            self.device
+                .cmd_bind_pipeline(self.cmd, vk::PipelineBindPoint::COMPUTE, pipeline)
+        };
         let mut scratch = std::mem::take(&mut self.scratch);
-        self.bind_descriptors(vk::PipelineBindPoint::COMPUTE, set_layout, layout, &descriptors, &mut scratch);
+        self.bind_descriptors(
+            vk::PipelineBindPoint::COMPUTE,
+            set_layout,
+            layout,
+            &descriptors,
+            &mut scratch,
+        );
         self.scratch = scratch;
         let [x, y, z] = qmd.grid.map(|n| n.max(1));
         unsafe { self.device.cmd_dispatch(self.cmd, x, y, z) };
         self.barrier();
         if let (Some((offset, size)), Some(dir)) = (probe, crate::env_var!("KIRIKAE_PROBE_DUMP")) {
             self.finish();
-            let data = unsafe { std::slice::from_raw_parts(self.ring.ptr.add(offset as usize), size as usize) };
-            let _ = std::fs::write(std::path::Path::new(&dir).join(format!("probe_{va:x}_{:?}.bin", qmd.grid)), data);
+            let data = unsafe {
+                std::slice::from_raw_parts(self.ring.ptr.add(offset as usize), size as usize)
+            };
+            let _ = std::fs::write(
+                std::path::Path::new(&dir).join(format!("probe_{va:x}_{:?}.bin", qmd.grid)),
+                data,
+            );
         }
         Ok(())
     }
 
-    pub fn draw(&mut self, gpu: &Gpu, mem: &GuestMemory, regs: &[u32], cbufs: &[[Option<(u64, u32)>; CB_SLOTS]; 5], draw: Draw) -> bool {
+    pub fn draw(
+        &mut self,
+        gpu: &Gpu,
+        mem: &GuestMemory,
+        regs: &[u32],
+        cbufs: &[[Option<(u64, u32)>; CB_SLOTS]; 5],
+        draw: Draw,
+    ) -> bool {
         let start = std::time::Instant::now();
         let ok = self.try_draw(gpu, mem, regs, cbufs, draw);
         self.stats.draw_time += start.elapsed();
@@ -172,10 +295,24 @@ impl Renderer {
             return false;
         }
         let program = address(regs, reg::PROGRAM_REGION);
-        [1, 5].iter().filter(|&&stage| stage == 1 || fragment).all(|&stage| self.shader_writes.get(&(program + regs[reg::PIPELINE + 16 * stage + 1] as u64)) == Some(&false))
+        [1, 5]
+            .iter()
+            .filter(|&&stage| stage == 1 || fragment)
+            .all(|&stage| {
+                self.shader_writes
+                    .get(&(program + regs[reg::PIPELINE + 16 * stage + 1] as u64))
+                    == Some(&false)
+            })
     }
 
-    pub(super) fn try_draw(&mut self, gpu: &Gpu, mem: &GuestMemory, regs: &[u32], cbufs: &[[Option<(u64, u32)>; CB_SLOTS]; 5], draw: Draw) -> Result<(), String> {
+    pub(super) fn try_draw(
+        &mut self,
+        gpu: &Gpu,
+        mem: &GuestMemory,
+        regs: &[u32],
+        cbufs: &[[Option<(u64, u32)>; CB_SLOTS]; 5],
+        draw: Draw,
+    ) -> Result<(), String> {
         if self.skip_noop && self.writes_nothing(regs) {
             self.stats.noop_draws += 1;
             return Ok(());
@@ -185,7 +322,8 @@ impl Renderer {
         let mut lap = self.clock_start();
         if let Some(size) = draw.index_size
             && !self.pending.is_empty()
-            && let Some(cpu) = gpu.translate(address(regs, reg::INDEX_BUFFER) + draw.first as u64 * size as u64)
+            && let Some(cpu) =
+                gpu.translate(address(regs, reg::INDEX_BUFFER) + draw.first as u64 * size as u64)
         {
             self.resolve(cpu, draw.count as u64 * size as u64);
         }
@@ -207,7 +345,9 @@ impl Renderer {
                 continue;
             }
             let s = color_surface(regs, base);
-            let (key, fmt) = self.surface_image(gpu, mem, &s, true).ok_or_else(|| format!("render target format {format:#x}"))?;
+            let (key, fmt) = self
+                .surface_image(gpu, mem, &s, true)
+                .ok_or_else(|| format!("render target format {format:#x}"))?;
             output_types[k as usize] = fmt.kind;
             if let (Some(pitch), Some(cpu)) = (s.pitch, gpu.translate(s.va)) {
                 self.pitch_targets.insert(key, (cpu, pitch, s.height));
@@ -245,21 +385,50 @@ impl Renderer {
 
         let program = address(regs, reg::PROGRAM_REGION);
         let shader_va = |stage: usize| program + regs[reg::PIPELINE + 16 * stage + 1] as u64;
-        let vs = self.shader(gpu, mem, regs, shader_va(1), Stage::Vertex, cbufs[0], attribute_types, output_types, None)?;
-        let fs = if regs[reg::PIPELINE + 16 * 5] & 1 == 1 { Some(self.shader(gpu, mem, regs, shader_va(5), Stage::Fragment, cbufs[4], attribute_types, output_types, None)?) } else { None };
+        let vs = self.shader(
+            gpu,
+            mem,
+            regs,
+            shader_va(1),
+            Stage::Vertex,
+            cbufs[0],
+            attribute_types,
+            output_types,
+            None,
+        )?;
+        let fs = if regs[reg::PIPELINE + 16 * 5] & 1 == 1 {
+            Some(self.shader(
+                gpu,
+                mem,
+                regs,
+                shader_va(5),
+                Stage::Fragment,
+                cbufs[4],
+                attribute_types,
+                output_types,
+                None,
+            )?)
+        } else {
+            None
+        };
         self.lap(2, &mut lap);
+        let partial = crate::env_var!("KIRIKAE_DRAW_PARTIAL").is_some();
         for s in std::iter::once(&vs).chain(fs.as_ref()) {
-            if !s.shader.unsupported.is_empty() && crate::env_var!("KIRIKAE_DRAW_PARTIAL").is_none() {
-                return Err(format!("shader {:#x} uses {:?}", s.va, s.shader.unsupported));
-            }
+            admit_shader(s, partial)?;
             if let Some(spec) = crate::env_var!("KIRIKAE_SKIP_SHADER")
-                && spec.to_string_lossy().split(',').any(|a| u64::from_str_radix(a.trim().trim_start_matches("0x"), 16) == Ok(s.va))
+                && spec
+                    .to_string_lossy()
+                    .split(',')
+                    .any(|a| u64::from_str_radix(a.trim().trim_start_matches("0x"), 16) == Ok(s.va))
             {
                 return Err(format!("shader {:#x} skipped (KIRIKAE_SKIP_SHADER)", s.va));
             }
         }
 
-        let pair = (vs.module, fs.as_ref().map_or(vk::ShaderModule::null(), |f| f.module));
+        let pair = (
+            vs.module,
+            fs.as_ref().map_or(vk::ShaderModule::null(), |f| f.module),
+        );
         let (set_layout, layout) = match self.pair_layouts.get(&pair) {
             Some(&l) => l,
             None => {
@@ -286,12 +455,19 @@ impl Renderer {
                 continue;
             }
             let Some((format, stream, offset, inactive)) = attr_formats[i as usize] else {
-                return Err(format!("vertex attribute {i} format {:#x}", regs[reg::VERTEX_ATTRIBUTE + i as usize]));
+                return Err(format!(
+                    "vertex attribute {i} format {:#x}",
+                    regs[reg::VERTEX_ATTRIBUTE + i as usize]
+                ));
             };
             let (binding, offset) = if inactive { (31, 0) } else { (stream, offset) };
             vk_attributes.push((i, binding, format, offset));
             if !vk_bindings.iter().any(|b| b.0 == binding) {
-                let stride = if inactive || instanced_stream(regs, stream) { 0 } else { regs[reg::VERTEX_STREAM + 4 * stream as usize] & 0xfff };
+                let stride = if inactive || instanced_stream(regs, stream) {
+                    0
+                } else {
+                    regs[reg::VERTEX_STREAM + 4 * stream as usize] & 0xfff
+                };
                 vk_bindings.push((binding, stride));
                 streams.push(binding);
             }
@@ -301,19 +477,48 @@ impl Renderer {
         let per_target = regs[0x4b9] & 1 == 1;
         key.blend.clear();
         key.blend.extend((0..targets.len()).map(|k| {
-                let enable = regs[0x4d8 + k] & 1;
-                let written = fs.as_ref().map_or(0, |f| f.shader.color_outputs >> (4 * k) & 0xf);
-                let written = (written & 1) | (written >> 1 & 1) << 4 | (written >> 2 & 1) << 8 | (written >> 3 & 1) << 12;
-                let mask = if targets[k].is_some() { regs[0x680 + k] & written } else { 0 };
-                let r = if per_target {
-                    let b = 0x780 + 8 * k;
-                    [regs[b], regs[b + 1], regs[b + 2], regs[b + 3], regs[b + 4], regs[b + 5], regs[b + 6]]
-                } else {
-                    [regs[0x4cf], regs[0x4d0], regs[0x4d1], regs[0x4d2], regs[0x4d3], regs[0x4d4], regs[0x4d6]]
-                };
-                let (aop, asrc, adst) = if per_target || r[0] & 1 == 1 { (r[4], r[5], r[6]) } else { (r[1], r[2], r[3]) };
-                [enable, r[1], r[2], r[3], aop, asrc, adst, mask]
-            }));
+            let enable = regs[0x4d8 + k] & 1;
+            let written = fs
+                .as_ref()
+                .map_or(0, |f| f.shader.color_outputs >> (4 * k) & 0xf);
+            let written = (written & 1)
+                | (written >> 1 & 1) << 4
+                | (written >> 2 & 1) << 8
+                | (written >> 3 & 1) << 12;
+            let mask = if targets[k].is_some() {
+                regs[0x680 + k] & written
+            } else {
+                0
+            };
+            let r = if per_target {
+                let b = 0x780 + 8 * k;
+                [
+                    regs[b],
+                    regs[b + 1],
+                    regs[b + 2],
+                    regs[b + 3],
+                    regs[b + 4],
+                    regs[b + 5],
+                    regs[b + 6],
+                ]
+            } else {
+                [
+                    regs[0x4cf],
+                    regs[0x4d0],
+                    regs[0x4d1],
+                    regs[0x4d2],
+                    regs[0x4d3],
+                    regs[0x4d4],
+                    regs[0x4d6],
+                ]
+            };
+            let (aop, asrc, adst) = if per_target || r[0] & 1 == 1 {
+                (r[4], r[5], r[6])
+            } else {
+                (r[1], r[2], r[3])
+            };
+            [enable, r[1], r[2], r[3], aop, asrc, adst, mask]
+        }));
 
         let quads = draw.topology == 7;
         let topology = formats::topology(draw.topology);
@@ -322,7 +527,11 @@ impl Renderer {
         key.layout = layout;
         key.topology = topology;
         key.colors.clear();
-        key.colors.extend(targets.iter().map(|t| t.map_or(vk::Format::UNDEFINED, |(_, f)| f.vk)));
+        key.colors.extend(
+            targets
+                .iter()
+                .map(|t| t.map_or(vk::Format::UNDEFINED, |(_, f)| f.vk)),
+        );
         key.depth = depth.map_or(vk::Format::UNDEFINED, |k| k.format);
         key.depth_clamp = self.depth_clamp && regs[reg::VIEW_VOLUME_CLIP_CTRL] & 1 << 11 == 0;
         key.alpha_test = match alpha_test_func(regs) {
@@ -330,8 +539,17 @@ impl Renderer {
             f => [f, regs[reg::ALPHA_TEST_REF]],
         };
         let frame = crate::display::FRAMES.load(std::sync::atomic::Ordering::Relaxed);
-        let recurring = self.pair_drawn.get(&pair).is_some_and(|&f| frame.saturating_sub(f) <= 2);
-        let lasting = !recurring || targets.iter().flatten().map(|&(k, _)| k).chain(depth).any(|k| !self.images[&k].transient(frame));
+        let recurring = self
+            .pair_drawn
+            .get(&pair)
+            .is_some_and(|&f| frame.saturating_sub(f) <= 2);
+        let lasting = !recurring
+            || targets
+                .iter()
+                .flatten()
+                .map(|&(k, _)| k)
+                .chain(depth)
+                .any(|k| !self.images[&k].transient(frame));
         let pipeline = self.pipeline(&key, lasting)?;
         self.lap(4, &mut lap);
         if crate::gpu::trace() {
@@ -371,7 +589,11 @@ impl Renderer {
                 regs[0x48a],
                 regs[0x48b],
                 regs[reg::VIEW_VOLUME_CLIP_CTRL],
-                (regs[reg::ALPHA_TEST_ENABLE], regs[reg::ALPHA_TEST_FUNC], f(reg::ALPHA_TEST_REF)),
+                (
+                    regs[reg::ALPHA_TEST_ENABLE],
+                    regs[reg::ALPHA_TEST_FUNC],
+                    f(reg::ALPHA_TEST_REF)
+                ),
                 &regs[0x370..0x373],
                 f(0x55b),
                 f(0x56f),
@@ -399,18 +621,29 @@ impl Renderer {
         let mut descriptors = std::mem::take(&mut scratch.descriptors);
         descriptors.clear();
         self.draw_targets.clear();
-        self.draw_targets.extend(targets.iter().flatten().map(|&(k, _)| k).chain(depth));
+        self.draw_targets
+            .extend(targets.iter().flatten().map(|&(k, _)| k).chain(depth));
         self.feedback_used.clear();
-        let described = self.descriptors(gpu, mem, regs, cbufs, &vs, fs.as_deref(), &mut descriptors);
+        let described =
+            self.descriptors(gpu, mem, regs, cbufs, &vs, fs.as_deref(), &mut descriptors);
         self.draw_targets.clear();
         described?;
         self.lap(5, &mut lap);
         let index = self.index_buffer(gpu, mem, regs, draw, quads)?;
-        let base = if draw.index_size.is_some() { regs[reg::VB_ELEMENT_BASE] as i32 } else { 0 };
+        let base = if draw.index_size.is_some() {
+            regs[reg::VB_ELEMENT_BASE] as i32
+        } else {
+            0
+        };
         let range = if vs.vertex_index {
             None
         } else {
-            self.vertex_range(gpu, mem, regs, draw).map(|(lo, hi)| ((lo as i64 + base as i64).max(0) as u32, (hi as i64 + base as i64).max(0) as u32))
+            self.vertex_range(gpu, mem, regs, draw).map(|(lo, hi)| {
+                (
+                    (lo as i64 + base as i64).max(0) as u32,
+                    (hi as i64 + base as i64).max(0) as u32,
+                )
+            })
         };
         let mut vertex_buffers = std::mem::take(&mut scratch.vertex_buffers);
         vertex_buffers.clear();
@@ -418,18 +651,42 @@ impl Renderer {
         self.lap(6, &mut lap);
         self.lap(7, &mut lap);
         let lowest = range.map_or(0, |r| r.0);
-        if !self.rendering.as_ref().is_some_and(|r| r.views == views && r.depth == depth_view && r.extent == extent) {
-            let rt = RenderTargets { views: views.clone(), depth: depth_view, extent };
+        if !self
+            .rendering
+            .as_ref()
+            .is_some_and(|r| r.views == views && r.depth == depth_view && r.extent == extent)
+        {
+            let rt = RenderTargets {
+                views: views.clone(),
+                depth: depth_view,
+                extent,
+            };
             self.end_rendering();
             let attachments: Vec<vk::RenderingAttachmentInfo> = views
                 .iter()
-                .map(|&(v, _)| vk::RenderingAttachmentInfo::default().image_view(v).image_layout(vk::ImageLayout::GENERAL).load_op(vk::AttachmentLoadOp::LOAD).store_op(vk::AttachmentStoreOp::STORE))
+                .map(|&(v, _)| {
+                    vk::RenderingAttachmentInfo::default()
+                        .image_view(v)
+                        .image_layout(vk::ImageLayout::GENERAL)
+                        .load_op(vk::AttachmentLoadOp::LOAD)
+                        .store_op(vk::AttachmentStoreOp::STORE)
+                })
                 .collect();
             let depth_attachment = depth_view.map(|(v, _)| {
-                vk::RenderingAttachmentInfo::default().image_view(v).image_layout(vk::ImageLayout::GENERAL).load_op(vk::AttachmentLoadOp::LOAD).store_op(vk::AttachmentStoreOp::STORE)
+                vk::RenderingAttachmentInfo::default()
+                    .image_view(v)
+                    .image_layout(vk::ImageLayout::GENERAL)
+                    .load_op(vk::AttachmentLoadOp::LOAD)
+                    .store_op(vk::AttachmentStoreOp::STORE)
             });
             let mut info = vk::RenderingInfo::default()
-                .render_area(vk::Rect2D { offset: vk::Offset2D::default(), extent: vk::Extent2D { width: extent.0, height: extent.1 } })
+                .render_area(vk::Rect2D {
+                    offset: vk::Offset2D::default(),
+                    extent: vk::Extent2D {
+                        width: extent.0,
+                        height: extent.1,
+                    },
+                })
                 .layer_count(1)
                 .color_attachments(&attachments);
             if let Some(d) = depth_attachment.as_ref() {
@@ -463,24 +720,64 @@ impl Renderer {
             let sy = f32::from_bits(regs[reg::VIEWPORT_SCALE + 1]);
             let ox = f32::from_bits(regs[reg::VIEWPORT_SCALE + 3]);
             let oy = f32::from_bits(regs[reg::VIEWPORT_SCALE + 4]);
-            let viewport = vk::Viewport { x: ox - sx, y: oy - sy, width: 2.0 * sx, height: 2.0 * sy, min_depth: 0.0, max_depth: 1.0 };
+            let viewport = vk::Viewport {
+                x: ox - sx,
+                y: oy - sy,
+                width: 2.0 * sx,
+                height: 2.0 * sy,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            };
             let viewport = if viewport.width == 0.0 {
-                vk::Viewport { x: 0.0, y: 0.0, width: extent.0 as f32, height: extent.1 as f32, min_depth: 0.0, max_depth: 1.0 }
+                vk::Viewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: extent.0 as f32,
+                    height: extent.1 as f32,
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                }
             } else {
                 viewport
             };
-            if changed(&mut b.viewport, [viewport.x, viewport.y, viewport.width, viewport.height].map(f32::to_bits)) {
+            if changed(
+                &mut b.viewport,
+                [viewport.x, viewport.y, viewport.width, viewport.height].map(f32::to_bits),
+            ) {
                 d.cmd_set_viewport(cmd, 0, &[viewport]);
             }
             let scissor = if regs[reg::SCISSOR] & 1 == 1 {
                 let (h, v) = (regs[reg::SCISSOR + 1], regs[reg::SCISSOR + 2]);
                 let (x0, x1) = ((h & 0xffff).min(extent.0), (h >> 16).min(extent.0));
                 let (y0, y1) = ((v & 0xffff).min(extent.1), (v >> 16).min(extent.1));
-                vk::Rect2D { offset: vk::Offset2D { x: x0 as i32, y: y0 as i32 }, extent: vk::Extent2D { width: x1.saturating_sub(x0), height: y1.saturating_sub(y0) } }
+                vk::Rect2D {
+                    offset: vk::Offset2D {
+                        x: x0 as i32,
+                        y: y0 as i32,
+                    },
+                    extent: vk::Extent2D {
+                        width: x1.saturating_sub(x0),
+                        height: y1.saturating_sub(y0),
+                    },
+                }
             } else {
-                vk::Rect2D { offset: vk::Offset2D::default(), extent: vk::Extent2D { width: extent.0, height: extent.1 } }
+                vk::Rect2D {
+                    offset: vk::Offset2D::default(),
+                    extent: vk::Extent2D {
+                        width: extent.0,
+                        height: extent.1,
+                    },
+                }
             };
-            if changed(&mut b.scissor, (scissor.offset.x, scissor.offset.y, scissor.extent.width, scissor.extent.height)) {
+            if changed(
+                &mut b.scissor,
+                (
+                    scissor.offset.x,
+                    scissor.offset.y,
+                    scissor.extent.width,
+                    scissor.extent.height,
+                ),
+            ) {
                 d.cmd_set_scissor(cmd, 0, &[scissor]);
             }
             let cull = if regs[0x646] & 1 == 1 && crate::env_var!("KIRIKAE_NO_CULL").is_none() {
@@ -495,7 +792,11 @@ impl Renderer {
             if changed(&mut b.cull, cull) {
                 d.cmd_set_cull_mode(cmd, cull);
             }
-            let front = if regs[0x647] != 0x900 { vk::FrontFace::COUNTER_CLOCKWISE } else { vk::FrontFace::CLOCKWISE };
+            let front = if regs[0x647] != 0x900 {
+                vk::FrontFace::COUNTER_CLOCKWISE
+            } else {
+                vk::FrontFace::CLOCKWISE
+            };
             if changed(&mut b.front, front) {
                 d.cmd_set_front_face(cmd, front);
             }
@@ -504,7 +805,11 @@ impl Renderer {
                 d.cmd_set_blend_constants(cmd, &constants.map(f32::from_bits));
             }
             let has_depth = depth.is_some() && crate::env_var!("KIRIKAE_NO_DEPTH_TEST").is_none();
-            let (test, write, op) = (has_depth && regs[0x4b3] & 1 == 1, has_depth && regs[0x4ba] & 1 == 1, formats::compare_op(regs[0x4c3]));
+            let (test, write, op) = (
+                has_depth && regs[0x4b3] & 1 == 1,
+                has_depth && regs[0x4ba] & 1 == 1,
+                formats::compare_op(regs[0x4c3]),
+            );
             let was = b.depth;
             if changed(&mut b.depth, (test, write, op)) {
                 if was.is_none_or(|w| w.0 != test) {
@@ -517,16 +822,47 @@ impl Renderer {
                     d.cmd_set_depth_compare_op(cmd, op);
                 }
             }
-            let has_stencil = depth.is_some_and(|k| aspect_of(k.format).contains(vk::ImageAspectFlags::STENCIL));
+            let has_stencil =
+                depth.is_some_and(|k| aspect_of(k.format).contains(vk::ImageAspectFlags::STENCIL));
             let stencil_test = has_stencil && regs[0x4e0] & 1 == 1;
             if changed(&mut b.stencil_test, stencil_test) {
                 d.cmd_set_stencil_test_enable(cmd, stencil_test);
             }
-            let front = [regs[0x4e1], regs[0x4e2], regs[0x4e3], regs[0x4e4], regs[0x4e5], regs[0x4e6], regs[0x4e7]];
-            let back = if regs[0x565] & 1 == 1 { [regs[0x566], regs[0x567], regs[0x568], regs[0x569], regs[0x3d5], regs[0x3d7], regs[0x3d6]] } else { front };
+            let front = [
+                regs[0x4e1],
+                regs[0x4e2],
+                regs[0x4e3],
+                regs[0x4e4],
+                regs[0x4e5],
+                regs[0x4e6],
+                regs[0x4e7],
+            ];
+            let back = if regs[0x565] & 1 == 1 {
+                [
+                    regs[0x566],
+                    regs[0x567],
+                    regs[0x568],
+                    regs[0x569],
+                    regs[0x3d5],
+                    regs[0x3d7],
+                    regs[0x3d6],
+                ]
+            } else {
+                front
+            };
             if stencil_test && changed(&mut b.stencil, [front, back]) {
-                for (face, s) in [(vk::StencilFaceFlags::FRONT, front), (vk::StencilFaceFlags::BACK, back)] {
-                    d.cmd_set_stencil_op(cmd, face, formats::stencil_op(s[0]), formats::stencil_op(s[2]), formats::stencil_op(s[1]), formats::compare_op(s[3]));
+                for (face, s) in [
+                    (vk::StencilFaceFlags::FRONT, front),
+                    (vk::StencilFaceFlags::BACK, back),
+                ] {
+                    d.cmd_set_stencil_op(
+                        cmd,
+                        face,
+                        formats::stencil_op(s[0]),
+                        formats::stencil_op(s[2]),
+                        formats::stencil_op(s[1]),
+                        formats::compare_op(s[3]),
+                    );
                     d.cmd_set_stencil_reference(cmd, face, s[4] & 0xff);
                     d.cmd_set_stencil_compare_mask(cmd, face, s[5] & 0xff);
                     d.cmd_set_stencil_write_mask(cmd, face, s[6] & 0xff);
@@ -538,15 +874,25 @@ impl Renderer {
                 _ => 2,
             };
             let values = [regs[0x55b], regs[0x56f], regs[0x61f]];
-            let bias = has_depth && regs[0x370 + kind] & 1 == 1 && values[..2].iter().any(|&v| f32::from_bits(v) != 0.0);
+            let bias = has_depth
+                && regs[0x370 + kind] & 1 == 1
+                && values[..2].iter().any(|&v| f32::from_bits(v) != 0.0);
             let was = b.depth_bias;
-            if changed(&mut b.depth_bias, (bias, if bias { values } else { [0; 3] })) {
+            if changed(
+                &mut b.depth_bias,
+                (bias, if bias { values } else { [0; 3] }),
+            ) {
                 if was.is_none_or(|w| w.0 != bias) {
                     d.cmd_set_depth_bias_enable(cmd, bias);
                 }
                 if bias {
                     let [units, factor, clamp] = values.map(f32::from_bits);
-                    d.cmd_set_depth_bias(cmd, units / 2.0, if self.depth_bias_clamp { clamp } else { 0.0 }, factor);
+                    d.cmd_set_depth_bias(
+                        cmd,
+                        units / 2.0,
+                        if self.depth_bias_clamp { clamp } else { 0.0 },
+                        factor,
+                    );
                 }
             }
             for &(binding, buffer, offset) in &vertex_buffers {
@@ -555,7 +901,13 @@ impl Renderer {
                 }
             }
         }
-        self.bind_descriptors(vk::PipelineBindPoint::GRAPHICS, set_layout, layout, &descriptors, &mut scratch);
+        self.bind_descriptors(
+            vk::PipelineBindPoint::GRAPHICS,
+            set_layout,
+            layout,
+            &descriptors,
+            &mut scratch,
+        );
         unsafe {
             let d = &self.device;
             match index {
@@ -563,7 +915,14 @@ impl Renderer {
                     if changed(&mut self.bound.index, (buffer, offset, ty)) {
                         d.cmd_bind_index_buffer(cmd, buffer, offset, ty);
                     }
-                    d.cmd_draw_indexed(cmd, count, 1, 0, base.wrapping_sub(lowest as i32), draw.instance);
+                    d.cmd_draw_indexed(
+                        cmd,
+                        count,
+                        1,
+                        0,
+                        base.wrapping_sub(lowest as i32),
+                        draw.instance,
+                    );
                 }
                 None => d.cmd_draw(cmd, draw.count, 1, draw.first - lowest, draw.instance),
             }
@@ -577,5 +936,50 @@ impl Renderer {
         self.scratch = scratch;
         self.lap(8, &mut lap);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kirikae_maxwell::Shader;
+    use std::sync::atomic::AtomicBool;
+
+    fn module(unsupported: Vec<&'static str>, va: u64) -> ShaderModule {
+        ShaderModule {
+            module: vk::ShaderModule::null(),
+            shader: Shader {
+                unsupported,
+                ..Shader::default()
+            },
+            va,
+            vertex_index: false,
+            reported: AtomicBool::new(false),
+        }
+    }
+
+    #[test]
+    fn untranslated_shaders_skip_unless_opted_in() {
+        let translated = module(Vec::new(), 0x1000);
+        assert_eq!(
+            unsupported_policy(&translated, false),
+            Unsupported::Complete
+        );
+        assert_eq!(unsupported_policy(&translated, true), Unsupported::Complete);
+
+        let gap = module(vec!["tex (bindless)"], 0x2000);
+        assert_eq!(unsupported_policy(&gap, false), Unsupported::Skip);
+        assert_eq!(unsupported_policy(&gap, true), Unsupported::Partial);
+        assert!(admit_shader(&gap, false).is_err());
+        assert!(admit_shader(&gap, true).is_ok());
+    }
+
+    #[test]
+    fn the_first_report_of_a_shader_wins() {
+        let gap = module(vec!["tex (bindless)"], 0x2000);
+        assert!(gap.report_once());
+        assert!(!gap.report_once());
+        let translated = module(Vec::new(), 0x1000);
+        assert!(translated.report_once());
     }
 }

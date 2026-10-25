@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::cpu::{Cpu, HALT_PC};
 use crate::kernel::KThread;
-use crate::process::{run_until, Process};
+use crate::process::{Process, run_until};
 
 pub const POLL_INTERVAL: u32 = 2048;
 const HOST_STACK: usize = 256 << 20;
@@ -76,7 +76,9 @@ impl GilState {
             if top[core].is_some() {
                 continue;
             }
-            let allowed = |r: &Ready| r.core() != core && r.thread.affinity.load(Ordering::Relaxed) & (1 << core) != 0;
+            let allowed = |r: &Ready| {
+                r.core() != core && r.thread.affinity.load(Ordering::Relaxed) & (1 << core) != 0
+            };
             let mut suggested = std::mem::take(&mut self.suggested);
             let mut tops = std::mem::take(&mut self.tops);
             suggested.clear();
@@ -90,7 +92,8 @@ impl GilState {
                 match top[from] {
                     Some(t) if t == i => tops.push(from),
                     t => {
-                        stuck = t.is_some_and(|t| self.ready[t].priority() < MIGRATION_MIN_PRIORITY);
+                        stuck =
+                            t.is_some_and(|t| self.ready[t].priority() < MIGRATION_MIN_PRIORITY);
                         pick = (!stuck).then_some(i);
                         break;
                     }
@@ -99,7 +102,9 @@ impl GilState {
             if pick.is_none() && !stuck {
                 for &from in &tops {
                     let t = top[from].unwrap();
-                    let next = (0..self.ready.len()).filter(|&i| i != t && self.ready[i].core() == from).min_by_key(|&i| self.ready[i].key());
+                    let next = (0..self.ready.len())
+                        .filter(|&i| i != t && self.ready[i].core() == from)
+                        .min_by_key(|&i| self.ready[i].key());
                     if next.is_some() {
                         top[from] = next;
                         pick = Some(t);
@@ -122,7 +127,10 @@ impl GilState {
 
     fn next(&mut self) -> Option<usize> {
         let top = self.schedule();
-        top.into_iter().flatten().filter(|&i| self.ready[i].asked.is_some()).min_by_key(|&i| self.ready[i].asked)
+        top.into_iter()
+            .flatten()
+            .filter(|&i| self.ready[i].asked.is_some())
+            .min_by_key(|&i| self.ready[i].asked)
     }
 
     fn wake_next(&mut self) -> Option<u64> {
@@ -132,12 +140,16 @@ impl GilState {
     }
 
     fn core_busy(&self, core: usize, id: u64) -> bool {
-        self.ready.iter().any(|r| r.running && r.thread.id != id && r.core() == core)
+        self.ready
+            .iter()
+            .any(|r| r.running && r.thread.id != id && r.core() == core)
     }
 
     fn may_run(&mut self, id: u64) -> bool {
         let top = self.schedule();
-        let Some(i) = self.ready.iter().position(|r| r.thread.id == id) else { return false };
+        let Some(i) = self.ready.iter().position(|r| r.thread.id == id) else {
+            return false;
+        };
         let core = self.ready[i].core();
         top[core] == Some(i) && !self.core_busy(core, id)
     }
@@ -172,7 +184,11 @@ pub struct Gil {
 
 impl Default for Gil {
     fn default() -> Gil {
-        Gil { state: Mutex::default(), parallel: parallel(), epoch: AtomicU64::new(0) }
+        Gil {
+            state: Mutex::default(),
+            parallel: parallel(),
+            epoch: AtomicU64::new(0),
+        }
     }
 }
 
@@ -189,7 +205,13 @@ impl Gil {
         let _prof = crate::prof::enter(crate::prof::Cat::LockWait);
         let mut st = self.state.lock().unwrap();
         let seq = st.tick();
-        st.ready.push(Ready { thread: me.clone(), seq, asked: None, turn: TURN.with(|t| t.clone()), running: false });
+        st.ready.push(Ready {
+            thread: me.clone(),
+            seq,
+            asked: None,
+            turn: TURN.with(|t| t.clone()),
+            running: false,
+        });
         drop(self.queue(st, me.id));
     }
 
@@ -200,9 +222,17 @@ impl Gil {
         self.queue_global(st, id)
     }
 
-    fn queue_parallel<'a>(&'a self, mut st: MutexGuard<'a, GilState>, id: u64) -> MutexGuard<'a, GilState> {
+    fn queue_parallel<'a>(
+        &'a self,
+        mut st: MutexGuard<'a, GilState>,
+        id: u64,
+    ) -> MutexGuard<'a, GilState> {
         let asked = st.tick();
-        let r = st.ready.iter_mut().find(|r| r.thread.id == id).expect("a queued thread is runnable");
+        let r = st
+            .ready
+            .iter_mut()
+            .find(|r| r.thread.id == id)
+            .expect("a queued thread is runnable");
         r.asked = Some(asked);
         r.running = false;
         let turn = r.turn.clone();
@@ -220,9 +250,17 @@ impl Gil {
         st
     }
 
-    fn queue_global<'a>(&'a self, mut st: MutexGuard<'a, GilState>, id: u64) -> MutexGuard<'a, GilState> {
+    fn queue_global<'a>(
+        &'a self,
+        mut st: MutexGuard<'a, GilState>,
+        id: u64,
+    ) -> MutexGuard<'a, GilState> {
         let asked = st.tick();
-        let r = st.ready.iter_mut().find(|r| r.thread.id == id).expect("a queued thread is runnable");
+        let r = st
+            .ready
+            .iter_mut()
+            .find(|r| r.thread.id == id)
+            .expect("a queued thread is runnable");
         r.asked = Some(asked);
         let turn = r.turn.clone();
         while st.holder.is_some() || st.wake_next() != Some(id) {
@@ -273,7 +311,9 @@ impl Gil {
             return false;
         }
         let top = st.schedule();
-        !top.iter().flatten().any(|&i| st.ready[i].thread.id == me.id)
+        !top.iter()
+            .flatten()
+            .any(|&i| st.ready[i].thread.id == me.id)
     }
 
     pub fn preempts(&self, me: &Arc<KThread>) -> bool {
@@ -282,7 +322,9 @@ impl Gil {
             return false;
         }
         let top = st.schedule();
-        top.iter().flatten().any(|&i| st.ready[i].asked.is_some() && st.ready[i].thread.id != me.id)
+        top.iter()
+            .flatten()
+            .any(|&i| st.ready[i].asked.is_some() && st.ready[i].thread.id != me.id)
     }
 
     pub fn displaced_since(&self, me: &Arc<KThread>, seen: &mut u64) -> bool {
@@ -299,7 +341,11 @@ impl Gil {
     pub fn describe(&self) -> Vec<String> {
         let mut st = self.state.lock().unwrap();
         let top = st.schedule();
-        let mut v = vec![format!("cores run {:?}, lock holder {:?}", top.map(|t| t.map(|i| st.ready[i].thread.id)), st.holder)];
+        let mut v = vec![format!(
+            "cores run {:?}, lock holder {:?}",
+            top.map(|t| t.map(|i| st.ready[i].thread.id)),
+            st.holder
+        )];
         for r in &st.ready {
             v.push(format!(
                 "thread {}: core {} (mask {:#x}), priority {}, {}",
@@ -307,7 +353,13 @@ impl Gil {
                 r.core(),
                 r.thread.affinity.load(Ordering::Relaxed),
                 r.priority(),
-                if r.running { "running" } else if r.asked.is_some() { "waiting for its core" } else { "holds the lock" }
+                if r.running {
+                    "running"
+                } else if r.asked.is_some() {
+                    "waiting for its core"
+                } else {
+                    "holds the lock"
+                }
             ));
         }
         v
@@ -315,7 +367,11 @@ impl Gil {
 
     pub fn is_running(&self, id: u64) -> bool {
         let st = self.state.lock().unwrap();
-        if self.parallel { st.ready.iter().any(|r| r.thread.id == id && r.running) } else { st.holder == Some(id) }
+        if self.parallel {
+            st.ready.iter().any(|r| r.thread.id == id && r.running)
+        } else {
+            st.holder == Some(id)
+        }
     }
 
     pub fn changed(&self) {
@@ -358,15 +414,35 @@ pub struct SyncState {
 }
 
 impl SyncState {
-    pub fn add_waiter(&mut self, kind: WaitKind, key: u64, mutex: u64, tag: u32, priority: i32) -> u64 {
+    pub fn add_waiter(
+        &mut self,
+        kind: WaitKind,
+        key: u64,
+        mutex: u64,
+        tag: u32,
+        priority: i32,
+    ) -> u64 {
         self.next_id += 1;
         let id = self.next_id;
-        self.waiters.push(Waiter { id, kind, key, mutex, tag, priority, cond: my_cond() });
+        self.waiters.push(Waiter {
+            id,
+            kind,
+            key,
+            mutex,
+            tag,
+            priority,
+            cond: my_cond(),
+        });
         id
     }
 
     pub fn queue(&self, kind: WaitKind, key: u64) -> Vec<Waiter> {
-        let mut q: Vec<Waiter> = self.waiters.iter().filter(|w| w.kind == kind && w.key == key).cloned().collect();
+        let mut q: Vec<Waiter> = self
+            .waiters
+            .iter()
+            .filter(|w| w.kind == kind && w.key == key)
+            .cloned()
+            .collect();
         q.sort_by_key(|w| w.priority);
         q
     }
@@ -410,7 +486,10 @@ impl Scheduler {
     }
 
     pub fn kernel_busy(&self) -> bool {
-        matches!(self.kernel.try_lock(), Err(std::sync::TryLockError::WouldBlock))
+        matches!(
+            self.kernel.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
     }
 
     pub fn touch(&self) {
@@ -442,9 +521,26 @@ fn my_cond() -> Arc<Condvar> {
     COND.with(|c| c.clone())
 }
 
+/// Wakes every thread blocked in [`block`] or waiting in [`sleep`]. Taking the
+/// scheduler lock is what makes the wakeup reliable: a waiter holds it from its
+/// readiness check to its wait, so a notifier that holds it either sees the
+/// waiter before it sleeps or after it is asleep. Never call this while holding
+/// the handle table: [`block`] calls the readiness closure with the scheduler
+/// lock held and that closure may read the table.
+pub fn wake(p: &Process) {
+    let s = &p.sched;
+    let _st = s.lock();
+    s.notify();
+}
+
 const DEADLOCK_TICK: Duration = Duration::from_millis(500);
 
-pub fn block<T>(c: &Cpu, timeout_ns: i64, what: impl FnOnce() -> String, mut ready: impl FnMut(&mut SyncState) -> Option<T>) -> Option<T> {
+pub fn block<T>(
+    c: &Cpu,
+    timeout_ns: i64,
+    what: impl FnOnce() -> String,
+    mut ready: impl FnMut(&mut SyncState) -> Option<T>,
+) -> Option<T> {
     let p = c.process();
     let s = &p.sched;
     let mut st = s.lock();
@@ -454,7 +550,8 @@ pub fn block<T>(c: &Cpu, timeout_ns: i64, what: impl FnOnce() -> String, mut rea
     if timeout_ns == 0 || s.exiting.load(Ordering::Relaxed) {
         return None;
     }
-    let deadline = (timeout_ns > 0).then(|| Instant::now() + Duration::from_nanos(timeout_ns as u64));
+    let deadline =
+        (timeout_ns > 0).then(|| Instant::now() + Duration::from_nanos(timeout_ns as u64));
     if deadline.is_none() {
         st.blocked_forever.insert(c.thread.id, String::new());
     }
@@ -463,7 +560,17 @@ pub fn block<T>(c: &Cpu, timeout_ns: i64, what: impl FnOnce() -> String, mut rea
         if let Some(what) = what.take() {
             let description = what();
             let pcs = format!("{} (lr {})", p.describe(c.pc), p.describe(c.x[30]));
-            st.blocked.insert(c.thread.id, format!("{description}{} at {pcs}", if deadline.is_some() { " (with timeout)" } else { "" }));
+            st.blocked.insert(
+                c.thread.id,
+                format!(
+                    "{description}{} at {pcs}",
+                    if deadline.is_some() {
+                        " (with timeout)"
+                    } else {
+                        ""
+                    }
+                ),
+            );
             if deadline.is_none() {
                 st.blocked_forever.insert(c.thread.id, description);
             }
@@ -485,7 +592,11 @@ pub fn block<T>(c: &Cpu, timeout_ns: i64, what: impl FnOnce() -> String, mut rea
                 if waited.timed_out() {
                     describe(&mut guard);
                     let epoch = s.epoch.load(Ordering::Relaxed);
-                    quiet_ticks = if epoch == seen_epoch { quiet_ticks + 1 } else { 0 };
+                    quiet_ticks = if epoch == seen_epoch {
+                        quiet_ticks + 1
+                    } else {
+                        0
+                    };
                     seen_epoch = epoch;
                     if quiet_ticks >= 2 {
                         check_deadlock(p, &guard);
@@ -498,7 +609,8 @@ pub fn block<T>(c: &Cpu, timeout_ns: i64, what: impl FnOnce() -> String, mut rea
                 if now >= d {
                     break ready(&mut st);
                 }
-                let (mut guard, waited) = cond.wait_timeout(st, (d - now).min(DEADLOCK_TICK)).unwrap();
+                let (mut guard, waited) =
+                    cond.wait_timeout(st, (d - now).min(DEADLOCK_TICK)).unwrap();
                 if waited.timed_out() {
                     describe(&mut guard);
                 }
@@ -574,7 +686,11 @@ fn wait_while_paused(c: &Cpu) {
 
 pub fn blocked_threads(p: &Process) -> Vec<String> {
     let st = p.sched.lock();
-    let mut v: Vec<String> = st.blocked.iter().map(|(id, what)| format!("thread {id}: {what}")).collect();
+    let mut v: Vec<String> = st
+        .blocked
+        .iter()
+        .map(|(id, what)| format!("thread {id}: {what}"))
+        .collect();
     v.sort();
     v
 }
@@ -664,36 +780,47 @@ pub fn sleep(c: &mut Cpu, d: Duration) {
     let kernel = park(c);
     {
         let _prof = crate::prof::enter(crate::prof::Cat::Sleep);
-        if d.is_zero() { std::thread::yield_now() } else { std::thread::sleep(d) }
+        if d.is_zero() {
+            std::thread::yield_now()
+        } else {
+            std::thread::sleep(d)
+        }
     }
     unpark(c, kernel);
 }
 
-pub fn spawn(p: &'static Process, thread: Arc<KThread>, setup: impl FnOnce(&mut Cpu) + Send + 'static) -> std::io::Result<std::thread::JoinHandle<()>> {
+pub fn spawn(
+    p: &'static Process,
+    thread: Arc<KThread>,
+    setup: impl FnOnce(&mut Cpu) + Send + 'static,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
     p.sched.live.fetch_add(1, Ordering::Relaxed);
-    std::thread::Builder::new().name(format!("guest-{}", thread.id)).stack_size(HOST_STACK).spawn(move || {
-        p.sched.gil.acquire(&thread);
-        let mut c = Cpu::new(p, thread.clone());
-        c.x[30] = HALT_PC;
-        c.tpidrro_el0 = thread.tls;
-        setup(&mut c);
-        crate::fault::install(&mut c);
-        wait_while_paused(&c);
-        if !p.sched.exiting.load(Ordering::Relaxed) {
-            let sp = c.sp;
-            run_until(&mut c, HALT_PC, sp);
-        }
-        p.stats.flush();
-        {
-            let st = p.sched.lock();
-            thread.exited.store(true, Ordering::Relaxed);
-            p.sched.live.fetch_sub(1, Ordering::Relaxed);
-            p.sched.notify();
-            drop(st);
-        }
-        kernel_exit();
-        p.sched.gil.release(&thread);
-    })
+    std::thread::Builder::new()
+        .name(format!("guest-{}", thread.id))
+        .stack_size(HOST_STACK)
+        .spawn(move || {
+            p.sched.gil.acquire(&thread);
+            let mut c = Cpu::new(p, thread.clone());
+            c.x[30] = HALT_PC;
+            c.tpidrro_el0 = thread.tls;
+            setup(&mut c);
+            crate::fault::install(&mut c);
+            wait_while_paused(&c);
+            if !p.sched.exiting.load(Ordering::Relaxed) {
+                let sp = c.sp;
+                run_until(&mut c, HALT_PC, sp);
+            }
+            p.stats.flush();
+            {
+                let st = p.sched.lock();
+                thread.exited.store(true, Ordering::Relaxed);
+                p.sched.live.fetch_sub(1, Ordering::Relaxed);
+                p.sched.notify();
+                drop(st);
+            }
+            kernel_exit();
+            p.sched.gil.release(&thread);
+        })
 }
 
 #[cfg(test)]
@@ -728,7 +855,13 @@ mod tests {
         let mut st = GilState::default();
         for t in threads {
             let seq = st.tick();
-            st.ready.push(Ready { thread: t.clone(), seq, asked: Some(seq), turn: Arc::new(Condvar::new()), running: false });
+            st.ready.push(Ready {
+                thread: t.clone(),
+                seq,
+                asked: Some(seq),
+                turn: Arc::new(Condvar::new()),
+                running: false,
+            });
         }
         st
     }
@@ -739,12 +872,19 @@ mod tests {
     }
 
     fn chosen(st: &mut GilState) -> Vec<Option<u64>> {
-        st.schedule().iter().map(|i| i.map(|i| st.ready[i].thread.id)).collect()
+        st.schedule()
+            .iter()
+            .map(|i| i.map(|i| st.ready[i].thread.id))
+            .collect()
     }
 
     #[test]
     fn equal_priorities_on_a_core_run_in_order() {
-        let mut st = state(&[thread(1, 40, 0, 1), thread(2, 40, 0, 1), thread(3, 44, 1, 2)]);
+        let mut st = state(&[
+            thread(1, 40, 0, 1),
+            thread(2, 40, 0, 1),
+            thread(3, 44, 1, 2),
+        ]);
         assert_eq!(chosen(&mut st), [Some(1), Some(3), None, None]);
         assert_eq!(next(&mut st), Some(1));
     }
@@ -757,7 +897,11 @@ mod tests {
 
     #[test]
     fn idle_cores_take_threads_their_mask_allows() {
-        let (a, b, c) = (thread(1, 40, 0, 0b1111), thread(2, 40, 0, 0b0110), thread(3, 40, 0, 0b0001));
+        let (a, b, c) = (
+            thread(1, 40, 0, 0b1111),
+            thread(2, 40, 0, 0b0110),
+            thread(3, 40, 0, 0b0001),
+        );
         let mut st = state(&[a, b.clone(), c]);
         assert_eq!(chosen(&mut st), [Some(3), Some(2), Some(1), None]);
         assert_eq!(b.core.load(Ordering::Relaxed), 1);
@@ -774,7 +918,12 @@ mod tests {
 
     #[test]
     fn parallel_cores_run_their_threads_together() {
-        let mut st = state(&[thread(1, 44, 0, 1), thread(2, 44, 1, 2), thread(3, 30, 2, 4), thread(4, 44, 2, 4)]);
+        let mut st = state(&[
+            thread(1, 44, 0, 1),
+            thread(2, 44, 1, 2),
+            thread(3, 30, 2, 4),
+            thread(4, 44, 2, 4),
+        ]);
         assert!(st.may_run(1) && st.may_run(2) && st.may_run(3));
         assert!(!st.may_run(4));
     }
@@ -794,7 +943,11 @@ mod tests {
 
     #[test]
     fn lock_goes_to_the_earliest_chosen_waiter() {
-        let mut st = state(&[thread(1, 40, 1, 2), thread(2, 40, 0, 1), thread(3, 40, 0, 1)]);
+        let mut st = state(&[
+            thread(1, 40, 1, 2),
+            thread(2, 40, 0, 1),
+            thread(3, 40, 0, 1),
+        ]);
         assert_eq!(next(&mut st), Some(1));
         st.ready[0].asked = None;
         assert_eq!(next(&mut st), Some(2));

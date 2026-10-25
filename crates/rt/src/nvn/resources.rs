@@ -84,7 +84,15 @@ pub fn call(name: &str) -> Option<Call> {
 }
 
 pub fn after(c: Call) -> bool {
-    matches!(c, Call::PoolInitialize | Call::PoolAddress | Call::BufferInitialize | Call::BufferAddress | Call::TextureInitialize | Call::View(_))
+    matches!(
+        c,
+        Call::PoolInitialize
+            | Call::PoolAddress
+            | Call::BufferInitialize
+            | Call::BufferAddress
+            | Call::TextureInitialize
+            | Call::View(_)
+    )
 }
 
 pub const TEXTURE_BYTES: u64 = 0xc0;
@@ -97,25 +105,7 @@ const VIRTUAL: u32 = 0x200;
 pub const BUFFER_BYTES: u64 = 0x30;
 
 fn format(f: u32) -> (u32, u32, u32) {
-    let c = |bytes| (bytes, 1, 1);
-    match f {
-        0x01..=0x04 | 0x31 | 0x51 | 0x52 => c(1),
-        0x05..=0x09 | 0x0d..=0x10 | 0x32 | 0x39..=0x3c | 0x53 | 0x54 | 0x57 | 0x58 | 0x95..=0x97 => c(2),
-        0x19..=0x1c | 0x5d | 0x5e => c(3),
-        0x0a..=0x0c | 0x11..=0x15 | 0x25..=0x28 | 0x33..=0x35 | 0x37 | 0x38 | 0x3d..=0x40 | 0x55 | 0x56 | 0x59 | 0x5a | 0x63 | 0x64 | 0x69..=0x70 | 0x98..=0x9b => c(4),
-        0x1d..=0x21 | 0x5f | 0x60 => c(6),
-        0x16..=0x18 | 0x29..=0x2d | 0x36 | 0x5b | 0x5c | 0x65 | 0x66 | 0x71..=0x75 => c(8),
-        0x22..=0x24 | 0x61 | 0x62 => c(12),
-        0x2e..=0x30 | 0x67 | 0x68 | 0x76..=0x78 => c(16),
-        0x41 | 0x42 | 0x45 | 0x46 | 0x49 | 0x4a => (8, 4, 4),
-        0x43 | 0x44 | 0x47 | 0x48 | 0x4b..=0x50 => (16, 4, 4),
-        0x79..=0x94 => {
-            const ASTC: [(u32, u32); 14] = [(4, 4), (5, 4), (5, 5), (6, 5), (6, 6), (8, 5), (8, 6), (8, 8), (10, 5), (10, 6), (10, 8), (10, 10), (12, 10), (12, 12)];
-            let (w, h) = ASTC[((f - 0x79) % 14) as usize];
-            (16, w, h)
-        }
-        _ => (0, 1, 1),
-    }
+    super::formats::block(f)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -136,7 +126,14 @@ pub struct TexBuilder {
 
 impl TexBuilder {
     fn defaults() -> Self {
-        TexBuilder { target: 1, width: 1, height: 1, depth: 1, levels: 1, ..Default::default() }
+        TexBuilder {
+            target: 1,
+            width: 1,
+            height: 1,
+            depth: 1,
+            levels: 1,
+            ..Default::default()
+        }
     }
 }
 
@@ -157,7 +154,11 @@ pub struct Texture {
 
 impl Texture {
     fn new(b: &TexBuilder, address: u64) -> Self {
-        let height = if matches!(b.target, 0 | 3 | 10) { 1 } else { b.height.max(1) };
+        let height = if matches!(b.target, 0 | 3 | 10) {
+            1
+        } else {
+            b.height.max(1)
+        };
         let layers = match b.target {
             3 => b.height,
             4 | 6 | 9 => b.depth,
@@ -199,7 +200,11 @@ impl Texture {
 
     fn level_layout(&self, level: u32) -> (u64, u32, u32, u64, u64) {
         let (bytes, bw, bh) = format(self.format);
-        let (w, h, d) = ((self.width >> level).max(1), (self.height >> level).max(1), (self.depth >> level).max(1));
+        let (w, h, d) = (
+            (self.width >> level).max(1),
+            (self.height >> level).max(1),
+            (self.depth >> level).max(1),
+        );
         let (wb, hb) = (w.div_ceil(bw), h.div_ceil(bh));
         let mut bhl = self.block_height_log2;
         while bhl > 0 && (8 << (bhl - 1)) >= hb {
@@ -210,7 +215,13 @@ impl Texture {
             bdl -= 1;
         }
         let width_gobs = (wb as u64 * bytes as u64).div_ceil(64);
-        (width_gobs, bhl, bdl, (hb as u64).div_ceil(8 << bhl), (d as u64).div_ceil(1 << bdl))
+        (
+            width_gobs,
+            bhl,
+            bdl,
+            (hb as u64).div_ceil(8 << bhl),
+            (d as u64).div_ceil(1 << bdl),
+        )
     }
 
     fn level_size(&self, level: u32) -> u64 {
@@ -233,12 +244,20 @@ impl Texture {
         let (bytes, _, _) = format(self.format);
         let width = (self.width >> level).max(1);
         Surface {
-            format: if view.format != 0 { view.format } else { self.format },
+            format: if view.format != 0 {
+                view.format
+            } else {
+                self.format
+            },
             width,
             height: (self.height >> level).max(1),
             block_height_log2,
             pitch: self.pitch.then_some(width * bytes),
-            layers: if view.layers != 0 { view.layers } else { self.layers },
+            layers: if view.layers != 0 {
+                view.layers
+            } else {
+                self.layers
+            },
             bytes,
         }
     }
@@ -252,7 +271,9 @@ impl Texture {
         if self.target == 2 {
             let (width_gobs, bhl, bdl, high, _) = self.level_layout(base);
             let z = view.min_layer as u64;
-            return level + (z >> bdl) * width_gobs * (512 << (bhl + bdl)) * high + ((z & ((1 << bdl) - 1)) << bhl) * 512;
+            return level
+                + (z >> bdl) * width_gobs * (512 << (bhl + bdl)) * high
+                + ((z & ((1 << bdl) - 1)) << bhl) * 512;
         }
         self.layer_size() * view.min_layer as u64 + level
     }
@@ -366,7 +387,10 @@ impl Resources {
                     self.tex_builders.insert(a[0], TexBuilder::defaults());
                     return;
                 }
-                let b = self.tex_builders.entry(a[0]).or_insert_with(TexBuilder::defaults);
+                let b = self
+                    .tex_builders
+                    .entry(a[0])
+                    .or_insert_with(TexBuilder::defaults);
                 let w = |i: usize| a[i] as u32;
                 match s {
                     TexSet::Defaults => {}
@@ -384,7 +408,12 @@ impl Resources {
                     TexSet::Stride => b.stride = a[1],
                     TexSet::Storage => (b.pool, b.offset) = (a[1], a[2]),
                     TexSet::PackagedLayout => {
-                        b.packaged = if a[1] == 0 { 0 } else { read(a[1], 8).map_or(0, |v| u64::from_le_bytes(v[..8].try_into().unwrap())) }
+                        b.packaged = if a[1] == 0 {
+                            0
+                        } else {
+                            read(a[1], 8)
+                                .map_or(0, |v| u64::from_le_bytes(v[..8].try_into().unwrap()))
+                        }
                     }
                 }
             }
@@ -407,14 +436,26 @@ impl Resources {
                     self.texture_pools.push(a[0]);
                 }
                 let tex = self.texture(a[2], read);
-                let view = if a[3] == 0 { View::default() } else { self.view(a[3], read) };
+                let view = if a[3] == 0 {
+                    View::default()
+                } else {
+                    self.view(a[3], read)
+                };
                 self.registered.insert(a[1] as u32, (tex, view));
             }
             _ => {}
         }
     }
 
-    pub fn after(&mut self, call: Call, a: &[u64], ret: u64, gpu_addresses_of: &dyn Fn(u64) -> Vec<u64>, read: &dyn Fn(u64, u64) -> Option<Vec<u8>>, log: &mut dyn FnMut(&'static str, String)) {
+    pub fn after(
+        &mut self,
+        call: Call,
+        a: &[u64],
+        ret: u64,
+        gpu_addresses_of: &dyn Fn(u64) -> Vec<u64>,
+        read: &dyn Fn(u64, u64) -> Option<Vec<u8>>,
+        log: &mut dyn FnMut(&'static str, String),
+    ) {
         match call {
             Call::View(_) => {
                 self.before(call, a, read);
@@ -424,11 +465,17 @@ impl Resources {
                 }
             }
             Call::PoolInitialize => {
-                let (memory, size, flags) = self.pool_builders.get(&a[1]).copied().unwrap_or_default();
+                let (memory, size, flags) =
+                    self.pool_builders.get(&a[1]).copied().unwrap_or_default();
                 let vas = gpu_addresses_of(memory);
                 let pitch = vas.first().copied().unwrap_or(0);
                 let block_linear = vas.get(1).copied().unwrap_or(pitch);
-                let p = Pool { size, pitch, block_linear, compressed: vas.get(2).copied().unwrap_or(block_linear) };
+                let p = Pool {
+                    size,
+                    pitch,
+                    block_linear,
+                    compressed: vas.get(2).copied().unwrap_or(block_linear),
+                };
                 self.pools.insert(a[0], p);
                 self.pool_flags.insert(a[0], flags);
                 if let Some(bytes) = read(a[0], POOL_BYTES) {
@@ -442,7 +489,14 @@ impl Resources {
                 let model = self.pools.get(&a[0]).map(|p| p.pitch);
                 if model != Some(ret) {
                     self.checks.pools_differ += 1;
-                    log("pools", format!("pool {:#x}: model {model:x?}, driver {ret:#x}; mappings of its memory then {:x?}", a[0], self.pool_mappings.get(&a[0])));
+                    log(
+                        "pools",
+                        format!(
+                            "pool {:#x}: model {model:x?}, driver {ret:#x}; mappings of its memory then {:x?}",
+                            a[0],
+                            self.pool_mappings.get(&a[0])
+                        ),
+                    );
                 }
             }
             Call::BufferInitialize => {
@@ -458,7 +512,8 @@ impl Resources {
                 let model = match self.buffers.get(&a[0]) {
                     Some(&m) => Some(m),
                     None => {
-                        let copy = read(a[0], BUFFER_BYTES).and_then(|b| self.buffers_by_bytes.get(&hash(&b)).copied());
+                        let copy = read(a[0], BUFFER_BYTES)
+                            .and_then(|b| self.buffers_by_bytes.get(&hash(&b)).copied());
                         if copy.is_some() {
                             self.checks.buffers_copied += 1;
                         }
@@ -469,13 +524,20 @@ impl Resources {
                     None => self.checks.buffers_unknown += 1,
                     Some(m) if m != ret => {
                         self.checks.buffers_differ += 1;
-                        log("buffers", format!("buffer {:#x}: model {m:#x}, driver {ret:#x}", a[0]));
+                        log(
+                            "buffers",
+                            format!("buffer {:#x}: model {m:#x}, driver {ret:#x}", a[0]),
+                        );
                     }
                     Some(_) => {}
                 }
             }
             Call::TextureInitialize => {
-                let b = self.tex_builders.get(&a[1]).copied().unwrap_or_else(TexBuilder::defaults);
+                let b = self
+                    .tex_builders
+                    .get(&a[1])
+                    .copied()
+                    .unwrap_or_else(TexBuilder::defaults);
                 let address = self.pool(b.pool, read).map_or(0, |p| {
                     let base = if b.flags & LINEAR != 0 || b.target == 10 {
                         p.pitch
@@ -503,7 +565,11 @@ impl Resources {
         }
     }
 
-    pub fn texture(&mut self, obj: u64, read: &dyn Fn(u64, u64) -> Option<Vec<u8>>) -> Option<Texture> {
+    pub fn texture(
+        &mut self,
+        obj: u64,
+        read: &dyn Fn(u64, u64) -> Option<Vec<u8>>,
+    ) -> Option<Texture> {
         let bytes = read(obj, TEXTURE_BYTES).map(|b| hash(&b));
         let here = self.textures.get(&obj).copied();
         if let Some((h, t)) = here
@@ -540,7 +606,12 @@ impl Resources {
         if flags & VIRTUAL != 0
             && let Some(p) = self.pools.get_mut(&pool)
         {
-            *p = Pool { size: p.size, pitch: va, block_linear: va, compressed: va };
+            *p = Pool {
+                size: p.size,
+                pitch: va,
+                block_linear: va,
+                compressed: va,
+            };
             let p = *p;
             if let Some(h) = self.pool_hashes.get(&pool) {
                 self.pools_by_bytes.insert(*h, p);
@@ -555,7 +626,11 @@ impl Resources {
             return None;
         }
         self.checks.pools_made_differ += 1;
-        let b = self.pool_builders.get(&builder).copied().unwrap_or_default();
+        let b = self
+            .pool_builders
+            .get(&builder)
+            .copied()
+            .unwrap_or_default();
         Some(format!(
             "new pool {pool:#x}: model {model:#x}, driver {driver:#x}; memory {:#x} size {:#x} flags {:#x}; mappings of the memory {:x?}",
             b.0,
@@ -565,7 +640,11 @@ impl Resources {
         ))
     }
 
-    pub fn pool_address(&mut self, obj: u64, read: &dyn Fn(u64, u64) -> Option<Vec<u8>>) -> Option<u64> {
+    pub fn pool_address(
+        &mut self,
+        obj: u64,
+        read: &dyn Fn(u64, u64) -> Option<Vec<u8>>,
+    ) -> Option<u64> {
         self.pool(obj, read).map(|p| p.pitch)
     }
 
@@ -616,22 +695,67 @@ mod tests {
     use super::*;
 
     fn texture(target: u32, size: (u32, u32, u32), levels: u32, format: u32) -> Texture {
-        let b = TexBuilder { target, width: size.0, height: size.1, depth: size.2, levels, format, ..TexBuilder::defaults() };
+        let b = TexBuilder {
+            target,
+            width: size.0,
+            height: size.1,
+            depth: size.2,
+            levels,
+            format,
+            ..TexBuilder::defaults()
+        };
         Texture::new(&b, 0)
     }
 
     #[test]
     fn view_offsets() {
         let t = texture(1, (256, 256, 1), 3, 0x25);
-        assert_eq!(t.view_offset(&View { base_level: 1, ..Default::default() }), 0x40000);
-        assert_eq!(t.view_offset(&View { base_level: 2, ..Default::default() }), 0x50000);
+        assert_eq!(
+            t.view_offset(&View {
+                base_level: 1,
+                ..Default::default()
+            }),
+            0x40000
+        );
+        assert_eq!(
+            t.view_offset(&View {
+                base_level: 2,
+                ..Default::default()
+            }),
+            0x50000
+        );
         let t = texture(4, (64, 64, 4), 1, 0x25);
-        assert_eq!(t.view_offset(&View { min_layer: 2, ..Default::default() }), 0x8000);
+        assert_eq!(
+            t.view_offset(&View {
+                min_layer: 2,
+                ..Default::default()
+            }),
+            0x8000
+        );
         let t = texture(1, (128, 128, 1), 2, 0x41);
-        assert_eq!(t.view_offset(&View { base_level: 1, ..Default::default() }), 0x2000);
+        assert_eq!(
+            t.view_offset(&View {
+                base_level: 1,
+                ..Default::default()
+            }),
+            0x2000
+        );
         let t = texture(2, (32, 32, 32), 6, 0x01);
-        assert_eq!(t.view_offset(&View { base_level: 1, min_layer: 1, ..Default::default() }), 0x10200);
+        assert_eq!(
+            t.view_offset(&View {
+                base_level: 1,
+                min_layer: 1,
+                ..Default::default()
+            }),
+            0x10200
+        );
         let t = texture(2, (8, 8, 8), 1, 0x3f);
-        assert_eq!(t.view_offset(&View { min_layer: 3, ..Default::default() }), 0x600);
+        assert_eq!(
+            t.view_offset(&View {
+                min_layer: 3,
+                ..Default::default()
+            }),
+            0x600
+        );
     }
 }

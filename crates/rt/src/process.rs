@@ -5,12 +5,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use kirikae_a64::Insn;
-use kirikae_loader::{Executable, Module, LOAD_BASE};
+use kirikae_loader::{Executable, LOAD_BASE, Module};
 
 use crate::cpu::Cpu;
-use crate::horizon::{MAIN_THREAD_HANDLE, MAIN_THREAD_ID, MAIN_THREAD_PRIORITY, STACK_REGION_BASE, TICK_HZ};
+use crate::horizon::{
+    MAIN_THREAD_HANDLE, MAIN_THREAD_ID, MAIN_THREAD_PRIORITY, STACK_REGION_BASE, TICK_HZ,
+};
 use crate::kernel::{KObject, KThread};
-use crate::mem::{perm, state, GuestMemory, PAGE};
+use crate::mem::{GuestMemory, PAGE, perm, state};
 
 pub use crate::abi::{Entry, GuestFn};
 
@@ -66,8 +68,10 @@ impl Stats {
 
     pub fn flush(&self) {
         PENDING.with(|p| {
-            self.native_calls.fetch_add(p.native.replace(0), Ordering::Relaxed);
-            self.interpreted.fetch_add(p.interpreted.replace(0), Ordering::Relaxed);
+            self.native_calls
+                .fetch_add(p.native.replace(0), Ordering::Relaxed);
+            self.interpreted
+                .fetch_add(p.interpreted.replace(0), Ordering::Relaxed);
         });
     }
 }
@@ -148,12 +152,16 @@ impl Process {
     }
 
     pub fn create_event(&self, signaled: bool) -> u32 {
-        let event = Arc::new(crate::kernel::Event { signaled: AtomicBool::new(signaled) });
+        let event = Arc::new(crate::kernel::Event {
+            signaled: AtomicBool::new(signaled),
+        });
         self.handles.lock().unwrap().insert(KObject::Event(event))
     }
 
     pub fn set_event(&self, handle: u32, signaled: bool) -> bool {
-        let Some(KObject::Event(e)) = self.handles.lock().unwrap().get(handle) else { return false };
+        let Some(KObject::Event(e)) = self.handles.lock().unwrap().get(handle) else {
+            return false;
+        };
         let _st = self.sched.lock();
         if signaled && !e.signaled.swap(true, Ordering::Relaxed) {
             self.sched.notify();
@@ -164,7 +172,11 @@ impl Process {
         true
     }
 
-    pub fn service_state<T: std::any::Any + Send + Sync>(&self, key: &'static str, init: impl FnOnce() -> T) -> Arc<T> {
+    pub fn service_state<T: std::any::Any + Send + Sync>(
+        &self,
+        key: &'static str,
+        init: impl FnOnce() -> T,
+    ) -> Arc<T> {
         let mut map = self.service_state.lock().unwrap();
         if let Some(s) = map.get(key) {
             return s.clone().downcast::<T>().expect("service state type");
@@ -176,7 +188,11 @@ impl Process {
 
     pub fn create_shared_memory(&self, size: u64) -> (Arc<crate::kernel::SharedMemory>, u32) {
         let s = Arc::new(crate::kernel::SharedMemory::new(size));
-        let h = self.handles.lock().unwrap().insert(KObject::SharedMemory(s.clone()));
+        let h = self
+            .handles
+            .lock()
+            .unwrap()
+            .insert(KObject::SharedMemory(s.clone()));
         (s, h)
     }
 
@@ -194,7 +210,9 @@ impl Process {
         let addr = *next;
         *next += TLS_SIZE;
         if addr.is_multiple_of(PAGE) {
-            let _ = self.memory.map_as(addr, PAGE, state::THREAD_LOCAL, perm::RW);
+            let _ = self
+                .memory
+                .map_as(addr, PAGE, state::THREAD_LOCAL, perm::RW);
         }
         addr
     }
@@ -217,15 +235,24 @@ impl Process {
     }
 
     pub fn module_base(&self, name: &str) -> Option<u64> {
-        self.modules.iter().find(|(n, _)| n == name).map(|(_, r)| r.start)
+        self.modules
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, r)| r.start)
     }
 
     pub fn describe(&self, addr: u64) -> String {
         match self.modules.iter().find(|(_, r)| r.contains(&addr)) {
             Some((name, r)) => {
                 let i = self.symbols.partition_point(|s| s.0 <= addr);
-                match i.checked_sub(1).map(|i| &self.symbols[i]).filter(|s| r.contains(&s.0) && addr - s.0 < 0x4000) {
-                    Some((at, sym)) => format!("{name}+{:#x} ({sym}+{:#x})", addr - r.start, addr - at),
+                match i
+                    .checked_sub(1)
+                    .map(|i| &self.symbols[i])
+                    .filter(|s| r.contains(&s.0) && addr - s.0 < 0x4000)
+                {
+                    Some((at, sym)) => {
+                        format!("{name}+{:#x} ({sym}+{:#x})", addr - r.start, addr - at)
+                    }
                     None => format!("{name}+{:#x}", addr - r.start),
                 }
             }
@@ -234,7 +261,11 @@ impl Process {
     }
 
     pub fn used_memory(&self) -> u64 {
-        self.code_size + *self.heap.lock().unwrap() + self.physical.load(Ordering::Relaxed) + self.stack_size + self.system_resource_size
+        self.code_size
+            + *self.heap.lock().unwrap()
+            + self.physical.load(Ordering::Relaxed)
+            + self.stack_size
+            + self.system_resource_size
     }
 
     pub fn entropy(&self, subid: u64) -> u64 {
@@ -366,7 +397,7 @@ fn start_stats(p: &'static Process) {
 }
 
 fn print_times(last: &mut HashMap<String, [u64; crate::prof::CATS]>, frames: u64) {
-    use crate::prof::{Cat, CATS, HELD, NAMES};
+    use crate::prof::{CATS, Cat, HELD, NAMES};
     let mut total = [0u64; CATS];
     let mut rows = Vec::new();
     for (i, (name, ns, simd, ops)) in crate::prof::snapshot().into_iter().enumerate() {
@@ -376,15 +407,35 @@ fn print_times(last: &mut HashMap<String, [u64; crate::prof::CATS]>, frames: u64
         for k in 0..CATS {
             total[k] += d[k];
         }
-        let busy: u64 = HELD.iter().map(|&k| d[k as usize]).sum::<u64>() + d[Cat::Gpu as usize] + d[Cat::Present as usize] + d[Cat::Video as usize];
+        let busy: u64 = HELD.iter().map(|&k| d[k as usize]).sum::<u64>()
+            + d[Cat::Gpu as usize]
+            + d[Cat::Present as usize]
+            + d[Cat::Video as usize];
         rows.push((busy, name, d, simd, ops));
     }
     let per = |ns: u64| ns as f64 / 1e6 / frames.max(1) as f64;
     let held: u64 = HELD.iter().map(|&k| total[k as usize]).sum();
-    let line: Vec<String> = (0..CATS).filter(|&k| total[k] > 0).map(|k| format!("{} {:.1}", NAMES[k], per(total[k]))).collect();
-    eprintln!("kirikae:         time per frame (ms, all threads): lock held {:.1} = {}", per(held), line.join(", "));
-    let lock = [&crate::prof::LOCK_HANDOFF_NS, &crate::prof::LOCK_HANDOFFS, &crate::prof::LOCK_IDLE_NS].map(|a| a.load(Ordering::Relaxed));
-    let prev = last.insert("lock".into(), std::array::from_fn(|k| lock.get(k).copied().unwrap_or(0))).unwrap_or([0; CATS]);
+    let line: Vec<String> = (0..CATS)
+        .filter(|&k| total[k] > 0)
+        .map(|k| format!("{} {:.1}", NAMES[k], per(total[k])))
+        .collect();
+    eprintln!(
+        "kirikae:         time per frame (ms, all threads): lock held {:.1} = {}",
+        per(held),
+        line.join(", ")
+    );
+    let lock = [
+        &crate::prof::LOCK_HANDOFF_NS,
+        &crate::prof::LOCK_HANDOFFS,
+        &crate::prof::LOCK_IDLE_NS,
+    ]
+    .map(|a| a.load(Ordering::Relaxed));
+    let prev = last
+        .insert(
+            "lock".into(),
+            std::array::from_fn(|k| lock.get(k).copied().unwrap_or(0)),
+        )
+        .unwrap_or([0; CATS]);
     let n = lock[1] - prev[1];
     eprintln!(
         "kirikae:           lock free per frame: {:.1} ms handing over ({:.0} hand-overs, {:.1} µs each), {:.1} ms with nobody waiting",
@@ -395,22 +446,46 @@ fn print_times(last: &mut HashMap<String, [u64; crate::prof::CATS]>, frames: u64
     );
     let mut svcs: Vec<(u64, usize, u64)> = (0..0x80)
         .map(|i| {
-            let (ns, n) = (crate::prof::SVC_NS[i].load(Ordering::Relaxed), crate::prof::SVC_CALLS[i].load(Ordering::Relaxed));
-            let prev = last.insert(format!("svc{i}"), std::array::from_fn(|k| [ns, n].get(k).copied().unwrap_or(0))).unwrap_or([0; CATS]);
+            let (ns, n) = (
+                crate::prof::SVC_NS[i].load(Ordering::Relaxed),
+                crate::prof::SVC_CALLS[i].load(Ordering::Relaxed),
+            );
+            let prev = last
+                .insert(
+                    format!("svc{i}"),
+                    std::array::from_fn(|k| [ns, n].get(k).copied().unwrap_or(0)),
+                )
+                .unwrap_or([0; CATS]);
             (ns - prev[0], i, n - prev[1])
         })
         .filter(|s| s.0 > 0)
         .collect();
     svcs.sort_by_key(|r| std::cmp::Reverse(r.0));
-    let line: Vec<String> = svcs.iter().take(8).map(|(ns, i, n)| format!("{i:#x} {:.1} ms ({:.0} calls)", per(*ns), *n as f64 / frames.max(1) as f64)).collect();
+    let line: Vec<String> = svcs
+        .iter()
+        .take(8)
+        .map(|(ns, i, n)| {
+            format!(
+                "{i:#x} {:.1} ms ({:.0} calls)",
+                per(*ns),
+                *n as f64 / frames.max(1) as f64
+            )
+        })
+        .collect();
     eprintln!("kirikae:           SVCs per frame: {}", line.join(", "));
     rows.sort_by_key(|r| std::cmp::Reverse(r.0));
     for (busy, name, d, simd, ops) in rows.iter().take(6) {
         if *busy == 0 {
             break;
         }
-        let line: Vec<String> = (0..CATS).filter(|&k| d[k] as f64 > 1e5 * frames as f64).map(|k| format!("{} {:.1}", NAMES[k], per(d[k]))).collect();
-        eprintln!("kirikae:           {name}: {} ({simd} SIMD/FP helper calls, {ops} op helper calls in total)", line.join(", "));
+        let line: Vec<String> = (0..CATS)
+            .filter(|&k| d[k] as f64 > 1e5 * frames as f64)
+            .map(|k| format!("{} {:.1}", NAMES[k], per(d[k])))
+            .collect();
+        eprintln!(
+            "kirikae:           {name}: {} ({simd} SIMD/FP helper calls, {ops} op helper calls in total)",
+            line.join(", ")
+        );
     }
 }
 
@@ -473,7 +548,17 @@ pub struct RunResult {
 pub fn run(file: &[u8], entries: &'static [Entry], opts: RunOptions) -> Result<RunResult, String> {
     let image = kirikae_loader::load(file, LOAD_BASE).map_err(|e| e.to_string())?;
     let entry = image.entry;
-    let exe = Executable { modules: vec![Module { name: "main".into(), image }], entry, title_id: None, main_stack_size: None, system_resource_size: 0, romfs: None };
+    let exe = Executable {
+        modules: vec![Module {
+            name: "main".into(),
+            image,
+        }],
+        entry,
+        title_id: None,
+        main_stack_size: None,
+        system_resource_size: 0,
+        romfs: None,
+    };
     run_executable(&exe, entries, opts)
 }
 
@@ -481,19 +566,44 @@ fn map_module(memory: &GuestMemory, m: &Module) -> Result<(), String> {
     let i = &m.image;
     let page = |v: u64| v.div_ceil(PAGE) * PAGE;
     let err = |e: std::io::Error| format!("mapping {}: {e}", m.name);
-    memory.map_as(i.text.start, page(i.text.end) - i.text.start, state::CODE_STATIC, perm::RX).map_err(err)?;
+    memory
+        .map_as(
+            i.text.start,
+            page(i.text.end) - i.text.start,
+            state::CODE_STATIC,
+            perm::RX,
+        )
+        .map_err(err)?;
     if i.ro.end > i.ro.start {
-        memory.map_as(i.ro.start, page(i.ro.end) - i.ro.start, state::CODE_STATIC, perm::R).map_err(err)?;
+        memory
+            .map_as(
+                i.ro.start,
+                page(i.ro.end) - i.ro.start,
+                state::CODE_STATIC,
+                perm::R,
+            )
+            .map_err(err)?;
     }
     let rw_end = page(i.bss.end.max(i.data.end));
     if rw_end > i.data.start {
-        memory.map_as(i.data.start, rw_end - i.data.start, state::CODE_MUTABLE, perm::RW).map_err(err)?;
+        memory
+            .map_as(
+                i.data.start,
+                rw_end - i.data.start,
+                state::CODE_MUTABLE,
+                perm::RW,
+            )
+            .map_err(err)?;
     }
     memory.write(i.base, &i.memory);
     Ok(())
 }
 
-pub fn run_executable(exe: &Executable, entries: &'static [Entry], opts: RunOptions) -> Result<RunResult, String> {
+pub fn run_executable(
+    exe: &Executable,
+    entries: &'static [Entry],
+    opts: RunOptions,
+) -> Result<RunResult, String> {
     if !entries.windows(2).all(|w| w[0].addr < w[1].addr) {
         return Err("the recompiled function table is not sorted".into());
     }
@@ -501,9 +611,16 @@ pub fn run_executable(exe: &Executable, entries: &'static [Entry], opts: RunOpti
     for m in &exe.modules {
         map_module(&memory, m)?;
     }
-    let stack_size = exe.main_stack_size.unwrap_or(DEFAULT_STACK_SIZE).max(PAGE).div_ceil(PAGE) * PAGE;
+    let stack_size = exe
+        .main_stack_size
+        .unwrap_or(DEFAULT_STACK_SIZE)
+        .max(PAGE)
+        .div_ceil(PAGE)
+        * PAGE;
     let stack_top = STACK_REGION_BASE + stack_size;
-    memory.map_as(STACK_REGION_BASE, stack_size, state::STACK, perm::RW).map_err(|e| e.to_string())?;
+    memory
+        .map_as(STACK_REGION_BASE, stack_size, state::STACK, perm::RW)
+        .map_err(|e| e.to_string())?;
 
     let process: &'static Process = Box::leak(Box::new(Process {
         memory,
@@ -571,15 +688,25 @@ pub fn run_executable(exe: &Executable, entries: &'static [Entry], opts: RunOpti
         paused: AtomicBool::new(false),
         context: Default::default(),
     });
-    process.handles.lock().unwrap().insert_at(main.handle, KObject::Thread(main.clone()));
+    process
+        .handles
+        .lock()
+        .unwrap()
+        .insert_at(main.handle, KObject::Thread(main.clone()));
     let thread = crate::sched::spawn(process, main, move |c| {
         c.x[0] = 0;
-        c.x[1] = if horizon_abi { MAIN_THREAD_HANDLE } else { u64::MAX };
+        c.x[1] = if horizon_abi {
+            MAIN_THREAD_HANDLE
+        } else {
+            u64::MAX
+        };
         c.sp = stack_top;
         c.pc = entry;
     })
     .map_err(|e| e.to_string())?;
-    thread.join().map_err(|_| "the guest thread panicked".to_string())?;
+    thread
+        .join()
+        .map_err(|_| "the guest thread panicked".to_string())?;
     {
         let s = &process.sched;
         let mut st = s.lock();
@@ -610,8 +737,15 @@ pub fn program_main(package: &'static [u8], entries: &'static [Entry]) -> ! {
     };
     crate::coverage::start();
     crate::usage::start(exe.title_id.unwrap_or(0));
-    let result = run_executable(&exe, entries, RunOptions { capture_output: false });
+    let result = run_executable(
+        &exe,
+        entries,
+        RunOptions {
+            capture_output: false,
+        },
+    );
     crate::usage::finish();
+    crate::coverage::finish();
     match result {
         Ok(r) => {
             if std::env::var_os("KIRIKAE_STATS").is_some() {

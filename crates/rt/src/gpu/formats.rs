@@ -72,10 +72,22 @@ pub struct TexFormat {
 }
 
 const fn plain(vk: vk::Format, bytes: u32) -> TexFormat {
-    TexFormat { vk, block_bytes: bytes, block_w: 1, block_h: 1, astc: false }
+    TexFormat {
+        vk,
+        block_bytes: bytes,
+        block_w: 1,
+        block_h: 1,
+        astc: false,
+    }
 }
 const fn block(vk: vk::Format, bytes: u32) -> TexFormat {
-    TexFormat { vk, block_bytes: bytes, block_w: 4, block_h: 4, astc: false }
+    TexFormat {
+        vk,
+        block_bytes: bytes,
+        block_w: 4,
+        block_h: 4,
+        astc: false,
+    }
 }
 
 pub fn texture(components: u32, data_type: u32, srgb: bool) -> Option<TexFormat> {
@@ -153,7 +165,17 @@ pub fn texture(components: u32, data_type: u32, srgb: bool) -> Option<TexFormat>
         (0x3a, _) => plain(F::D16_UNORM, 2),
         (c @ (0x40..=0x46 | 0x50..=0x57), _) => {
             let (w, h) = astc_block(c)?;
-            TexFormat { vk: if srgb { F::R8G8B8A8_SRGB } else { F::R8G8B8A8_UNORM }, block_bytes: 16, block_w: w, block_h: h, astc: true }
+            TexFormat {
+                vk: if srgb {
+                    F::R8G8B8A8_SRGB
+                } else {
+                    F::R8G8B8A8_UNORM
+                },
+                block_bytes: 16,
+                block_w: w,
+                block_h: h,
+                astc: true,
+            }
         }
         _ => return None,
     };
@@ -196,19 +218,123 @@ pub fn vertex_attribute(sizes: u32, ty: u32) -> Option<(vk::Format, Kind)> {
     };
     let pick = |f: [F; 7]| f[(ty.clamp(1, 7) - 1) as usize];
     let f = match sizes {
-        0x01 => pick([F::UNDEFINED, F::UNDEFINED, F::R32G32B32A32_SINT, F::R32G32B32A32_UINT, F::UNDEFINED, F::UNDEFINED, F::R32G32B32A32_SFLOAT]),
-        0x02 => pick([F::UNDEFINED, F::UNDEFINED, F::R32G32B32_SINT, F::R32G32B32_UINT, F::UNDEFINED, F::UNDEFINED, F::R32G32B32_SFLOAT]),
-        0x03 => pick([F::R16G16B16A16_SNORM, F::R16G16B16A16_UNORM, F::R16G16B16A16_SINT, F::R16G16B16A16_UINT, F::R16G16B16A16_USCALED, F::R16G16B16A16_SSCALED, F::R16G16B16A16_SFLOAT]),
-        0x04 => pick([F::UNDEFINED, F::UNDEFINED, F::R32G32_SINT, F::R32G32_UINT, F::UNDEFINED, F::UNDEFINED, F::R32G32_SFLOAT]),
-        0x05 => pick([F::R16G16B16_SNORM, F::R16G16B16_UNORM, F::R16G16B16_SINT, F::R16G16B16_UINT, F::R16G16B16_USCALED, F::R16G16B16_SSCALED, F::R16G16B16_SFLOAT]),
-        0x0a | 0x2f => pick([F::R8G8B8A8_SNORM, F::R8G8B8A8_UNORM, F::R8G8B8A8_SINT, F::R8G8B8A8_UINT, F::R8G8B8A8_USCALED, F::R8G8B8A8_SSCALED, F::UNDEFINED]),
-        0x0f => pick([F::R16G16_SNORM, F::R16G16_UNORM, F::R16G16_SINT, F::R16G16_UINT, F::R16G16_USCALED, F::R16G16_SSCALED, F::R16G16_SFLOAT]),
-        0x12 => pick([F::UNDEFINED, F::UNDEFINED, F::R32_SINT, F::R32_UINT, F::UNDEFINED, F::UNDEFINED, F::R32_SFLOAT]),
-        0x13 => pick([F::R8G8B8_SNORM, F::R8G8B8_UNORM, F::R8G8B8_SINT, F::R8G8B8_UINT, F::R8G8B8_USCALED, F::R8G8B8_SSCALED, F::UNDEFINED]),
-        0x18 | 0x32 => pick([F::R8G8_SNORM, F::R8G8_UNORM, F::R8G8_SINT, F::R8G8_UINT, F::R8G8_USCALED, F::R8G8_SSCALED, F::UNDEFINED]),
-        0x1b => pick([F::R16_SNORM, F::R16_UNORM, F::R16_SINT, F::R16_UINT, F::R16_USCALED, F::R16_SSCALED, F::R16_SFLOAT]),
-        0x1d | 0x34 => pick([F::R8_SNORM, F::R8_UNORM, F::R8_SINT, F::R8_UINT, F::R8_USCALED, F::R8_SSCALED, F::UNDEFINED]),
-        0x30 => pick([F::A2B10G10R10_SNORM_PACK32, F::A2B10G10R10_UNORM_PACK32, F::A2B10G10R10_SINT_PACK32, F::A2B10G10R10_UINT_PACK32, F::A2B10G10R10_USCALED_PACK32, F::A2B10G10R10_SSCALED_PACK32, F::UNDEFINED]),
+        0x01 => pick([
+            F::UNDEFINED,
+            F::UNDEFINED,
+            F::R32G32B32A32_SINT,
+            F::R32G32B32A32_UINT,
+            F::UNDEFINED,
+            F::UNDEFINED,
+            F::R32G32B32A32_SFLOAT,
+        ]),
+        0x02 => pick([
+            F::UNDEFINED,
+            F::UNDEFINED,
+            F::R32G32B32_SINT,
+            F::R32G32B32_UINT,
+            F::UNDEFINED,
+            F::UNDEFINED,
+            F::R32G32B32_SFLOAT,
+        ]),
+        0x03 => pick([
+            F::R16G16B16A16_SNORM,
+            F::R16G16B16A16_UNORM,
+            F::R16G16B16A16_SINT,
+            F::R16G16B16A16_UINT,
+            F::R16G16B16A16_USCALED,
+            F::R16G16B16A16_SSCALED,
+            F::R16G16B16A16_SFLOAT,
+        ]),
+        0x04 => pick([
+            F::UNDEFINED,
+            F::UNDEFINED,
+            F::R32G32_SINT,
+            F::R32G32_UINT,
+            F::UNDEFINED,
+            F::UNDEFINED,
+            F::R32G32_SFLOAT,
+        ]),
+        0x05 => pick([
+            F::R16G16B16_SNORM,
+            F::R16G16B16_UNORM,
+            F::R16G16B16_SINT,
+            F::R16G16B16_UINT,
+            F::R16G16B16_USCALED,
+            F::R16G16B16_SSCALED,
+            F::R16G16B16_SFLOAT,
+        ]),
+        0x0a | 0x2f => pick([
+            F::R8G8B8A8_SNORM,
+            F::R8G8B8A8_UNORM,
+            F::R8G8B8A8_SINT,
+            F::R8G8B8A8_UINT,
+            F::R8G8B8A8_USCALED,
+            F::R8G8B8A8_SSCALED,
+            F::UNDEFINED,
+        ]),
+        0x0f => pick([
+            F::R16G16_SNORM,
+            F::R16G16_UNORM,
+            F::R16G16_SINT,
+            F::R16G16_UINT,
+            F::R16G16_USCALED,
+            F::R16G16_SSCALED,
+            F::R16G16_SFLOAT,
+        ]),
+        0x12 => pick([
+            F::UNDEFINED,
+            F::UNDEFINED,
+            F::R32_SINT,
+            F::R32_UINT,
+            F::UNDEFINED,
+            F::UNDEFINED,
+            F::R32_SFLOAT,
+        ]),
+        0x13 => pick([
+            F::R8G8B8_SNORM,
+            F::R8G8B8_UNORM,
+            F::R8G8B8_SINT,
+            F::R8G8B8_UINT,
+            F::R8G8B8_USCALED,
+            F::R8G8B8_SSCALED,
+            F::UNDEFINED,
+        ]),
+        0x18 | 0x32 => pick([
+            F::R8G8_SNORM,
+            F::R8G8_UNORM,
+            F::R8G8_SINT,
+            F::R8G8_UINT,
+            F::R8G8_USCALED,
+            F::R8G8_SSCALED,
+            F::UNDEFINED,
+        ]),
+        0x1b => pick([
+            F::R16_SNORM,
+            F::R16_UNORM,
+            F::R16_SINT,
+            F::R16_UINT,
+            F::R16_USCALED,
+            F::R16_SSCALED,
+            F::R16_SFLOAT,
+        ]),
+        0x1d | 0x34 => pick([
+            F::R8_SNORM,
+            F::R8_UNORM,
+            F::R8_SINT,
+            F::R8_UINT,
+            F::R8_USCALED,
+            F::R8_SSCALED,
+            F::UNDEFINED,
+        ]),
+        0x30 => pick([
+            F::A2B10G10R10_SNORM_PACK32,
+            F::A2B10G10R10_UNORM_PACK32,
+            F::A2B10G10R10_SINT_PACK32,
+            F::A2B10G10R10_UINT_PACK32,
+            F::A2B10G10R10_USCALED_PACK32,
+            F::A2B10G10R10_SSCALED_PACK32,
+            F::UNDEFINED,
+        ]),
         0x31 => F::B10G11R11_UFLOAT_PACK32,
         _ => F::UNDEFINED,
     };
@@ -272,7 +398,11 @@ pub fn blend_op(v: u32) -> vk::BlendOp {
 
 pub fn compare_op(v: u32) -> vk::CompareOp {
     use vk::CompareOp as C;
-    let n = if v >= 0x200 { v - 0x200 } else { v.saturating_sub(1) };
+    let n = if v >= 0x200 {
+        v - 0x200
+    } else {
+        v.saturating_sub(1)
+    };
     match n & 0xf {
         0 => C::NEVER,
         1 => C::LESS,

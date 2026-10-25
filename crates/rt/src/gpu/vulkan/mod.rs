@@ -4,16 +4,17 @@ use std::sync::Arc;
 
 use ash::vk;
 
-use crate::mem::GuestMemory;
 use super::buffer_cache::{self, BufferCache};
 use super::fxhash::FastMap as HashMap;
 use super::tic;
+use crate::mem::GuestMemory;
 
 mod buffers;
 mod descriptors;
 mod draw;
 mod guest_writes;
 mod images;
+mod nvn;
 mod pipeline;
 mod present;
 mod readback;
@@ -23,12 +24,16 @@ mod tiling;
 mod volumes;
 
 pub use images::{Surface, color_surface};
+pub use nvn::replay_submit;
 pub use present::Presented;
 
 use draw::{Bound, DrawScratch, RenderTargets, TargetAsk};
 use guest_writes::{CpWrites, Pending, PendingPages};
 use images::{Image, ImageKey};
-use pipeline::{LayoutKey, PipelineCompiler, PipelineKey, ShaderKey, ShaderModule, pipeline_cache_file, pipeline_cache_matches, remove_stale_saves};
+use pipeline::{
+    LayoutKey, PipelineCompiler, PipelineKey, ShaderKey, ShaderModule, pipeline_cache_file,
+    pipeline_cache_matches, remove_stale_saves,
+};
 use present::Swapchain;
 use submit::{Batch, Garbage, IN_FLIGHT, RING_SIZE, Ring};
 use textures::{TexEntry, TexKey};
@@ -75,7 +80,10 @@ pub struct Renderer {
     shaders: HashMap<ShaderKey, Arc<ShaderModule>>,
     pipelines: HashMap<PipelineKey, vk::Pipeline>,
     layouts: HashMap<LayoutKey, (vk::DescriptorSetLayout, vk::PipelineLayout)>,
-    pair_layouts: HashMap<(vk::ShaderModule, vk::ShaderModule), (vk::DescriptorSetLayout, vk::PipelineLayout)>,
+    pair_layouts: HashMap<
+        (vk::ShaderModule, vk::ShaderModule),
+        (vk::DescriptorSetLayout, vk::PipelineLayout),
+    >,
     pair_drawn: HashMap<(vk::ShaderModule, vk::ShaderModule), u64>,
     scratch_key: PipelineKey,
     scratch: DrawScratch,
@@ -126,9 +134,25 @@ pub struct Renderer {
 }
 
 pub const DRAW_PARTS: [&str; 19] = [
-    "resolve", "targets", "shaders", "layout", "pipeline", "descriptors", "vertices", "indices", "recording", "  constant buffers", "  storage buffers", "  textures",
-    "    tex headers", "    tex layered", "    tex image", "    tex view",
-    "      gather", "      crop", "      view+sampler",
+    "resolve",
+    "targets",
+    "shaders",
+    "layout",
+    "pipeline",
+    "descriptors",
+    "vertices",
+    "indices",
+    "recording",
+    "  constant buffers",
+    "  storage buffers",
+    "  textures",
+    "    tex headers",
+    "    tex layered",
+    "    tex image",
+    "    tex view",
+    "      gather",
+    "      crop",
+    "      view+sampler",
 ];
 
 #[derive(Default, Debug, Clone)]
@@ -182,7 +206,11 @@ impl Drop for Renderer {
             let d = &self.device;
             let _ = d.device_wait_idle();
             d.destroy_pipeline_cache(self.pipeline_cache, None);
-            for p in self.pipelines.values().chain(self.compute_pipelines.values()) {
+            for p in self
+                .pipelines
+                .values()
+                .chain(self.compute_pipelines.values())
+            {
                 d.destroy_pipeline(*p, None);
             }
             for (set, layout) in self.layouts.values() {
@@ -215,9 +243,18 @@ impl Drop for Renderer {
             }
             d.destroy_buffer(self.ring.buffer, None);
             d.free_memory(self.ring.memory, None);
-            let garbage = self.batches.iter_mut().flat_map(|b| std::mem::take(&mut b.garbage)).chain(std::mem::take(&mut self.garbage));
+            let garbage = self
+                .batches
+                .iter_mut()
+                .flat_map(|b| std::mem::take(&mut b.garbage))
+                .chain(std::mem::take(&mut self.garbage));
             for g in garbage.collect::<Vec<_>>() {
-                if let Garbage::Image { image, memory, views } = g {
+                if let Garbage::Image {
+                    image,
+                    memory,
+                    views,
+                } = g
+                {
                     for v in views {
                         d.destroy_image_view(v, None);
                     }
@@ -259,8 +296,17 @@ impl Drop for Renderer {
     }
 }
 
-fn find_memory(props: &vk::PhysicalDeviceMemoryProperties, bits: u32, flags: vk::MemoryPropertyFlags) -> Option<u32> {
-    (0..props.memory_type_count).find(|&i| bits >> i & 1 == 1 && props.memory_types[i as usize].property_flags.contains(flags))
+fn find_memory(
+    props: &vk::PhysicalDeviceMemoryProperties,
+    bits: u32,
+    flags: vk::MemoryPropertyFlags,
+) -> Option<u32> {
+    (0..props.memory_type_count).find(|&i| {
+        bits >> i & 1 == 1
+            && props.memory_types[i as usize]
+                .property_flags
+                .contains(flags)
+    })
 }
 
 fn hash64(data: &[u8]) -> u64 {
@@ -280,27 +326,50 @@ impl Renderer {
 
     unsafe fn create() -> Result<Renderer, Box<dyn std::error::Error>> {
         let entry = unsafe { ash::Entry::load()? };
-        let app = vk::ApplicationInfo::default().application_name(c"kirikae").engine_name(c"kirikae").api_version(vk::API_VERSION_1_3);
+        let app = vk::ApplicationInfo::default()
+            .application_name(c"kirikae")
+            .engine_name(c"kirikae")
+            .api_version(vk::API_VERSION_1_3);
         let mut layers = Vec::new();
         if crate::env_var!("KIRIKAE_VK_VALIDATION").is_some() {
             layers.push(c"VK_LAYER_KHRONOS_validation".as_ptr());
         }
         let instance_available = unsafe { entry.enumerate_instance_extension_properties(None)? };
-        let instance_has = |n: &CStr| instance_available.iter().any(|e| unsafe { CStr::from_ptr(e.extension_name.as_ptr()) } == n);
+        let instance_has = |n: &CStr| {
+            instance_available
+                .iter()
+                .any(|e| unsafe { CStr::from_ptr(e.extension_name.as_ptr()) } == n)
+        };
         let candidates: &[&'static CStr] = if cfg!(windows) {
             &[ash::khr::win32_surface::NAME]
         } else {
-            &[ash::khr::xlib_surface::NAME, ash::khr::xcb_surface::NAME, ash::khr::wayland_surface::NAME]
+            &[
+                ash::khr::xlib_surface::NAME,
+                ash::khr::xcb_surface::NAME,
+                ash::khr::wayland_surface::NAME,
+            ]
         };
-        let platforms: Vec<&'static CStr> = candidates.iter().copied().filter(|n| instance_has(n)).collect();
-        let surfaces = !crate::display::headless() && instance_has(ash::khr::surface::NAME) && !platforms.is_empty();
+        let platforms: Vec<&'static CStr> = candidates
+            .iter()
+            .copied()
+            .filter(|n| instance_has(n))
+            .collect();
+        let surfaces = !crate::display::headless()
+            && instance_has(ash::khr::surface::NAME)
+            && !platforms.is_empty();
         let mut instance_extensions = Vec::new();
         if surfaces {
             instance_extensions.push(ash::khr::surface::NAME.as_ptr());
             instance_extensions.extend(platforms.iter().map(|n| n.as_ptr()));
         }
         let instance = unsafe {
-            entry.create_instance(&vk::InstanceCreateInfo::default().application_info(&app).enabled_layer_names(&layers).enabled_extension_names(&instance_extensions), None)?
+            entry.create_instance(
+                &vk::InstanceCreateInfo::default()
+                    .application_info(&app)
+                    .enabled_layer_names(&layers)
+                    .enabled_extension_names(&instance_extensions),
+                None,
+            )?
         };
         let devices = unsafe { instance.enumerate_physical_devices()? };
         let physical = devices
@@ -314,13 +383,19 @@ impl Renderer {
             })
             .ok_or("no Vulkan 1.3 device")?;
         let props = unsafe { instance.get_physical_device_properties(physical) };
-        let name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }.to_string_lossy().into_owned();
+        let name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
         let family = unsafe { instance.get_physical_device_queue_family_properties(physical) }
             .iter()
             .position(|q| q.queue_flags.contains(vk::QueueFlags::GRAPHICS))
             .ok_or("no graphics queue")? as u32;
         let available = unsafe { instance.enumerate_device_extension_properties(physical)? };
-        let has = |n: &CStr| available.iter().any(|e| unsafe { CStr::from_ptr(e.extension_name.as_ptr()) } == n);
+        let has = |n: &CStr| {
+            available
+                .iter()
+                .any(|e| unsafe { CStr::from_ptr(e.extension_name.as_ptr()) } == n)
+        };
         let mut extensions = Vec::new();
         let push_supported = has(ash::khr::push_descriptor::NAME);
         if push_supported {
@@ -343,22 +418,51 @@ impl Renderer {
             .depth_bias_clamp(supported.depth_bias_clamp == vk::TRUE);
         let mut v13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true);
         let priorities = [1.0];
-        let queues = [vk::DeviceQueueCreateInfo::default().queue_family_index(family).queue_priorities(&priorities)];
-        let info = vk::DeviceCreateInfo::default().queue_create_infos(&queues).enabled_extension_names(&extensions).enabled_features(&features).push_next(&mut v13);
+        let queues = [vk::DeviceQueueCreateInfo::default()
+            .queue_family_index(family)
+            .queue_priorities(&priorities)];
+        let info = vk::DeviceCreateInfo::default()
+            .queue_create_infos(&queues)
+            .enabled_extension_names(&extensions)
+            .enabled_features(&features)
+            .push_next(&mut v13);
         let device = unsafe { instance.create_device(physical, &info, None)? };
         let queue = unsafe { device.get_device_queue(family, 0) };
-        let push = push_supported.then(|| ash::khr::push_descriptor::Device::new(&instance, &device));
+        let push =
+            push_supported.then(|| ash::khr::push_descriptor::Device::new(&instance, &device));
         let swapchain_fn = swapchains.then(|| ash::khr::swapchain::Device::new(&instance, &device));
         let surface_fn = surfaces.then(|| ash::khr::surface::Instance::new(&entry, &instance));
         let platforms = if surfaces { platforms } else { Vec::new() };
-        let pool = unsafe { device.create_command_pool(&vk::CommandPoolCreateInfo::default().queue_family_index(family).flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER), None)? };
-        let cmds = unsafe { device.allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(pool).command_buffer_count(IN_FLIGHT as u32))? };
-        let timestamps = if unsafe { instance.get_physical_device_queue_family_properties(physical) }[family as usize].timestamp_valid_bits > 0 {
-            let info = vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::TIMESTAMP).query_count(2 * IN_FLIGHT as u32);
-            unsafe { device.create_query_pool(&info, None) }.ok().map(|q| (q, props.limits.timestamp_period as f64))
-        } else {
-            None
+        let pool = unsafe {
+            device.create_command_pool(
+                &vk::CommandPoolCreateInfo::default()
+                    .queue_family_index(family)
+                    .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER),
+                None,
+            )?
         };
+        let cmds = unsafe {
+            device.allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::default()
+                    .command_pool(pool)
+                    .command_buffer_count(IN_FLIGHT as u32),
+            )?
+        };
+        let timestamps =
+            if unsafe { instance.get_physical_device_queue_family_properties(physical) }
+                [family as usize]
+                .timestamp_valid_bits
+                > 0
+            {
+                let info = vk::QueryPoolCreateInfo::default()
+                    .query_type(vk::QueryType::TIMESTAMP)
+                    .query_count(2 * IN_FLIGHT as u32);
+                unsafe { device.create_query_pool(&info, None) }
+                    .ok()
+                    .map(|q| (q, props.limits.timestamp_period as f64))
+            } else {
+                None
+            };
         let mem_props = unsafe { instance.get_physical_device_memory_properties(physical) };
 
         let usage = vk::BufferUsageFlags::VERTEX_BUFFER
@@ -367,26 +471,65 @@ impl Renderer {
             | vk::BufferUsageFlags::STORAGE_BUFFER
             | vk::BufferUsageFlags::TRANSFER_SRC
             | vk::BufferUsageFlags::TRANSFER_DST;
-        let buffer = unsafe { device.create_buffer(&vk::BufferCreateInfo::default().size(RING_SIZE).usage(usage), None)? };
+        let buffer = unsafe {
+            device.create_buffer(
+                &vk::BufferCreateInfo::default().size(RING_SIZE).usage(usage),
+                None,
+            )?
+        };
         let req = unsafe { device.get_buffer_memory_requirements(buffer) };
-        let ty = find_memory(&mem_props, req.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT).ok_or("no host memory")?;
-        let memory = unsafe { device.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(ty), None)? };
+        let ty = find_memory(
+            &mem_props,
+            req.memory_type_bits,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )
+        .ok_or("no host memory")?;
+        let memory = unsafe {
+            device.allocate_memory(
+                &vk::MemoryAllocateInfo::default()
+                    .allocation_size(req.size)
+                    .memory_type_index(ty),
+                None,
+            )?
+        };
         unsafe { device.bind_buffer_memory(buffer, memory, 0)? };
-        let ptr = unsafe { device.map_memory(memory, 0, RING_SIZE, vk::MemoryMapFlags::empty())? } as *mut u8;
+        let ptr = unsafe { device.map_memory(memory, 0, RING_SIZE, vk::MemoryMapFlags::empty())? }
+            as *mut u8;
 
         let sizes = [
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 65536 },
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 16384 },
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLED_IMAGE, descriptor_count: 65536 },
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLER, descriptor_count: 65536 },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                descriptor_count: 65536,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                descriptor_count: 16384,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::SAMPLED_IMAGE,
+                descriptor_count: 65536,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::SAMPLER,
+                descriptor_count: 65536,
+            },
         ];
         let mut batches = Vec::new();
         for cmd in cmds {
             batches.push(Batch {
                 cmd,
                 fence: unsafe { device.create_fence(&vk::FenceCreateInfo::default(), None)? },
-                acquired: unsafe { device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)? },
-                descriptor_pool: unsafe { device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(16384).pool_sizes(&sizes), None)? },
+                acquired: unsafe {
+                    device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)?
+                },
+                descriptor_pool: unsafe {
+                    device.create_descriptor_pool(
+                        &vk::DescriptorPoolCreateInfo::default()
+                            .max_sets(16384)
+                            .pool_sizes(&sizes),
+                        None,
+                    )?
+                },
                 serial: 0,
                 ring_end: 0,
                 write_back: Vec::new(),
@@ -400,9 +543,20 @@ impl Renderer {
         if let Some(f) = &cache_file {
             remove_stale_saves(f);
         }
-        let initial = cache_file.as_ref().and_then(|f| std::fs::read(f).ok()).filter(|d| pipeline_cache_matches(d, &props)).unwrap_or_default();
-        let pipeline_cache = unsafe { device.create_pipeline_cache(&vk::PipelineCacheCreateInfo::default().initial_data(&initial), None) }
-            .or_else(|_| unsafe { device.create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None) })?;
+        let initial = cache_file
+            .as_ref()
+            .and_then(|f| std::fs::read(f).ok())
+            .filter(|d| pipeline_cache_matches(d, &props))
+            .unwrap_or_default();
+        let pipeline_cache = unsafe {
+            device.create_pipeline_cache(
+                &vk::PipelineCacheCreateInfo::default().initial_data(&initial),
+                None,
+            )
+        }
+        .or_else(|_| unsafe {
+            device.create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None)
+        })?;
         let compiler = PipelineCompiler::new(&device, pipeline_cache);
 
         Ok(Renderer {
@@ -424,7 +578,14 @@ impl Renderer {
             serial: 1,
             timestamps,
             rendering: None,
-            ring: Ring { buffer, memory, ptr, head: 0, tail: None, recorded: 0 },
+            ring: Ring {
+                buffer,
+                memory,
+                ptr,
+                head: 0,
+                tail: None,
+                recorded: 0,
+            },
             pending: Vec::new(),
             pending_pages: PendingPages::default(),
             draw_wrote_storage: false,
@@ -481,7 +642,15 @@ impl Renderer {
             tex_cache: HashMap::default(),
             tex_at: std::collections::BTreeMap::new(),
             newest: HashMap::default(),
-            target_memo: [((u64::MAX, vk::Format::UNDEFINED, 0, 0, u64::MAX), ImageKey { cpu: 0, format: vk::Format::UNDEFINED, width: 0, height: 0 }); 4],
+            target_memo: [(
+                (u64::MAX, vk::Format::UNDEFINED, 0, 0, u64::MAX),
+                ImageKey {
+                    cpu: 0,
+                    format: vk::Format::UNDEFINED,
+                    width: 0,
+                    height: 0,
+                },
+            ); 4],
             generation: 0,
             volumes: HashMap::default(),
             retired: Vec::new(),
@@ -498,7 +667,11 @@ impl Renderer {
     }
 
     fn clock_start(&self) -> std::time::Instant {
-        if self.timing { std::time::Instant::now() } else { self.created }
+        if self.timing {
+            std::time::Instant::now()
+        } else {
+            self.created
+        }
     }
 
     fn lap(&mut self, part: usize, since: &mut std::time::Instant) {

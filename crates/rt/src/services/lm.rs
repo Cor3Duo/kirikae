@@ -41,7 +41,8 @@ fn uleb128(b: &[u8], i: &mut usize) -> Option<usize> {
 
 pub fn format_packet(packet: &[u8]) -> Option<String> {
     let severity = *packet.get(0x11)?;
-    let (mut message, mut file, mut func, mut line) = (String::new(), String::new(), String::new(), None);
+    let (mut message, mut file, mut func, mut line) =
+        (String::new(), String::new(), String::new(), None);
     let mut i = 0x18;
     while i < packet.len() {
         let id = packet[i];
@@ -49,19 +50,28 @@ pub fn format_packet(packet: &[u8]) -> Option<String> {
         let len = uleb128(packet, &mut i)?;
         let data = packet.get(i..i + len)?;
         i += len;
-        let text = || String::from_utf8_lossy(data).trim_end_matches('\0').to_string();
+        let text = || {
+            String::from_utf8_lossy(data)
+                .trim_end_matches('\0')
+                .to_string()
+        };
         match id {
             CHUNK_MESSAGE => message.push_str(&text()),
             CHUNK_FILE => file = text(),
             CHUNK_FUNCTION => func = text(),
-            CHUNK_LINE if len >= 4 => line = Some(u32::from_le_bytes(data[..4].try_into().unwrap())),
+            CHUNK_LINE if len >= 4 => {
+                line = Some(u32::from_le_bytes(data[..4].try_into().unwrap()))
+            }
             _ => {}
         }
     }
     if message.is_empty() {
         return None;
     }
-    let level = ["trace", "info", "warn", "error", "fatal"].get(severity as usize).copied().unwrap_or("log");
+    let level = ["trace", "info", "warn", "error", "fatal"]
+        .get(severity as usize)
+        .copied()
+        .unwrap_or("log");
     let at = match (file.is_empty(), line) {
         (false, Some(l)) => format!(" ({file}:{l} {func})"),
         _ => String::new(),

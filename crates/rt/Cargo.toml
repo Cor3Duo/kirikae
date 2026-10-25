@@ -13,14 +13,18 @@ ash = "0.38"
 cpal = "0.17"
 miniz_oxide = "0.8"
 openh264 = { version = "0.9", optional = true }
+# hwopus decodes real Opus packets. The wrapper is MIT/Apache-2.0 and
+# opusic-sys bundles libopus (BSD-3-Clause), same permissive family as openh264.
+opus = { version = "0.4", optional = true }
 serde_json = "1"
 softbuffer = "0.4"
 vp9dec = "=0.1.1"
 winit = "0.30"
 
 [features]
-default = ["h264"]
+default = ["h264", "opus"]
 h264 = ["dep:openh264"]
+opus = ["dep:opus"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

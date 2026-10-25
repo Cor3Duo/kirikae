@@ -1,5 +1,5 @@
 use crate::cpu::Cpu;
-use crate::services::{open, Reply, Request, Service};
+use crate::services::{Reply, Request, Service, open};
 
 pub struct Sm;
 
@@ -19,7 +19,8 @@ impl Service for Sm {
             0 => Reply::ok(),
             1 => {
                 let name = service_name(req.u64(0));
-                c.process().log_ipc(format!("sm: GetServiceHandle({name:?})"));
+                c.process()
+                    .log_ipc(format!("sm: GetServiceHandle({name:?})"));
                 Reply::ok().object(open(&name))
             }
             2 | 3 => Reply::ok(),

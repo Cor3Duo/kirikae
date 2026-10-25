@@ -1,8 +1,10 @@
-use kirikae_rt::{run, RunOptions};
-use kirikae_testkit::{deadlock_nro, hello_nro, threads_nro, HELLO_EXPECTED, THREADS_EXPECTED};
+use kirikae_rt::{RunOptions, run};
+use kirikae_testkit::{HELLO_EXPECTED, THREADS_EXPECTED, deadlock_nro, hello_nro, threads_nro};
 
 fn capture() -> RunOptions {
-    RunOptions { capture_output: true }
+    RunOptions {
+        capture_output: true,
+    }
 }
 
 #[test]

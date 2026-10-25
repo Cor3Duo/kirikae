@@ -43,7 +43,11 @@ impl<H: Host> Machine<'_, H> {
     }
 
     fn step(&mut self, pc: usize, w: u32) -> Result<(), Error> {
-        let (dst, a, b) = ((w >> 8) & 7, self.regs[((w >> 11) & 7) as usize], self.regs[((w >> 14) & 7) as usize]);
+        let (dst, a, b) = (
+            (w >> 8) & 7,
+            self.regs[((w >> 11) & 7) as usize],
+            self.regs[((w >> 14) & 7) as usize],
+        );
         let imm = ((w as i32) >> 14) as u32;
         let (src_pos, size, dst_pos) = ((w >> 17) & 31, (w >> 22) & 31, (w >> 27) & 31);
         let mask = ((1u64 << size) - 1) as u32;
@@ -121,7 +125,14 @@ fn add(a: u32, b: u32, carry: bool) -> (u32, bool) {
 }
 
 pub fn run(code: &[u32], start: usize, params: &[u32], host: &mut impl Host) -> Result<(), Error> {
-    let mut m = Machine { regs: [0; 8], carry: false, method: 0, increment: 0, params: params.iter(), host };
+    let mut m = Machine {
+        regs: [0; 8],
+        carry: false,
+        method: 0,
+        increment: 0,
+        params: params.iter(),
+        host,
+    };
     m.regs[1] = m.param();
     let mut pc = start;
     let mut branch: Option<usize> = None;
@@ -177,7 +188,7 @@ mod tests {
     const MOV: u32 = 1 << 4;
     const MADDR: u32 = 2 << 4;
     const SEND: u32 = 4 << 4;
-        const EXIT: u32 = 0x80;
+    const EXIT: u32 = 0x80;
 
     fn alu(op: u32, asg: u32, d: u32, a: u32, b: u32) -> u32 {
         asg | (d << 8) | (a << 11) | (b << 14) | (op << 17)

@@ -29,7 +29,14 @@ pub(super) fn fit_block(log2: u32, extent: u64) -> u32 {
     l
 }
 
-pub(super) fn volume_size(width: u32, height: u32, depth: u32, bpp: u32, block_height_log2: u32, block_depth_log2: u32) -> u64 {
+pub(super) fn volume_size(
+    width: u32,
+    height: u32,
+    depth: u32,
+    bpp: u32,
+    block_height_log2: u32,
+    block_depth_log2: u32,
+) -> u64 {
     let gobs_wide = (width as u64 * bpp as u64).div_ceil(64);
     let gobs_high = (height as u64).div_ceil(8);
     let bh = fit_block(block_height_log2, gobs_high);
@@ -39,7 +46,15 @@ pub(super) fn volume_size(width: u32, height: u32, depth: u32, bpp: u32, block_h
     gobs_wide * blocks_high * blocks_deep * (512 << (bh + bd))
 }
 
-pub(super) fn deswizzle_3d(raw: &[u8], width: u32, height: u32, depth: u32, bpp: u32, block_height_log2: u32, block_depth_log2: u32) -> Vec<u8> {
+pub(super) fn deswizzle_3d(
+    raw: &[u8],
+    width: u32,
+    height: u32,
+    depth: u32,
+    bpp: u32,
+    block_height_log2: u32,
+    block_depth_log2: u32,
+) -> Vec<u8> {
     let row = width as u64 * bpp as u64;
     let gobs_wide = row.div_ceil(64);
     let gobs_high = (height as u64).div_ceil(8);
@@ -56,7 +71,11 @@ pub(super) fn deswizzle_3d(raw: &[u8], width: u32, height: u32, depth: u32, bpp:
                 let block = ((z >> bd) * blocks_high + ((y / 8) >> bh)) * gobs_wide + x / 64;
                 let gob = ((z & ((1 << bd) - 1)) << bh) + ((y / 8) & ((1 << bh) - 1));
                 let (gx, gy) = (x % 64, y % 8);
-                let inner = (gx / 32) * 256 + (gy / 2) * 64 + ((gx % 32) / 16) * 32 + (gy % 2) * 16 + (gx % 16);
+                let inner = (gx / 32) * 256
+                    + (gy / 2) * 64
+                    + ((gx % 32) / 16) * 32
+                    + (gy % 2) * 16
+                    + (gx % 16);
                 let o = (block * block_size + gob * 512 + inner) as usize;
                 let n = (16 - (x % 16)).min(row - x) as usize;
                 if let Some(src) = raw.get(o..o + n) {
@@ -70,7 +89,12 @@ pub(super) fn deswizzle_3d(raw: &[u8], width: u32, height: u32, depth: u32, bpp:
 }
 
 pub(super) fn layer_alignment(h: &TextureHeader, f: &TexFormat) -> Option<u64> {
-    let Layout::BlockLinear { block_height_log2, .. } = h.layout else { return None };
+    let Layout::BlockLinear {
+        block_height_log2, ..
+    } = h.layout
+    else {
+        return None;
+    };
     let gobs_high = (h.height.div_ceil(f.block_h) as u64).div_ceil(8);
     let mut bhl = block_height_log2;
     while bhl > 0 && (1u64 << (bhl - 1)) >= gobs_high {
@@ -80,24 +104,37 @@ pub(super) fn layer_alignment(h: &TextureHeader, f: &TexFormat) -> Option<u64> {
 }
 
 pub(super) fn layer_size(h: &TextureHeader, f: &TexFormat, levels: u32) -> Option<u64> {
-    let Layout::BlockLinear { .. } = h.layout else { return None };
+    let Layout::BlockLinear { .. } = h.layout else {
+        return None;
+    };
     let size = level_offset(h, f, levels);
     let align = layer_alignment(h, f)?;
     Some(size.div_ceil(align) * align)
 }
 
 pub(super) fn level_offset(h: &TextureHeader, f: &TexFormat, level: u32) -> u64 {
-    let Layout::BlockLinear { block_height_log2, .. } = h.layout else { return 0 };
+    let Layout::BlockLinear {
+        block_height_log2, ..
+    } = h.layout
+    else {
+        return 0;
+    };
     let mut size = 0u64;
     for level in 0..level {
-        let (bw, bh) = ((h.width >> level).max(1).div_ceil(f.block_w), (h.height >> level).max(1).div_ceil(f.block_h));
+        let (bw, bh) = (
+            (h.width >> level).max(1).div_ceil(f.block_w),
+            (h.height >> level).max(1).div_ceil(f.block_h),
+        );
         let gobs_high = (bh as u64).div_ceil(8);
         let mut bhl = block_height_log2;
         while bhl > 0 && (1u64 << (bhl - 1)) >= gobs_high {
             bhl -= 1;
         }
         let rows = 8u64 << bhl;
-        size += (bw as u64 * f.block_bytes as u64).div_ceil(64) * 64 * (bh as u64).div_ceil(rows) * rows;
+        size += (bw as u64 * f.block_bytes as u64).div_ceil(64)
+            * 64
+            * (bh as u64).div_ceil(rows)
+            * rows;
     }
     size
 }
@@ -116,7 +153,8 @@ mod tests {
         for z in 0..d as u64 {
             for y in 0..h as u64 {
                 for x in 0..(w * bpp) as u64 {
-                    raw[(z * slice + block_linear_offset(x, y, (w * bpp) as u64, 1)) as usize] = (x + 7 * y + 31 * z) as u8;
+                    raw[(z * slice + block_linear_offset(x, y, (w * bpp) as u64, 1)) as usize] =
+                        (x + 7 * y + 31 * z) as u8;
                 }
             }
         }
@@ -125,7 +163,10 @@ mod tests {
         for z in 0..d as usize {
             for y in 0..h as usize {
                 for x in 0..row {
-                    assert_eq!(lin[(z * h as usize + y) * row + x], (x + 7 * y + 31 * z) as u8);
+                    assert_eq!(
+                        lin[(z * h as usize + y) * row + x],
+                        (x + 7 * y + 31 * z) as u8
+                    );
                 }
             }
         }
@@ -141,7 +182,10 @@ mod tests {
             data_types: [2; 4],
             swizzle: [2, 3, 4, 5],
             address: 0,
-            layout: Layout::BlockLinear { block_height_log2, block_depth_log2: 0 },
+            layout: Layout::BlockLinear {
+                block_height_log2,
+                block_depth_log2: 0,
+            },
             width,
             height,
             depth: 6,

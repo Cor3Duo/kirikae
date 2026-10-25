@@ -1,11 +1,12 @@
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::cpu::Cpu;
 use crate::horizon::{
-    ok, ok1, MAIN_THREAD_ID, RESULT_CANCELLED, RESULT_INVALID_COMBINATION, RESULT_INVALID_CORE, RESULT_INVALID_HANDLE, RESULT_INVALID_PRIORITY,
-    RESULT_BUSY, RESULT_INVALID_ENUM, RESULT_INVALID_POINTER, RESULT_INVALID_STATE, RESULT_TIMED_OUT,
+    MAIN_THREAD_ID, RESULT_BUSY, RESULT_CANCELLED, RESULT_INVALID_COMBINATION, RESULT_INVALID_CORE,
+    RESULT_INVALID_ENUM, RESULT_INVALID_HANDLE, RESULT_INVALID_POINTER, RESULT_INVALID_PRIORITY,
+    RESULT_INVALID_STATE, RESULT_TIMED_OUT, ok, ok1,
 };
 use crate::kernel::{Event, KObject, KThread, PSEUDO_CURRENT_PROCESS, PSEUDO_CURRENT_THREAD};
 use crate::sched;
@@ -67,7 +68,10 @@ pub fn create_thread(c: &mut Cpu) {
     });
     handles.insert_at(handle, KObject::Thread(thread));
     drop(handles);
-    p.log_ipc(format!("CreateThread(entry={}, stack={stack_top:#x}, prio={priority}, core={core}) -> {handle:#x}", p.describe(entry)));
+    p.log_ipc(format!(
+        "CreateThread(entry={}, stack={stack_top:#x}, prio={priority}, core={core}) -> {handle:#x}",
+        p.describe(entry)
+    ));
     ok1(c, handle as u64);
 }
 
@@ -89,7 +93,7 @@ pub fn start_thread(c: &mut Cpu) {
     });
     match started {
         Ok(_) => ok(c),
-        Err(e) => crate::horizon::fault(c, format!("could not start a host thread: {e}")),
+        Err(e) => crate::horizon::fatal(c, format!("could not start a host thread: {e}")),
     }
 }
 
@@ -137,7 +141,11 @@ pub fn set_core_mask(c: &mut Cpu) {
     let (core, mask) = match core {
         -2 => (DEFAULT_CORE, 1 << DEFAULT_CORE),
         _ if mask == 0 || mask & !CORE_MASK != 0 => {
-            c.x[0] = if mask == 0 { RESULT_INVALID_COMBINATION } else { RESULT_INVALID_CORE };
+            c.x[0] = if mask == 0 {
+                RESULT_INVALID_COMBINATION
+            } else {
+                RESULT_INVALID_CORE
+            };
             return;
         }
         -3 => (t.ideal_core.load(Ordering::Relaxed), mask),
@@ -154,11 +162,18 @@ pub fn set_core_mask(c: &mut Cpu) {
     t.ideal_core.store(core, Ordering::Relaxed);
     t.affinity.store(mask, Ordering::Relaxed);
     if mask & (1 << t.core.load(Ordering::Relaxed)) == 0 {
-        let to = if core >= 0 { core } else { 63 - mask.leading_zeros() as i32 };
+        let to = if core >= 0 {
+            core
+        } else {
+            63 - mask.leading_zeros() as i32
+        };
         t.core.store(to, Ordering::Relaxed);
     }
     c.process().sched.gil.changed();
-    c.process().log_ipc(format!("SetThreadCoreMask(thread {}, core {core}, mask {mask:#x})", t.id));
+    c.process().log_ipc(format!(
+        "SetThreadCoreMask(thread {}, core {core}, mask {mask:#x})",
+        t.id
+    ));
     ok(c);
 }
 
@@ -197,7 +212,9 @@ pub fn cancel_synchronization(c: &mut Cpu) {
 }
 
 fn other_thread(c: &mut Cpu, handle: u32) -> Option<Arc<KThread>> {
-    let t = (handle != PSEUDO_CURRENT_THREAD).then(|| thread_of(c, handle)).flatten();
+    let t = (handle != PSEUDO_CURRENT_THREAD)
+        .then(|| thread_of(c, handle))
+        .flatten();
     match t {
         Some(t) if Arc::ptr_eq(&t, &c.thread) => c.x[0] = RESULT_BUSY,
         Some(t) => return Some(t),
@@ -216,7 +233,9 @@ pub fn set_thread_activity(c: &mut Cpu) {
             return;
         }
     };
-    let Some(t) = other_thread(c, c.x[0] as u32) else { return };
+    let Some(t) = other_thread(c, c.x[0] as u32) else {
+        return;
+    };
     let s = &c.process().sched;
     let st = s.lock();
     if t.exited.load(Ordering::Relaxed) || t.paused.load(Ordering::Relaxed) == pause {
@@ -234,7 +253,9 @@ pub fn set_thread_activity(c: &mut Cpu) {
 
 pub fn get_thread_context3(c: &mut Cpu) {
     let out = c.x[0];
-    let Some(t) = other_thread(c, c.x[1] as u32) else { return };
+    let Some(t) = other_thread(c, c.x[1] as u32) else {
+        return;
+    };
     if !t.paused.load(Ordering::Relaxed) {
         c.x[0] = RESULT_INVALID_STATE;
         return;
@@ -249,7 +270,9 @@ pub fn get_thread_context3(c: &mut Cpu) {
 }
 
 pub fn create_event(c: &mut Cpu) {
-    let event = Arc::new(Event { signaled: AtomicBool::new(false) });
+    let event = Arc::new(Event {
+        signaled: AtomicBool::new(false),
+    });
     let mut handles = c.process().handles.lock().unwrap();
     let w = handles.insert(KObject::Event(event.clone()));
     let r = handles.insert(KObject::Event(event));
@@ -270,31 +293,59 @@ fn wait_for_objects(c: &mut Cpu) {
     let p = c.process();
     let (list, count, timeout) = (c.x[1], c.x[2].min(64), c.x[3] as i64);
     let raw = p.memory.read(list, count * 4).unwrap_or_default();
-    let handles: Vec<u32> = raw.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)).collect();
+    let handles: Vec<u32> = raw
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| u32::from_le_bytes(*b))
+        .collect();
     let mut objects = Vec::new();
     for h in &handles {
-        let obj = if *h == PSEUDO_CURRENT_THREAD { Some(KObject::Thread(c.thread.clone())) } else { p.handles.lock().unwrap().get(*h) };
+        let obj = if *h == PSEUDO_CURRENT_THREAD {
+            Some(KObject::Thread(c.thread.clone()))
+        } else {
+            p.handles.lock().unwrap().get(*h)
+        };
         match obj {
             Some(o) => objects.push(o),
             None => {
-                p.warn_once(format!("WaitSynchronization on unknown handle {h:#x} from {}", p.describe(c.x[30])));
+                p.warn_once(format!(
+                    "WaitSynchronization on unknown handle {h:#x} from {}",
+                    p.describe(c.x[30])
+                ));
                 c.x[0] = RESULT_INVALID_HANDLE;
                 return;
             }
         }
     }
     let me = c.thread.clone();
-    let what = || format!("WaitSynchronization({handles:x?}) from {}", p.describe(c.x[30]));
+    let what = || {
+        format!(
+            "WaitSynchronization({handles:x?}) from {}",
+            p.describe(c.x[30])
+        )
+    };
     let result = sched::block(c, timeout, what, |_| {
         if me.cancelled.swap(false, Ordering::Relaxed) {
             return Some(Err(RESULT_CANCELLED));
         }
-        objects.iter().position(|o| match o {
-            KObject::Event(e) => e.signaled.load(Ordering::Relaxed),
-            KObject::Thread(t) => t.exited.load(Ordering::Relaxed),
-            KObject::Session(_) | KObject::TransferMemory { .. } | KObject::SharedMemory(_) => false,
-        })
-        .map(Ok)
+        objects
+            .iter()
+            .position(|o| match o {
+                KObject::Event(e) => e.signaled.load(Ordering::Relaxed),
+                KObject::Thread(t) => t.exited.load(Ordering::Relaxed),
+                // A port is signalled while a connection waits to be accepted.
+                KObject::Port(p) => p.pending() > 0,
+                // A server session is signalled by a request or a closed peer.
+                KObject::Session(s) => s
+                    .guest_server_link()
+                    .is_some_and(|l| l.has_request() || !l.client_open()),
+                KObject::TransferMemory(_)
+                | KObject::CodeMemory(_)
+                | KObject::SharedMemory(_)
+                | KObject::ResourceLimit(_) => false,
+            })
+            .map(Ok)
     });
     match result {
         Some(Ok(i)) => ok1(c, i as u64),

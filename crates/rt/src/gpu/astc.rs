@@ -9,7 +9,9 @@ pub fn decode(blocks: &[u8], width: u32, height: u32, bw: u32, bh: u32) -> Vec<u
     for by in 0..h.div_ceil(bh) {
         for bx in 0..blocks_x {
             let i = (by * blocks_x + bx) * 16;
-            let Some(block) = blocks.get(i..i + 16) else { return out };
+            let Some(block) = blocks.get(i..i + 16) else {
+                return out;
+            };
             decode_block(block.try_into().unwrap(), bw, bh, &mut texels);
             for y in 0..bh.min(h - by * bh) {
                 for x in 0..bw.min(w - bx * bw) {
@@ -42,10 +44,21 @@ struct Range {
 
 impl Range {
     const fn new(trits: bool, quints: bool, bits: u32) -> Self {
-        Range { trits, quints, bits }
+        Range {
+            trits,
+            quints,
+            bits,
+        }
     }
     fn ise_bits(self, n: u32) -> u32 {
-        n * self.bits + if self.trits { (8 * n).div_ceil(5) } else if self.quints { (7 * n).div_ceil(3) } else { 0 }
+        n * self.bits
+            + if self.trits {
+                (8 * n).div_ceil(5)
+            } else if self.quints {
+                (7 * n).div_ceil(3)
+            } else {
+                0
+            }
     }
 }
 
@@ -133,7 +146,12 @@ fn block_mode(mode: u32) -> Option<BlockMode> {
             },
         };
     }
-    Some(BlockMode { grid_w: w, grid_h: h, dual_plane: dual, range: weight_range(r, high)? })
+    Some(BlockMode {
+        grid_w: w,
+        grid_h: h,
+        dual_plane: dual,
+        range: weight_range(r, high)?,
+    })
 }
 
 fn decode_inner(block: u128, bw: usize, bh: usize, out: &mut [[u8; 4]]) -> Option<()> {
@@ -197,13 +215,20 @@ fn decode_inner(block: u128, bw: usize, bh: usize, out: &mut [[u8; 4]]) -> Optio
         return None;
     }
     let color_bits = below_weights.checked_sub(color_start)?;
-    let color_level = COLOR_RANGES.iter().rposition(|r| r.ise_bits(color_values) <= color_bits)?;
+    let color_level = COLOR_RANGES
+        .iter()
+        .rposition(|r| r.ise_bits(color_values) <= color_bits)?;
     if color_level < 4 {
         return None;
     }
     let color_range = COLOR_RANGES[color_level];
     let mut colors = [0u32; 18];
-    ise(block, color_start, color_range, &mut colors[..color_values as usize]);
+    ise(
+        block,
+        color_start,
+        color_range,
+        &mut colors[..color_values as usize],
+    );
     for c in &mut colors[..color_values as usize] {
         *c = unquantize_color(*c, color_range);
     }
@@ -215,7 +240,12 @@ fn decode_inner(block: u128, bw: usize, bh: usize, out: &mut [[u8; 4]]) -> Optio
     }
 
     let mut grid = [0u32; 64];
-    ise(block.reverse_bits(), 0, m.range, &mut grid[..weight_count as usize]);
+    ise(
+        block.reverse_bits(),
+        0,
+        m.range,
+        &mut grid[..weight_count as usize],
+    );
     for w in &mut grid[..weight_count as usize] {
         *w = unquantize_weight(*w, m.range);
     }
@@ -230,19 +260,32 @@ fn decode_inner(block: u128, bw: usize, bh: usize, out: &mut [[u8; 4]]) -> Optio
             let gt = (dt * t * (gh - 1) + 32) >> 6;
             let (js, fs, jt, ft) = (gs >> 4, gs & 0xf, gt >> 4, gt & 0xf);
             let w11 = (fs * ft + 8) >> 4;
-            let taps = [(0, 0, 16 + w11 - fs - ft), (1, 0, fs - w11), (0, 1, ft - w11), (1, 1, w11)];
+            let taps = [
+                (0, 0, 16 + w11 - fs - ft),
+                (1, 0, fs - w11),
+                (0, 1, ft - w11),
+                (1, 1, w11),
+            ];
             let weight = |plane: usize| -> u32 {
                 let mut sum = 0;
                 for &(dx, dy, f) in &taps {
                     if f != 0 {
-                        sum += grid.get(((jt + dy) * gw + js + dx) * planes + plane).copied().unwrap_or(0) * f as u32;
+                        sum += grid
+                            .get(((jt + dy) * gw + js + dx) * planes + plane)
+                            .copied()
+                            .unwrap_or(0)
+                            * f as u32;
                     }
                 }
                 (sum + 8) >> 4
             };
             let w0 = weight(0);
             let w1 = if ccs.is_some() { weight(1) } else { w0 };
-            let part = if partitions == 1 { 0 } else { select_partition(seed, s as u32, t as u32, 0, partitions, small) };
+            let part = if partitions == 1 {
+                0
+            } else {
+                select_partition(seed, s as u32, t as u32, 0, partitions, small)
+            };
             let [e0, e1] = endpoints[part as usize];
             let mut texel = [0u8; 4];
             for (c, v) in texel.iter_mut().enumerate() {
@@ -347,7 +390,11 @@ fn quints(q: u32) -> [u32; 3] {
         q2 = (q >> 5) & 3;
         c = q & 0x1f;
     }
-    let (q1, q0) = if c & 7 == 5 { (4, (c >> 3) & 3) } else { ((c >> 3) & 3, c & 7) };
+    let (q1, q0) = if c & 7 == 5 {
+        (4, (c >> 3) & 3)
+    } else {
+        ((c >> 3) & 3, c & 7)
+    };
     [q0, q1, q2]
 }
 
@@ -375,7 +422,10 @@ fn unquantize_color(v: u32, r: Range) -> u32 {
     let (b, c) = match (r.trits, r.bits) {
         (true, 1) => (0, 204),
         (true, 2) => (bit(1) * 0x116, 93),
-        (true, 3) => ((bit(2) << 8 | bit(1) << 7) | (bit(2) << 3 | bit(1) << 2) | (bit(2) << 1 | bit(1)), 44),
+        (true, 3) => (
+            (bit(2) << 8 | bit(1) << 7) | (bit(2) << 3 | bit(1) << 2) | (bit(2) << 1 | bit(1)),
+            44,
+        ),
         (true, 4) => ((m >> 1) << 6 | (m >> 1), 22),
         (true, 5) => ((m >> 1) << 5 | (m >> 3), 11),
         (true, 6) => ((m >> 1) << 4 | (m >> 5), 5),
@@ -454,18 +504,28 @@ fn endpoint(cem: u32, v: &[u32]) -> Option<[[u32; 4]; 2]> {
             if v(1) + v(3) + v(5) >= v(0) + v(2) + v(4) {
                 ([v(0), v(2), v(4), a0], [v(1), v(3), v(5), a1])
             } else {
-                (blue_contract([v(1), v(3), v(5), a1]), blue_contract([v(0), v(2), v(4), a0]))
+                (
+                    blue_contract([v(1), v(3), v(5), a1]),
+                    blue_contract([v(0), v(2), v(4), a0]),
+                )
             }
         }
         9 | 13 => {
             let (or, r) = bit_transfer_signed(v(1) as u32, v(0) as u32);
             let (og, g) = bit_transfer_signed(v(3) as u32, v(2) as u32);
             let (ob, b) = bit_transfer_signed(v(5) as u32, v(4) as u32);
-            let (oa, a) = if cem == 13 { bit_transfer_signed(v(7) as u32, v(6) as u32) } else { (0, 255) };
+            let (oa, a) = if cem == 13 {
+                bit_transfer_signed(v(7) as u32, v(6) as u32)
+            } else {
+                (0, 255)
+            };
             if or + og + ob >= 0 {
                 ([r, g, b, a], [r + or, g + og, b + ob, a + oa])
             } else {
-                (blue_contract([r + or, g + og, b + ob, a + oa]), blue_contract([r, g, b, a]))
+                (
+                    blue_contract([r + or, g + og, b + ob, a + oa]),
+                    blue_contract([r, g, b, a]),
+                )
             }
         }
         10 => {
@@ -516,18 +576,38 @@ fn select_partition(seed: u32, mut x: u32, mut y: u32, mut z: u32, count: u32, s
         *v *= *v;
     }
     let (sh1, sh2) = if seed & 1 != 0 {
-        (if seed & 2 != 0 { 4 } else { 5 }, if count == 3 { 6 } else { 5 })
+        (
+            if seed & 2 != 0 { 4 } else { 5 },
+            if count == 3 { 6 } else { 5 },
+        )
     } else {
-        (if count == 3 { 6 } else { 5 }, if seed & 2 != 0 { 4 } else { 5 })
+        (
+            if count == 3 { 6 } else { 5 },
+            if seed & 2 != 0 { 4 } else { 5 },
+        )
     };
     let sh3 = if seed & 0x10 != 0 { sh1 } else { sh2 };
     for (i, v) in s.iter_mut().enumerate() {
-        *v >>= if i >= 8 { sh3 } else if i % 2 == 0 { sh1 } else { sh2 };
+        *v >>= if i >= 8 {
+            sh3
+        } else if i % 2 == 0 {
+            sh1
+        } else {
+            sh2
+        };
     }
     let a = (s[0] * x + s[1] * y + s[10] * z + (r >> 14)) & 0x3f;
     let b = (s[2] * x + s[3] * y + s[11] * z + (r >> 10)) & 0x3f;
-    let c = if count >= 3 { (s[4] * x + s[5] * y + s[8] * z + (r >> 6)) & 0x3f } else { 0 };
-    let d = if count >= 4 { (s[6] * x + s[7] * y + s[9] * z + (r >> 2)) & 0x3f } else { 0 };
+    let c = if count >= 3 {
+        (s[4] * x + s[5] * y + s[8] * z + (r >> 6)) & 0x3f
+    } else {
+        0
+    };
+    let d = if count >= 4 {
+        (s[6] * x + s[7] * y + s[9] * z + (r >> 2)) & 0x3f
+    } else {
+        0
+    };
     if a >= b && a >= c && a >= d {
         0
     } else if b >= c && b >= d {
@@ -562,9 +642,22 @@ mod tests {
 
     #[test]
     fn void_extent_is_constant() {
-        let block = pack(&[(0x1fc, 9), (0, 1), (3, 2), ((1 << 52) - 1, 52), (0x1234, 16), (0xabcd, 16), (0x0080, 16), (0xffff, 16)]);
+        let block = pack(&[
+            (0x1fc, 9),
+            (0, 1),
+            (3, 2),
+            ((1 << 52) - 1, 52),
+            (0x1234, 16),
+            (0xabcd, 16),
+            (0x0080, 16),
+            (0xffff, 16),
+        ]);
         for (bw, bh) in [(4, 4), (8, 5), (12, 12)] {
-            assert!(decode_one(block, bw, bh).iter().all(|&t| t == [0x12, 0xab, 0x00, 0xff]));
+            assert!(
+                decode_one(block, bw, bh)
+                    .iter()
+                    .all(|&t| t == [0x12, 0xab, 0x00, 0xff])
+            );
         }
         let hdr = block | 1 << 9;
         assert!(decode_one(hdr, 4, 4).iter().all(|&t| t == ERROR));
@@ -572,13 +665,45 @@ mod tests {
 
     #[test]
     fn block_modes() {
-        assert_eq!(block_mode(MODE_4X4_2BIT), Some(BlockMode { grid_w: 4, grid_h: 4, dual_plane: false, range: Range::new(false, false, 2) }));
+        assert_eq!(
+            block_mode(MODE_4X4_2BIT),
+            Some(BlockMode {
+                grid_w: 4,
+                grid_h: 4,
+                dual_plane: false,
+                range: Range::new(false, false, 2)
+            })
+        );
         let m = 0b1_1_11_00_1_11_00;
-        assert_eq!(block_mode(m), Some(BlockMode { grid_w: 6, grid_h: 10, dual_plane: true, range: Range::new(false, false, 5) }));
+        assert_eq!(
+            block_mode(m),
+            Some(BlockMode {
+                grid_w: 6,
+                grid_h: 10,
+                dual_plane: true,
+                range: Range::new(false, false, 5)
+            })
+        );
         let m = 0b11_10_01_1_11_00;
-        assert_eq!(block_mode(m), Some(BlockMode { grid_w: 7, grid_h: 9, dual_plane: false, range: Range::new(false, false, 3) }));
+        assert_eq!(
+            block_mode(m),
+            Some(BlockMode {
+                grid_w: 7,
+                grid_h: 9,
+                dual_plane: false,
+                range: Range::new(false, false, 3)
+            })
+        );
         let m = 0b0_0_01_00_1_01_01;
-        assert_eq!(block_mode(m), Some(BlockMode { grid_w: 9, grid_h: 2, dual_plane: false, range: Range::new(true, false, 0) }));
+        assert_eq!(
+            block_mode(m),
+            Some(BlockMode {
+                grid_w: 9,
+                grid_h: 2,
+                dual_plane: false,
+                range: Range::new(true, false, 0)
+            })
+        );
         assert_eq!(block_mode(0b000_0000_0000), None);
     }
 
@@ -593,7 +718,13 @@ mod tests {
     }
 
     fn levels(r: Range) -> u32 {
-        (if r.trits { 3 } else if r.quints { 5 } else { 1 }) << r.bits
+        (if r.trits {
+            3
+        } else if r.quints {
+            5
+        } else {
+            1
+        }) << r.bits
     }
 
     #[test]
@@ -662,7 +793,11 @@ mod tests {
     #[test]
     fn single_partition_blue_contract() {
         let b = single_partition_block([200, 100, 200, 100, 200, 100], [0; 16]);
-        assert!(decode_one(b, 4, 4).iter().all(|&t| t == [100, 100, 100, 255]));
+        assert!(
+            decode_one(b, 4, 4)
+                .iter()
+                .all(|&t| t == [100, 100, 100, 255])
+        );
     }
 
     #[test]
@@ -700,7 +835,16 @@ mod tests {
 
     #[test]
     fn decode_crops_partial_blocks() {
-        let block = pack(&[(0x1fc, 9), (0, 1), (3, 2), ((1 << 52) - 1, 52), (0xff00, 16), (0, 16), (0, 16), (0xffff, 16)]);
+        let block = pack(&[
+            (0x1fc, 9),
+            (0, 1),
+            (3, 2),
+            ((1 << 52) - 1, 52),
+            (0xff00, 16),
+            (0, 16),
+            (0, 16),
+            (0xffff, 16),
+        ]);
         let data: Vec<u8> = (0..4).flat_map(|_| block.to_le_bytes()).collect();
         let out = decode(&data, 7, 5, 4, 4);
         assert_eq!(out.len(), 7 * 5 * 4);

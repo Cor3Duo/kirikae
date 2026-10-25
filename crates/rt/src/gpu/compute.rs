@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering;
 
 use super::threed::address;
-use super::{trace, Gpu};
+use super::{Gpu, trace};
 use crate::mem::GuestMemory;
 
 pub mod reg {
@@ -62,15 +62,32 @@ impl Gpu {
     pub(super) fn dispatch(&self, mem: &GuestMemory, regs: &[u32]) {
         self.stats.dispatches.fetch_add(1, Ordering::Relaxed);
         let qmd_va = (regs[reg::QMD_ADDRESS] as u64) << 8;
-        let Some(raw) = self.read(mem, qmd_va, 0x100) else { return };
-        let words: Vec<u32> = raw.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)).collect();
+        let Some(raw) = self.read(mem, qmd_va, 0x100) else {
+            return;
+        };
+        let words: Vec<u32> = raw
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| u32::from_le_bytes(*b))
+            .collect();
         let qmd = Qmd::parse(&words);
         if crate::nvn::shadow::ON.load(Ordering::Relaxed) {
             crate::nvn::shadow::cp_dispatch(qmd.grid);
         }
         let va = address(regs, reg::PROGRAM_REGION) + qmd.program as u64;
         if trace() {
-            eprintln!("gpu: dispatch program {va:#x} grid {:?} block {:?} shared {:#x} local {:#x} cbufs {:x?} bindless slot {} tic {:#x} tsc {:#x}", qmd.grid, qmd.block, qmd.shared, qmd.local, qmd.cbufs, regs[reg::BINDLESS_TEXTURE], address(regs, reg::TEX_HEADER_POOL), address(regs, reg::TEX_SAMPLER_POOL));
+            eprintln!(
+                "gpu: dispatch program {va:#x} grid {:?} block {:?} shared {:#x} local {:#x} cbufs {:x?} bindless slot {} tic {:#x} tsc {:#x}",
+                qmd.grid,
+                qmd.block,
+                qmd.shared,
+                qmd.local,
+                qmd.cbufs,
+                regs[reg::BINDLESS_TEXTURE],
+                address(regs, reg::TEX_HEADER_POOL),
+                address(regs, reg::TEX_SAMPLER_POOL)
+            );
         }
         if let Some(dir) = crate::env_var!("KIRIKAE_SHADER_DUMP") {
             let path = std::path::Path::new(&dir).join(format!("{va:010x}_compute.bin"));

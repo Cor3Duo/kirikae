@@ -4,20 +4,29 @@ use crate::cpu::Cpu;
 
 pub mod acc;
 pub mod am;
+pub mod aoc;
+pub mod apm;
+pub mod audio;
+pub mod bcat;
+pub mod bsd;
+pub mod csrng;
+pub mod friend;
 pub mod fs;
 pub mod hid;
 pub mod hwopus;
-pub mod apm;
-pub mod audio;
+pub mod irs;
 pub mod lm;
 pub mod mm;
 pub mod nfp;
+pub mod nifm;
 pub mod nvdrv;
 pub mod pctl;
 pub mod pl;
+pub mod prepo;
 pub mod ro;
 pub mod set;
 pub mod sm;
+pub mod ssl;
 pub mod stub;
 pub mod time;
 pub mod vi;
@@ -45,19 +54,31 @@ pub struct Request {
 
 impl Request {
     pub fn u32(&self, off: usize) -> u32 {
-        self.data.get(off..off + 4).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()))
+        self.data
+            .get(off..off + 4)
+            .map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()))
     }
 
     pub fn u64(&self, off: usize) -> u64 {
-        self.data.get(off..off + 8).map_or(0, |b| u64::from_le_bytes(b.try_into().unwrap()))
+        self.data
+            .get(off..off + 8)
+            .map_or(0, |b| u64::from_le_bytes(b.try_into().unwrap()))
     }
 
     pub fn out_buf(&self, i: usize) -> Option<Buf> {
-        self.b.get(i).filter(|b| b.size > 0).or(self.c.get(i).filter(|b| b.size > 0)).copied()
+        self.b
+            .get(i)
+            .filter(|b| b.size > 0)
+            .or(self.c.get(i).filter(|b| b.size > 0))
+            .copied()
     }
 
     pub fn in_buf(&self, i: usize) -> Option<Buf> {
-        self.a.get(i).filter(|b| b.size > 0).or(self.x.get(i).filter(|b| b.size > 0)).copied()
+        self.a
+            .get(i)
+            .filter(|b| b.size > 0)
+            .or(self.x.get(i).filter(|b| b.size > 0))
+            .copied()
     }
 }
 
@@ -71,11 +92,20 @@ pub struct Reply {
 
 impl Reply {
     pub fn ok() -> Reply {
-        Reply { result: 0, data: Vec::new(), copy_handles: Vec::new(), move_handles: Vec::new(), objects: Vec::new() }
+        Reply {
+            result: 0,
+            data: Vec::new(),
+            copy_handles: Vec::new(),
+            move_handles: Vec::new(),
+            objects: Vec::new(),
+        }
     }
 
     pub fn err(result: u32) -> Reply {
-        Reply { result, ..Reply::ok() }
+        Reply {
+            result,
+            ..Reply::ok()
+        }
     }
 
     pub fn u8(mut self, v: u8) -> Reply {
@@ -132,6 +162,12 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "lm" => Arc::new(lm::Lm),
         "apm" | "apm:am" => Arc::new(apm::Apm),
         "appletOE" => Arc::new(am::AppletOe),
+        "aoc:u" => Arc::new(aoc::AddOnContentManager::new()),
+        "bcat:u" => Arc::new(bcat::Bcat { name: "bcat:u" }),
+        "bcat:a" => Arc::new(bcat::Bcat { name: "bcat:a" }),
+        "bcat:m" => Arc::new(bcat::Bcat { name: "bcat:m" }),
+        "bcat:s" => Arc::new(bcat::Bcat { name: "bcat:s" }),
+        "friend:u" => Arc::new(friend::FriendServiceCreator),
         "pctl" => Arc::new(pctl::Pctl { name: "pctl" }),
         "pctl:s" => Arc::new(pctl::Pctl { name: "pctl:s" }),
         "pctl:r" => Arc::new(pctl::Pctl { name: "pctl:r" }),
@@ -139,11 +175,21 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "fsp-srv" => Arc::new(fs::FsProxy),
         "hid" => Arc::new(hid::Hid),
         "hwopus" => Arc::new(hwopus::HwOpus),
+        "csrng" => Arc::new(csrng::Csrng),
+        "irs" => Arc::new(irs::Irs),
         "acc:u0" => Arc::new(acc::Account { name: "acc:u0" }),
         "acc:u1" => Arc::new(acc::Account { name: "acc:u1" }),
         "time:u" => Arc::new(time::Time { name: "time:u" }),
         "time:a" => Arc::new(time::Time { name: "time:a" }),
         "time:s" => Arc::new(time::Time { name: "time:s" }),
+        "bsd:u" => Arc::new(bsd::Bsd::new("bsd:u")),
+        "bsd:s" => Arc::new(bsd::Bsd::new("bsd:s")),
+        "bsd:a" => Arc::new(bsd::Bsd::new("bsd:a")),
+        "nifm:u" => Arc::new(nifm::Nifm::new("nifm:u")),
+        "nifm:s" => Arc::new(nifm::Nifm::new("nifm:s")),
+        "nifm:a" => Arc::new(nifm::Nifm::new("nifm:a")),
+        "ssl" => Arc::new(ssl::Ssl::new("ssl")),
+        "ssl:s" => Arc::new(ssl::Ssl::new("ssl:s")),
         "nvdrv" => Arc::new(nvdrv::Nvdrv { name: "nvdrv" }),
         "nvdrv:a" => Arc::new(nvdrv::Nvdrv { name: "nvdrv:a" }),
         "nvdrv:s" => Arc::new(nvdrv::Nvdrv { name: "nvdrv:s" }),
@@ -151,6 +197,7 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "audren:u" => Arc::new(audio::AudioRendererManager),
         "audout:u" => Arc::new(audio::AudioOutManager),
         "pl:u" => Arc::new(pl::Pl),
+        "prepo:u" => Arc::new(prepo::Prepo),
         "ldr:ro" | "ro:1" => Arc::new(ro::Ro),
         "set" => Arc::new(set::Set),
         "mm:u" => Arc::new(mm::Mm),

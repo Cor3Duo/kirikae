@@ -17,13 +17,20 @@ struct Fonts {
 }
 
 fn host_font() -> Option<Vec<u8>> {
-    let mut candidates: Vec<std::path::PathBuf> = std::env::var_os("KIRIKAE_SHARED_FONT").map(Into::into).into_iter().collect();
+    let mut candidates: Vec<std::path::PathBuf> = std::env::var_os("KIRIKAE_SHARED_FONT")
+        .map(Into::into)
+        .into_iter()
+        .collect();
     if let Some(windir) = std::env::var_os("WINDIR") {
         let fonts = std::path::Path::new(&windir).join("Fonts");
         candidates.extend(["segoeui.ttf", "arial.ttf"].map(|f| fonts.join(f)));
     }
     candidates.extend(
-        ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/System/Library/Fonts/Supplemental/Arial.ttf"].map(Into::into),
+        [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+        ]
+        .map(Into::into),
     );
     candidates.iter().find_map(|p| std::fs::read(p).ok())
 }
@@ -33,11 +40,18 @@ fn fonts(c: &Cpu) -> Arc<Fonts> {
     p.service_state("pl", || {
         let (memory, handle) = p.create_shared_memory(SHARED_SIZE);
         let font = host_font().unwrap_or_else(|| {
-            p.warn_once("pl: no host TrueType font found; shared fonts are empty (set KIRIKAE_SHARED_FONT)".into());
+            p.warn_once(
+                "pl: no host TrueType font found; shared fonts are empty (set KIRIKAE_SHARED_FONT)"
+                    .into(),
+            );
             Vec::new()
         });
         let stride = (font.len() as u64 + 8).next_multiple_of(0x1000);
-        let copies = if stride * FONT_TYPES as u64 <= SHARED_SIZE { FONT_TYPES } else { 1 };
+        let copies = if stride * FONT_TYPES as u64 <= SHARED_SIZE {
+            FONT_TYPES
+        } else {
+            1
+        };
         let size = font.len() as u32;
         for k in 0..copies as u64 {
             let at = k * stride;
@@ -46,7 +60,11 @@ fn fonts(c: &Cpu) -> Arc<Fonts> {
             memory.write(&p.memory, at + 8, &font);
         }
         let fonts = std::array::from_fn(|t| (((t % copies) as u64 * stride + 8) as u32, size));
-        Fonts { handle, _memory: memory, fonts }
+        Fonts {
+            handle,
+            _memory: memory,
+            fonts,
+        }
     })
 }
 
@@ -69,11 +87,16 @@ impl Service for Pl {
             5 => {
                 let p = c.process();
                 let order: Vec<u32> = (0..FONT_TYPES as u32).collect();
-                let lists: [Vec<u32>; 3] = [order.clone(), order.iter().map(|&t| font(t).0).collect(), order.iter().map(|&t| font(t).1).collect()];
+                let lists: [Vec<u32>; 3] = [
+                    order.clone(),
+                    order.iter().map(|&t| font(t).0).collect(),
+                    order.iter().map(|&t| font(t).1).collect(),
+                ];
                 for (i, list) in lists.iter().enumerate() {
                     if let Some(b) = req.out_buf(i) {
                         let bytes: Vec<u8> = list.iter().flat_map(|v| v.to_le_bytes()).collect();
-                        p.memory.write(b.addr, &bytes[..bytes.len().min(b.size as usize)]);
+                        p.memory
+                            .write(b.addr, &bytes[..bytes.len().min(b.size as usize)]);
                     }
                 }
                 Reply::ok().u8(1).u32(FONT_TYPES as u32)

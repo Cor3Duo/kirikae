@@ -43,9 +43,18 @@ impl Service for AudioOutManager {
                 write_name(c, req);
                 let channels = if req.u32(4) & 0xffff > 2 { 6 } else { 2 };
                 let p = c.process();
-                let out = Arc::new(AudioOut { event: p.create_event(false), channels, state: Mutex::new(State::default()) });
+                let out = Arc::new(AudioOut {
+                    event: p.create_event(false),
+                    channels,
+                    state: Mutex::new(State::default()),
+                });
                 start_playback(p, out.clone());
-                Reply::ok().u32(SAMPLE_RATE).u32(channels).u32(PCM_INT16).u32(STOPPED).object(out)
+                Reply::ok()
+                    .u32(SAMPLE_RATE)
+                    .u32(channels)
+                    .u32(PCM_INT16)
+                    .u32(STOPPED)
+                    .object(out)
             }
             _ => unimplemented("audout:u", c, req),
         }
@@ -93,16 +102,34 @@ impl Service for AudioOut {
                 Reply::ok()
             }
             3 | 7 => {
-                let Some(info) = req.in_buf(0).and_then(|b| p.memory.read(b.addr, b.size.min(BUFFER_INFO))) else { return Reply::ok() };
-                let word = |i: usize| info.get(i * 8..i * 8 + 8).map_or(0, |b| u64::from_le_bytes(b.try_into().unwrap()));
-                s.queued.push_back(Buffer { tag: req.u64(0), samples: word(1) + word(4), size: word(3) });
+                let Some(info) = req
+                    .in_buf(0)
+                    .and_then(|b| p.memory.read(b.addr, b.size.min(BUFFER_INFO)))
+                else {
+                    return Reply::ok();
+                };
+                let word = |i: usize| {
+                    info.get(i * 8..i * 8 + 8)
+                        .map_or(0, |b| u64::from_le_bytes(b.try_into().unwrap()))
+                };
+                s.queued.push_back(Buffer {
+                    tag: req.u64(0),
+                    samples: word(1) + word(4),
+                    size: word(3),
+                });
                 Reply::ok()
             }
             4 => Reply::ok().copy_handle(self.event),
             5 | 8 => {
-                let Some(out) = req.out_buf(0) else { return Reply::ok().u32(0) };
+                let Some(out) = req.out_buf(0) else {
+                    return Reply::ok().u32(0);
+                };
                 let n = ((out.size / 8) as usize).min(s.released.len());
-                let mut tags: Vec<u8> = s.released.drain(..n).flat_map(|t| t.to_le_bytes()).collect();
+                let mut tags: Vec<u8> = s
+                    .released
+                    .drain(..n)
+                    .flat_map(|t| t.to_le_bytes())
+                    .collect();
                 tags.resize(out.size as usize, 0);
                 p.memory.write(out.addr, &tags);
                 Reply::ok().u32(n as u32)
@@ -134,45 +161,73 @@ impl Service for AudioOut {
 }
 
 fn start_playback(p: &'static Process, out: Arc<AudioOut>) {
-    let _ = std::thread::Builder::new().name("kirikae-audio-out-service".into()).spawn(move || {
-        out.state.lock().unwrap().volume = 1.0;
-        let output = if std::env::var_os("KIRIKAE_MUTE").is_some_and(|v| v != "0") { None } else { output::Output::open(SAMPLE_RATE).ok() };
-        let channels = out.channels as usize;
-        let mut next = Instant::now();
-        let mut frames: Vec<[f32; 2]> = Vec::new();
-        loop {
-            if p.sched.exiting.load(Ordering::Relaxed) {
-                return;
-            }
-            let buffer = {
-                let s = out.state.lock().unwrap();
-                if s.started { s.queued.front().copied() } else { None }
+    let _ = std::thread::Builder::new()
+        .name("kirikae-audio-out-service".into())
+        .spawn(move || {
+            out.state.lock().unwrap().volume = 1.0;
+            let channels = out.channels as usize;
+            let output = if std::env::var_os("KIRIKAE_MUTE").is_some_and(|v| v != "0") {
+                None
+            } else {
+                output::Output::open(SAMPLE_RATE, channels).ok()
             };
-            let Some(b) = buffer else {
-                std::thread::sleep(Duration::from_millis(2));
-                next = Instant::now();
-                continue;
-            };
-            let pcm = p.memory.read(b.samples, b.size).unwrap_or_default();
-            let volume = out.state.lock().unwrap().volume;
-            frames.clear();
-            frames.extend(pcm.chunks_exact(2 * channels).map(|f| {
-                let s = |i: usize| i16::from_le_bytes([f[2 * i], f[2 * i + 1]]) as f32 / 32768.0 * volume;
-                [s(0), s(1)]
-            }));
-            if let Some(o) = &output {
-                o.push(&frames);
+            let mut next = Instant::now();
+            let mut frames: Vec<output::Frame> = Vec::new();
+            loop {
+                if p.sched.exiting.load(Ordering::Relaxed) {
+                    return;
+                }
+                let buffer = {
+                    let s = out.state.lock().unwrap();
+                    if s.started {
+                        s.queued.front().copied()
+                    } else {
+                        None
+                    }
+                };
+                let Some(b) = buffer else {
+                    crate::host1x::clock::audio_position(
+                        out.state.lock().unwrap().played,
+                        SAMPLE_RATE,
+                        false,
+                        crate::host1x::clock::AudioSource::AudOut,
+                    );
+                    std::thread::sleep(Duration::from_millis(2));
+                    next = Instant::now();
+                    continue;
+                };
+                let pcm = p.memory.read(b.samples, b.size).unwrap_or_default();
+                let volume = out.state.lock().unwrap().volume;
+                let width = channels.clamp(1, output::MAX_CHANNELS);
+                frames.clear();
+                frames.extend(pcm.chunks_exact(2 * width).map(|f| {
+                    let mut frame = [0.0f32; output::MAX_CHANNELS];
+                    for (c, sample) in frame.iter_mut().enumerate().take(width) {
+                        *sample =
+                            i16::from_le_bytes([f[2 * c], f[2 * c + 1]]) as f32 / 32768.0 * volume;
+                    }
+                    frame
+                }));
+                if let Some(o) = &output {
+                    o.push(&frames, width, output::DEFAULT_DOWNMIX);
+                }
+                next += Duration::from_secs_f64(frames.len() as f64 / f64::from(SAMPLE_RATE));
+                let played = out.state.lock().unwrap().played + frames.len() as u64;
+                crate::host1x::clock::audio_position(
+                    played,
+                    SAMPLE_RATE,
+                    output.is_some(),
+                    crate::host1x::clock::AudioSource::AudOut,
+                );
+                std::thread::sleep(next.saturating_duration_since(Instant::now()));
+                let mut s = out.state.lock().unwrap();
+                if s.queued.front().is_some_and(|q| q.tag == b.tag) {
+                    s.queued.pop_front();
+                    s.released.push_back(b.tag);
+                    s.played += frames.len() as u64;
+                }
+                drop(s);
+                p.set_event(out.event, true);
             }
-            next += Duration::from_secs_f64(frames.len() as f64 / f64::from(SAMPLE_RATE));
-            std::thread::sleep(next.saturating_duration_since(Instant::now()));
-            let mut s = out.state.lock().unwrap();
-            if s.queued.front().is_some_and(|q| q.tag == b.tag) {
-                s.queued.pop_front();
-                s.released.push_back(b.tag);
-                s.played += frames.len() as u64;
-            }
-            drop(s);
-            p.set_event(out.event, true);
-        }
-    });
+        });
 }

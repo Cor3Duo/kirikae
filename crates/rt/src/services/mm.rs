@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::cpu::Cpu;
 use crate::services::stub::unimplemented;
@@ -24,7 +24,11 @@ impl Service for Mm {
     fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
         let st = c.process().service_state("mm:u", State::default);
         let mut settings = st.settings.lock().unwrap();
-        let key = if req.cmd < 4 { req.u32(0) | OLD } else { req.u32(0) };
+        let key = if req.cmd < 4 {
+            req.u32(0) | OLD
+        } else {
+            req.u32(0)
+        };
         match req.cmd {
             0 | 1 => Reply::ok(),
             2 | 6 => {

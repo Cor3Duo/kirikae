@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
 use winit::keyboard::KeyCode;
 
@@ -31,6 +32,37 @@ pub struct PadState {
     pub buttons: u64,
     pub left: (i32, i32),
     pub right: (i32, i32),
+}
+
+/// A guest HID device that `hid` enables with `ActivateMouse` or `ActivateKeyboard`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Device {
+    Mouse,
+    Keyboard,
+}
+
+static MOUSE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static KEYBOARD_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Records a guest `ActivateMouse` or `ActivateKeyboard` request.
+///
+/// The flags are informational: [`state`] never consults them. Host keys keep driving
+/// the Npad whether or not the guest enabled its own keyboard, and no guest mouse or
+/// keyboard state is synthesised from the host devices.
+pub fn activate_device(device: Device) {
+    let flag = match device {
+        Device::Mouse => &MOUSE_ACTIVE,
+        Device::Keyboard => &KEYBOARD_ACTIVE,
+    };
+    flag.store(true, Relaxed);
+}
+
+/// Whether the guest enabled `device` through the `hid` service.
+pub fn device_active(device: Device) -> bool {
+    match device {
+        Device::Mouse => MOUSE_ACTIVE.load(Relaxed),
+        Device::Keyboard => KEYBOARD_ACTIVE.load(Relaxed),
+    }
 }
 
 enum Control {
@@ -91,7 +123,11 @@ pub fn release_all() {
 
 fn key_stick(x: i32, y: i32) -> (i32, i32) {
     let (x, y) = (x.signum(), y.signum());
-    let scale = if x != 0 && y != 0 { (STICK_MAX as f32 * std::f32::consts::FRAC_1_SQRT_2) as i32 } else { STICK_MAX };
+    let scale = if x != 0 && y != 0 {
+        (STICK_MAX as f32 * std::f32::consts::FRAC_1_SQRT_2) as i32
+    } else {
+        STICK_MAX
+    };
     (x * scale, y * scale)
 }
 
@@ -105,7 +141,11 @@ fn keyboard() -> PadState {
             Control::Right(x, y) => r = (r.0 + x, r.1 + y),
         }
     }
-    PadState { buttons, left: key_stick(l.0, l.1), right: key_stick(r.0, r.1) }
+    PadState {
+        buttons,
+        left: key_stick(l.0, l.1),
+        right: key_stick(r.0, r.1),
+    }
 }
 
 fn stick_bits(s: (i32, i32), first: u64) -> u64 {
@@ -136,8 +176,14 @@ struct Step {
 fn parse_script(s: &str) -> Result<Vec<Step>, String> {
     let mut steps = Vec::new();
     for item in s.split(',').map(str::trim).filter(|i| !i.is_empty()) {
-        let (time, controls) = item.split_once(':').ok_or_else(|| format!("missing ':' in {item:?}"))?;
-        let num = |t: &str| t.trim().parse::<f64>().map_err(|_| format!("bad time in {item:?}"));
+        let (time, controls) = item
+            .split_once(':')
+            .ok_or_else(|| format!("missing ':' in {item:?}"))?;
+        let num = |t: &str| {
+            t.trim()
+                .parse::<f64>()
+                .map_err(|_| format!("bad time in {item:?}"))
+        };
         let (from, to) = match time.split_once('-') {
             Some((a, b)) => (num(a)?, num(b)?),
             None => (num(time)?, num(time)? + 0.2),
@@ -187,7 +233,8 @@ fn parse_script(s: &str) -> Result<Vec<Step>, String> {
 }
 
 fn scripted() -> Option<PadState> {
-    static SCRIPT: std::sync::OnceLock<(std::time::Instant, Vec<Step>)> = std::sync::OnceLock::new();
+    static SCRIPT: std::sync::OnceLock<(std::time::Instant, Vec<Step>)> =
+        std::sync::OnceLock::new();
     let (start, steps) = SCRIPT.get_or_init(|| {
         let steps = match std::env::var("KIRIKAE_INPUT").map(|s| parse_script(&s)) {
             Ok(Ok(steps)) => steps,
@@ -200,13 +247,21 @@ fn scripted() -> Option<PadState> {
         (std::time::Instant::now(), steps)
     });
     let t = start.elapsed().as_secs_f64();
-    steps.iter().filter(|s| (s.from..s.to).contains(&t)).map(|s| s.pad).reduce(|a, b| PadState {
-        buttons: a.buttons | b.buttons,
-        left: if b.left != (0, 0) { b.left } else { a.left },
-        right: if b.right != (0, 0) { b.right } else { a.right },
-    })
+    steps
+        .iter()
+        .filter(|s| (s.from..s.to).contains(&t))
+        .map(|s| s.pad)
+        .reduce(|a, b| PadState {
+            buttons: a.buttons | b.buttons,
+            left: if b.left != (0, 0) { b.left } else { a.left },
+            right: if b.right != (0, 0) { b.right } else { a.right },
+        })
 }
 
+/// State of the host input devices, mapped to one Npad.
+///
+/// This is host state only: the guest device flags set by [`activate_device`] do not
+/// change how host keys, sticks and gamepads map to the Npad.
 pub fn state() -> PadState {
     let mut s = keyboard();
     for g in [gamepad::poll(), scripted()].into_iter().flatten() {
@@ -215,7 +270,8 @@ pub fn state() -> PadState {
         s.left = (pick(s.left.0, g.left.0), pick(s.left.1, g.left.1));
         s.right = (pick(s.right.0, g.right.0), pick(s.right.1, g.right.1));
     }
-    s.buttons |= stick_bits(s.left, button::STICK_L_LEFT) | stick_bits(s.right, button::STICK_R_LEFT);
+    s.buttons |=
+        stick_bits(s.left, button::STICK_L_LEFT) | stick_bits(s.right, button::STICK_R_LEFT);
     s
 }
 
@@ -225,7 +281,7 @@ mod gamepad {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
-    use super::{button, PadState, STICK_MAX};
+    use super::{PadState, STICK_MAX, button};
 
     #[repr(C)]
     #[derive(Default)]
@@ -295,21 +351,34 @@ mod gamepad {
             (0x4000, button::Y),
             (0x8000, button::X),
         ];
-        let mut buttons = MAP.iter().filter(|(x, _)| s.buttons & x != 0).fold(0, |b, (_, n)| b | n);
+        let mut buttons = MAP
+            .iter()
+            .filter(|(x, _)| s.buttons & x != 0)
+            .fold(0, |b, (_, n)| b | n);
         if s.left_trigger > 30 {
             buttons |= button::ZL;
         }
         if s.right_trigger > 30 {
             buttons |= button::ZR;
         }
-        PadState { buttons, left: (axis(s.lx, 7849), axis(s.ly, 7849)), right: (axis(s.rx, 8689), axis(s.ry, 8689)) }
+        PadState {
+            buttons,
+            left: (axis(s.lx, 7849), axis(s.ly, 7849)),
+            right: (axis(s.rx, 8689), axis(s.ry, 8689)),
+        }
     }
 
     pub fn poll() -> Option<PadState> {
         let mut pads = PADS.lock().unwrap();
-        let pads = pads.get_or_insert_with(|| Pads { get_state: load(), connected: [false; 4], last_scan: None });
+        let pads = pads.get_or_insert_with(|| Pads {
+            get_state: load(),
+            connected: [false; 4],
+            last_scan: None,
+        });
         let get_state = pads.get_state?;
-        let scan = pads.last_scan.is_none_or(|t| t.elapsed() > Duration::from_secs(2));
+        let scan = pads
+            .last_scan
+            .is_none_or(|t| t.elapsed() > Duration::from_secs(2));
         if scan {
             pads.last_scan = Some(Instant::now());
         }
@@ -336,12 +405,16 @@ mod gamepad {
 
     use gilrs::{Axis, Button, Gilrs};
 
-    use super::{button, PadState, STICK_MAX};
+    use super::{PadState, STICK_MAX, button};
 
     static STATE: Mutex<Option<PadState>> = Mutex::new(None);
 
     fn axis(v: f32, dead: f32) -> i32 {
-        if v.abs() < dead { 0 } else { (v.clamp(-1.0, 1.0) * STICK_MAX as f32) as i32 }
+        if v.abs() < dead {
+            0
+        } else {
+            (v.clamp(-1.0, 1.0) * STICK_MAX as f32) as i32
+        }
     }
 
     fn read(gilrs: &Gilrs) -> Option<PadState> {
@@ -364,9 +437,16 @@ mod gamepad {
             (Button::North, button::X),
         ];
         let (_, pad) = gilrs.gamepads().find(|(_, g)| g.is_connected())?;
-        let buttons = MAP.iter().filter(|(b, _)| pad.is_pressed(*b)).fold(0, |acc, (_, n)| acc | n);
+        let buttons = MAP
+            .iter()
+            .filter(|(b, _)| pad.is_pressed(*b))
+            .fold(0, |acc, (_, n)| acc | n);
         let stick = |x: Axis, y: Axis| (axis(pad.value(x), 0.24), axis(pad.value(y), 0.24));
-        Some(PadState { buttons, left: stick(Axis::LeftStickX, Axis::LeftStickY), right: stick(Axis::RightStickX, Axis::RightStickY) })
+        Some(PadState {
+            buttons,
+            left: stick(Axis::LeftStickX, Axis::LeftStickY),
+            right: stick(Axis::RightStickX, Axis::RightStickY),
+        })
     }
 
     fn run() {
@@ -387,7 +467,9 @@ mod gamepad {
     pub fn poll() -> Option<PadState> {
         static STARTED: OnceLock<()> = OnceLock::new();
         STARTED.get_or_init(|| {
-            let _ = std::thread::Builder::new().name("kirikae-gamepad".into()).spawn(run);
+            let _ = std::thread::Builder::new()
+                .name("kirikae-gamepad".into())
+                .spawn(run);
         });
         *STATE.lock().unwrap()
     }
@@ -398,6 +480,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn guest_device_activation_flags_are_recorded() {
+        activate_device(Device::Mouse);
+        activate_device(Device::Keyboard);
+        assert!(device_active(Device::Mouse));
+        assert!(device_active(Device::Keyboard));
+    }
+
+    #[test]
     fn keys_drive_buttons_and_sticks() {
         key(KeyCode::KeyZ, true);
         key(KeyCode::KeyW, true);
@@ -405,9 +495,23 @@ mod tests {
         key(KeyCode::KeyL, true);
         let s = keyboard();
         assert_eq!(s.buttons, button::A);
-        assert!(s.left.0 > 20000 && s.left.0 == s.left.1, "diagonal: {:?}", s.left);
+        assert!(
+            s.left.0 > 20000 && s.left.0 == s.left.1,
+            "diagonal: {:?}",
+            s.left
+        );
         assert_eq!(s.right, (STICK_MAX, 0));
-        assert_eq!(stick_bits(s.right, button::STICK_R_LEFT), button::STICK_R_LEFT << 2);
+        assert_eq!(
+            stick_bits(s.right, button::STICK_R_LEFT),
+            button::STICK_R_LEFT << 2
+        );
+        activate_device(Device::Mouse);
+        activate_device(Device::Keyboard);
+        assert_eq!(
+            keyboard().buttons,
+            button::A,
+            "guest device activation must not change the host pad mapping"
+        );
         key(KeyCode::Space, true);
         key(KeyCode::KeyZ, false);
         assert_eq!(keyboard().buttons, button::A);
@@ -419,9 +523,19 @@ mod tests {
     fn parses_input_scripts() {
         let s = parse_script("40:A, 45-47:lup+B+RRIGHT").unwrap();
         assert_eq!(s.len(), 2);
-        assert_eq!((s[0].from, s[0].to, s[0].pad.buttons), (40.0, 40.2, button::A));
+        assert_eq!(
+            (s[0].from, s[0].to, s[0].pad.buttons),
+            (40.0, 40.2, button::A)
+        );
         assert_eq!((s[1].from, s[1].to), (45.0, 47.0));
-        assert_eq!(s[1].pad, PadState { buttons: button::B, left: (0, STICK_MAX), right: (STICK_MAX, 0) });
+        assert_eq!(
+            s[1].pad,
+            PadState {
+                buttons: button::B,
+                left: (0, STICK_MAX),
+                right: (STICK_MAX, 0)
+            }
+        );
         assert!(parse_script("4:JUMP").is_err());
         assert!(parse_script("A").is_err());
     }

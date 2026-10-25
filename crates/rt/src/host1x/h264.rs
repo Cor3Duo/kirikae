@@ -1,10 +1,13 @@
 #[cfg(feature = "h264")]
+use openh264::OpenH264API;
+#[cfg(feature = "h264")]
 use openh264::decoder::{DecodeOptions, Decoder as OpenH264, DecoderConfig, Flush};
 #[cfg(feature = "h264")]
 use openh264::formats::YUVSource;
-#[cfg(feature = "h264")]
-use openh264::OpenH264API;
 
+#[cfg(feature = "h264")]
+use super::surface::BitDepth;
+use super::surface::Yuv420;
 use super::u32_at;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -128,7 +131,11 @@ impl BitWriter {
     }
 
     fn se(&mut self, v: i32) {
-        self.ue(if v > 0 { 2 * v as u32 - 1 } else { 2 * v.unsigned_abs() });
+        self.ue(if v > 0 {
+            2 * v as u32 - 1
+        } else {
+            2 * v.unsigned_abs()
+        });
     }
 
     fn nal(mut self, header: u8, out: &mut Vec<u8>) {
@@ -151,8 +158,9 @@ impl BitWriter {
 
 const ZIGZAG_4X4: [usize; 16] = [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15];
 const ZIGZAG_8X8: [usize; 64] = [
-    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22,
-    15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
+    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20,
+    13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59,
+    52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
 ];
 
 fn scaling_list(w: &mut BitWriter, list: &[u8], scan: &[usize]) {
@@ -176,6 +184,8 @@ pub fn parameter_sets(p: &PictureInfo) -> Vec<u8> {
     if p.chroma_format_idc == 3 {
         w.flag(false);
     }
+    // bit_depth_luma_minus8 and bit_depth_chroma_minus8: OpenH264 decodes 8-bit
+    // profiles only, so the rebuilt SPS always declares 8 bits.
     w.ue(0);
     w.ue(0);
     w.flag(p.qpprime_y_zero_transform_bypass);
@@ -238,13 +248,6 @@ pub fn parameter_sets(p: &PictureInfo) -> Vec<u8> {
     out
 }
 
-pub struct Frame {
-    pub width: usize,
-    pub height: usize,
-    pub y: Vec<u8>,
-    pub uv: Vec<u8>,
-}
-
 #[cfg(not(feature = "h264"))]
 pub struct Decoder;
 
@@ -254,7 +257,11 @@ impl Decoder {
         Err("H.264 support was not built in".into())
     }
 
-    pub fn decode(&mut self, _info: &PictureInfo, _slices: &[u8]) -> Result<Option<Frame>, String> {
+    pub fn decode(
+        &mut self,
+        _info: &PictureInfo,
+        _slices: &[u8],
+    ) -> Result<Option<Yuv420>, String> {
         Err("H.264 support was not built in".into())
     }
 }
@@ -269,11 +276,25 @@ pub struct Decoder {
 impl Decoder {
     pub fn new() -> Result<Decoder, String> {
         let config = DecoderConfig::new().flush_after_decode(Flush::Flush);
-        let inner = OpenH264::with_api_config(OpenH264API::from_source(), config).map_err(|e| format!("OpenH264: {e}"))?;
-        Ok(Decoder { inner, headers: Vec::new() })
+        let inner = OpenH264::with_api_config(OpenH264API::from_source(), config)
+            .map_err(|e| format!("OpenH264: {e}"))?;
+        Ok(Decoder {
+            inner,
+            headers: Vec::new(),
+        })
     }
 
-    pub fn decode(&mut self, info: &PictureInfo, slices: &[u8]) -> Result<Option<Frame>, String> {
+    pub fn decode(&mut self, info: &PictureInfo, slices: &[u8]) -> Result<Option<Yuv420>, String> {
+        // The picture setup describes the chroma format the slices were encoded
+        // with. Only 4:2:0 (idc 1) has an NV12/P010 surface; anything else would
+        // be written into a surface of the wrong shape. Idc 0 is what the setup
+        // block reads as before it is filled in, so it is treated as 4:2:0 too.
+        if info.chroma_format_idc > 1 {
+            return Err(format!(
+                "H.264 chroma format {} is not supported (4:2:0 only)",
+                info.chroma_format_idc
+            ));
+        }
         let headers = parameter_sets(info);
         let mut packet = Vec::with_capacity(headers.len() + slices.len());
         if headers != self.headers {
@@ -291,18 +312,53 @@ impl Decoder {
         let (sy, su, sv) = yuv.strides();
         let mut y = Vec::with_capacity(width * height);
         for row in yuv.y().chunks(sy).take(height) {
-            y.extend_from_slice(&row[..width]);
+            y.extend(row[..width].iter().map(|&v| v as u16));
         }
         let (cw, ch) = (width.div_ceil(2), height.div_ceil(2));
-        let mut uv = vec![0u8; width.div_ceil(2) * 2 * ch];
+        let mut uv = vec![0u16; width.div_ceil(2) * 2 * ch];
         for r in 0..ch {
             let (u, v) = (&yuv.u()[r * su..r * su + cw], &yuv.v()[r * sv..r * sv + cw]);
-            for (i, d) in uv[r * cw * 2..(r + 1) * cw * 2].as_chunks_mut::<2>().0.iter_mut().enumerate() {
-                d[0] = u[i];
-                d[1] = v[i];
+            for (i, d) in uv[r * cw * 2..(r + 1) * cw * 2]
+                .as_chunks_mut::<2>()
+                .0
+                .iter_mut()
+                .enumerate()
+            {
+                d[0] = u[i] as u16;
+                d[1] = v[i] as u16;
             }
         }
-        Ok(Some(Frame { width, height, y, uv }))
+        Ok(Some(Yuv420 {
+            width,
+            height,
+            // OpenH264 only decodes 8-bit profiles; a 10-bit stream (High 10)
+            // is rejected by the decoder above rather than decoded as garbage.
+            bit_depth: BitDepth::Eight,
+            y,
+            uv,
+        }))
+    }
+}
+
+#[cfg(all(test, not(feature = "h264")))]
+mod no_backend {
+    use super::*;
+
+    #[test]
+    fn reports_the_missing_backend() {
+        let error = match Decoder::new() {
+            Ok(_) => panic!("the decoder exists without the h264 feature"),
+            Err(e) => e,
+        };
+        assert!(error.contains("not built in"), "{error}");
+        let mut decoder = Decoder;
+        let info = PictureInfo::parse(&[0; PICTURE_INFO_SIZE]);
+        assert!(
+            decoder
+                .decode(&info, &[])
+                .unwrap_err()
+                .contains("not built in")
+        );
     }
 }
 
@@ -427,8 +483,19 @@ mod tests {
         let mut encoder = Encoder::new().unwrap();
         let frames: Vec<Vec<u8>> = (0..4)
             .map(|t| {
-                let rgb: Vec<u8> = (0..w * h).flat_map(|i| [(i % w * 2 + t * 9) as u8, (i / w * 3) as u8, (i * 7 % 251) as u8]).collect();
-                encoder.encode(&YUVBuffer::from_rgb8_source(RgbSliceU8::new(&rgb, (w, h)))).unwrap().to_vec()
+                let rgb: Vec<u8> = (0..w * h)
+                    .flat_map(|i| {
+                        [
+                            (i % w * 2 + t * 9) as u8,
+                            (i / w * 3) as u8,
+                            (i * 7 % 251) as u8,
+                        ]
+                    })
+                    .collect();
+                encoder
+                    .encode(&YUVBuffer::from_rgb8_source(RgbSliceU8::new(&rgb, (w, h))))
+                    .unwrap()
+                    .to_vec()
             })
             .collect();
         let nal_type = |n: &[u8]| n[n.iter().position(|&b| b == 1).unwrap() + 1] & 0x1f;
@@ -440,14 +507,35 @@ mod tests {
         let mut reference = OpenH264::new().unwrap();
         let mut ours = Decoder::new().unwrap();
         for frame in &frames {
-            let slices: Vec<u8> = openh264::nal_units(frame).filter(|n| matches!(nal_type(n), 1 | 5)).flatten().copied().collect();
+            let slices: Vec<u8> = openh264::nal_units(frame)
+                .filter(|n| matches!(nal_type(n), 1 | 5))
+                .flatten()
+                .copied()
+                .collect();
             let want = reference.decode(frame).unwrap().expect("reference picture");
             let got = ours.decode(&setup, &slices).unwrap().expect("picture");
             assert_eq!((got.width, got.height), want.dimensions());
+            assert_eq!(got.bit_depth, BitDepth::Eight);
             let stride = want.strides().0;
             for y in 0..h {
-                assert_eq!(&got.y[y * w..(y + 1) * w], &want.y()[y * stride..y * stride + w], "row {y}");
+                let row: Vec<u16> = want.y()[y * stride..y * stride + w]
+                    .iter()
+                    .map(|&v| v as u16)
+                    .collect();
+                assert_eq!(&got.y[y * w..(y + 1) * w], &row[..], "row {y}");
             }
         }
+    }
+
+    #[test]
+    fn rejects_non_420_chroma() {
+        let mut decoder = Decoder::new().unwrap();
+        let mut info = PictureInfo::parse(&[0; PICTURE_INFO_SIZE]);
+        info.chroma_format_idc = 2;
+        let error = decoder.decode(&info, &[]).unwrap_err();
+        assert!(error.contains("4:2:0 only"), "{error}");
+        // 4:4:4 is rejected before the decoder looks at the (empty) bitstream.
+        info.chroma_format_idc = 3;
+        assert!(decoder.decode(&info, &[]).is_err());
     }
 }

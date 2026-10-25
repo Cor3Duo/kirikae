@@ -53,29 +53,64 @@ pub struct Draw {
 
 impl Draw {
     fn shape(&self) -> (bool, u32, u64, i32, u32) {
-        (self.indexed, self.count, self.start, self.base_vertex, self.instances)
+        (
+            self.indexed,
+            self.count,
+            self.start,
+            self.base_vertex,
+            self.instances,
+        )
     }
 }
 
 #[derive(Clone, Debug)]
 pub(super) enum Cmd {
     Program(u64, u32, Arc<Vec<u64>>),
-    Uniform { stage: u8, index: u8, range: (u64, u64) },
-    Vertex { index: u8, address: u64, size: u64 },
-    Texture { stage: u8, index: u16, handle: u64 },
+    Uniform {
+        stage: u8,
+        index: u8,
+        range: (u64, u64),
+    },
+    Vertex {
+        index: u8,
+        address: u64,
+        size: u64,
+    },
+    Texture {
+        stage: u8,
+        index: u16,
+        handle: u64,
+    },
     State(Vec<(Field, u64)>),
     Targets([u64; 9], [Option<resources::Surface>; 9]),
     Clear(Clear),
     Draw(Draw),
     Dispatch([u32; 3]),
     Call(Vec<u64>),
-    UniformUpdate { address: u64, data: Arc<Vec<u8>> },
-    Storage { stage: u8, index: u8, address: u64, size: u64 },
+    UniformUpdate {
+        address: u64,
+        data: Arc<Vec<u8>>,
+    },
+    Storage {
+        stage: u8,
+        index: u8,
+        address: u64,
+        size: u64,
+    },
     Barrier(u64),
-    Report { counter: u64, address: u64 },
-    Pool { texture: bool, address: u64 },
+    Report {
+        counter: u64,
+        address: u64,
+    },
+    Pool {
+        texture: bool,
+        address: u64,
+    },
     Multisample(u64),
-    Scratch { address: u64, size: u64 },
+    Scratch {
+        address: u64,
+        size: u64,
+    },
 }
 
 #[derive(Default)]
@@ -148,12 +183,26 @@ pub type Bindings = [[Option<(u64, u32)>; crate::gpu::threed::CB_SLOTS]; 5];
 
 type ConstantBindings = Vec<(usize, usize, (u64, u32))>;
 
-type Cached = (PredictKey, Arc<super::encode::Prediction>, Arc<ConstantBindings>);
+type Cached = (
+    PredictKey,
+    Arc<super::encode::Prediction>,
+    Arc<ConstantBindings>,
+);
 
-fn bind(steps: &mut Vec<Step>, bound: &mut Bindings, group: usize, slot: usize, binding: Option<(u64, u32)>) {
+fn bind(
+    steps: &mut Vec<Step>,
+    bound: &mut Bindings,
+    group: usize,
+    slot: usize,
+    binding: Option<(u64, u32)>,
+) {
     if bound[group][slot] != binding {
         bound[group][slot] = binding;
-        steps.push(Step::Bind { group, slot, binding });
+        steps.push(Step::Bind {
+            group,
+            slot,
+            binding,
+        });
     }
 }
 
@@ -195,7 +244,15 @@ impl Segments {
     fn submit(&mut self, lists: Vec<(u64, u64, u64, List, bool)>) {
         self.batch += 1;
         for (start, end, handle, list, supported) in lists {
-            self.submitted.push_back(Pending { start, end, handle, list, supported, batch: self.batch, consumed: start });
+            self.submitted.push_back(Pending {
+                start,
+                end,
+                handle,
+                list,
+                supported,
+                batch: self.batch,
+                consumed: start,
+            });
         }
         while self.submitted.len() > MAX_SUBMITTED {
             self.submitted.pop_front();
@@ -206,11 +263,20 @@ impl Segments {
     fn find(&mut self, va: u64, len: u64) -> Option<(u64, List, bool)> {
         let inside = |p: &Pending| va >= p.start && va + len <= p.end;
         let open = self.open.min(self.submitted.len());
-        let i = self.submitted.range(open..).position(|p| inside(p) && va >= p.consumed).map(|i| i + open).or_else(|| self.submitted.iter().position(inside))?;
+        let i = self
+            .submitted
+            .range(open..)
+            .position(|p| inside(p) && va >= p.consumed)
+            .map(|i| i + open)
+            .or_else(|| self.submitted.iter().position(inside))?;
         let p = &mut self.submitted[i];
         p.consumed = p.consumed.max(va + len);
         let (handle, list, supported, batch) = (p.handle, p.list.clone(), p.supported, p.batch);
-        while self.submitted.get(self.open).is_some_and(|p| p.consumed >= p.end) {
+        while self
+            .submitted
+            .get(self.open)
+            .is_some_and(|p| p.consumed >= p.end)
+        {
             self.open += 1;
         }
         while self.submitted.front().is_some_and(|p| p.batch < batch) {
@@ -223,7 +289,16 @@ impl Segments {
 
 const MAX_SUBMITTED: usize = 100_000;
 
-static SEGMENTS: Mutex<Segments> = Mutex::new(Segments { submitted: VecDeque::new(), open: 0, batch: 0, words_supported: 0, words_in_lists: 0, words_elsewhere: 0, entries_in_lists: 0, entries_elsewhere: 0 });
+static SEGMENTS: Mutex<Segments> = Mutex::new(Segments {
+    submitted: VecDeque::new(),
+    open: 0,
+    batch: 0,
+    words_supported: 0,
+    words_in_lists: 0,
+    words_elsewhere: 0,
+    entries_in_lists: 0,
+    entries_elsewhere: 0,
+});
 
 const NOT_RECORDED: [&str; 12] = [
     "nvnCommandBufferInitialize",
@@ -267,7 +342,14 @@ static UPLOADS: Mutex<Vec<(u64, u32)>> = Mutex::new(Vec::new());
 
 pub fn cp_upload(at: u64, bytes: &[u8]) {
     let mut u = UPLOADS.lock().unwrap();
-    u.extend(bytes.as_chunks::<4>().0.iter().enumerate().map(|(i, w)| (at + 4 * i as u64, u32::from_le_bytes(*w))));
+    u.extend(
+        bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .enumerate()
+            .map(|(i, w)| (at + 4 * i as u64, u32::from_le_bytes(*w))),
+    );
 }
 
 pub fn cp_entry(va: u64, words: u64) -> Option<Plan> {
@@ -304,20 +386,43 @@ pub fn cp_entry(va: u64, words: u64) -> Option<Plan> {
                     if let Some(base) = support.0
                         && (d.base_vertex != 0 || d.base_instance != 0)
                     {
-                        predicted.extend([(base + BASE_VERTEX, d.base_vertex as u32, "base vertex"), (base + BASE_VERTEX, 0, "base vertex")]);
-                        predicted.extend([(base + BASE_VERTEX + 4, d.base_instance, "base instance"), (base + BASE_VERTEX + 4, 0, "base instance")]);
+                        predicted.extend([
+                            (base + BASE_VERTEX, d.base_vertex as u32, "base vertex"),
+                            (base + BASE_VERTEX, 0, "base vertex"),
+                        ]);
+                        predicted.extend([
+                            (base + BASE_VERTEX + 4, d.base_instance, "base instance"),
+                            (base + BASE_VERTEX + 4, 0, "base instance"),
+                        ]);
                     }
                 }
                 Cmd::Clear(_) => clears += 1,
-                Cmd::Texture { stage, index, handle } => {
+                Cmd::Texture {
+                    stage,
+                    index,
+                    handle,
+                } => {
                     if let Some(base) = stage_group(*stage).and_then(|g| support.1[g as usize]) {
-                        predicted.push((base + TEXTURE_HANDLES + 8 * *index as u64, *handle as u32, "texture handle"));
+                        predicted.push((
+                            base + TEXTURE_HANDLES + 8 * *index as u64,
+                            *handle as u32,
+                            "texture handle",
+                        ));
                     }
                 }
-                Cmd::Storage { index, address, size, .. } => {
+                Cmd::Storage {
+                    index,
+                    address,
+                    size,
+                    ..
+                } => {
                     if let Some(base) = support.0 {
                         let at = base + STORAGE_BUFFERS + 0x10 * *index as u64;
-                        predicted.extend([(at, *address as u32, "storage buffer"), (at + 4, (*address >> 32) as u32, "storage buffer"), (at + 8, *size as u32, "storage buffer")]);
+                        predicted.extend([
+                            (at, *address as u32, "storage buffer"),
+                            (at + 4, (*address >> 32) as u32, "storage buffer"),
+                            (at + 8, *size as u32, "storage buffer"),
+                        ]);
                     }
                 }
                 Cmd::Multisample(_) => {
@@ -326,13 +431,27 @@ pub fn cp_entry(va: u64, words: u64) -> Option<Plan> {
                     }
                 }
                 Cmd::UniformUpdate { address, data } => {
-                    predicted.extend(data.as_chunks::<4>().0.iter().enumerate().map(|(i, w)| (address + 4 * i as u64, u32::from_le_bytes(*w), "uniform update")));
+                    predicted.extend(data.as_chunks::<4>().0.iter().enumerate().map(|(i, w)| {
+                        (
+                            address + 4 * i as u64,
+                            u32::from_le_bytes(*w),
+                            "uniform update",
+                        )
+                    }));
                 }
                 _ => {}
             }
         }
         UPLOADS.lock().unwrap().clear();
-        Some(Plan { handle, list, end: va + words * 4, va, draws, clears, words: predicted })
+        Some(Plan {
+            handle,
+            list,
+            end: va + words * 4,
+            va,
+            draws,
+            clears,
+            words: predicted,
+        })
     }
 }
 
@@ -343,14 +462,24 @@ pub fn cp_entry_done(plan: Plan, draws: u64, clears: u64) {
             m.segment_end();
         }
         let seen: std::collections::HashSet<(u64, u32)> = uploads.iter().copied().collect();
-        let predicted: std::collections::HashSet<(u64, u32)> = plan.words.iter().map(|w| (w.0, w.1)).collect();
+        let predicted: std::collections::HashSet<(u64, u32)> =
+            plan.words.iter().map(|w| (w.0, w.1)).collect();
         m.stats.words_checked += uploads.len() as u64;
         let support = m.support;
         for &(at, value) in &uploads {
             if !predicted.contains(&(at, value)) {
                 let key = match support.0 {
-                    Some(s0) if at >= s0 && at < s0 + 0x5f00 => format!("driver constants +{:#x}", at - s0),
-                    _ if support.1.iter().flatten().any(|&s2| at >= s2 && at < s2 + 0x200) => "texture handles".to_string(),
+                    Some(s0) if at >= s0 && at < s0 + 0x5f00 => {
+                        format!("driver constants +{:#x}", at - s0)
+                    }
+                    _ if support
+                        .1
+                        .iter()
+                        .flatten()
+                        .any(|&s2| at >= s2 && at < s2 + 0x200) =>
+                    {
+                        "texture handles".to_string()
+                    }
                     _ => format!("other {at:#x}"),
                 };
                 *m.stats.words_missing.entry(key).or_default() += 1;
@@ -374,7 +503,12 @@ const COMMAND_BASE: u64 = 0x50;
 const COMMAND_GPU_BASE: u64 = 0x60;
 
 fn command_position(c: &Cpu, cmdbuf: u64) -> u64 {
-    let read = |at: u64| c.process().memory.read(cmdbuf + at, 8).map_or(0, |b| u64::from_le_bytes(b.try_into().unwrap()));
+    let read = |at: u64| {
+        c.process()
+            .memory
+            .read(cmdbuf + at, 8)
+            .map_or(0, |b| u64::from_le_bytes(b.try_into().unwrap()))
+    };
     read(COMMAND_GPU_BASE) + read(COMMAND_WRITE).wrapping_sub(read(COMMAND_BASE))
 }
 
@@ -481,7 +615,11 @@ pub fn hook(name: &str) -> Option<Hook> {
         "nvnSamplerPoolInitialize" => Hook::PoolInitialize(false),
         "nvnCommandBufferClearColor" => Hook::ClearColor,
         "nvnCommandBufferClearDepthStencil" => Hook::ClearDepthStencil,
-        _ => return state::setter(name).map(Hook::Setter).or_else(|| resources::call(name).map(Hook::Resource)),
+        _ => {
+            return state::setter(name)
+                .map(Hook::Setter)
+                .or_else(|| resources::call(name).map(Hook::Resource));
+        }
     })
 }
 
@@ -499,7 +637,6 @@ const BASE_VERTEX: u64 = 0x640;
 
 const STORAGE_BUFFERS: u64 = 0x110;
 
-
 const MAX_UNIFORM_UPDATE: u64 = 0x10000;
 
 const PROGRAM_HEADER: u64 = 0x30;
@@ -512,7 +649,15 @@ const CONSTANTS_SIZE: u32 = 0x10000;
 
 fn read_u64s(c: &Cpu, addr: u64, n: u64) -> Vec<u64> {
     let n = n.min(4096);
-    c.process().memory.read(addr, 8 * n).map(|b| b.chunks(8).map(|w| u64::from_le_bytes(w.try_into().unwrap())).collect()).unwrap_or_default()
+    c.process()
+        .memory
+        .read(addr, 8 * n)
+        .map(|b| {
+            b.chunks(8)
+                .map(|w| u64::from_le_bytes(w.try_into().unwrap()))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn query(c: &mut Cpu, real: u64, args: &[u64]) -> u64 {
@@ -545,12 +690,16 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
         Hook::EndRecording => {
             call_guest(c, real, false);
             let handle = c.x[0];
-            let used = real_of("nvnCommandBufferGetCommandMemoryUsed").map(|f| query(c, f, &[a[0]]));
+            let used =
+                real_of("nvnCommandBufferGetCommandMemoryUsed").map(|f| query(c, f, &[a[0]]));
             with(|m| {
                 let list = m.recording.remove(&a[0]).unwrap_or_default();
                 let calls_unsupported = list.iter().any(|(_, c)| matches!(c, Cmd::Call(h) if h.iter().any(|h| m.unsupported.contains(h) || !m.lists.contains_key(h))));
                 let unsorted = !list.is_sorted_by_key(|c| c.0);
-                if m.missing.remove(&a[0]).is_some_and(|v| !v.is_empty()) || calls_unsupported || unsorted {
+                if m.missing.remove(&a[0]).is_some_and(|v| !v.is_empty())
+                    || calls_unsupported
+                    || unsorted
+                {
                     m.unsupported.insert(handle);
                 } else {
                     m.unsupported.remove(&handle);
@@ -588,7 +737,10 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
                 .chunks(2)
                 .filter_map(|s| {
                     let delta = c.process().memory.read(s[1] + CONTROL_CONSTANTS, 4)?;
-                    Some((s[0] + PROGRAM_HEADER, s[0] + u32::from_le_bytes(delta[..4].try_into().unwrap()) as u64))
+                    Some((
+                        s[0] + PROGRAM_HEADER,
+                        s[0] + u32::from_le_bytes(delta[..4].try_into().unwrap()) as u64,
+                    ))
                 })
                 .collect();
             let code: Vec<u64> = stages.chunks(2).map(|s| s[0] + PROGRAM_HEADER).collect();
@@ -599,12 +751,22 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
         }
         Hook::BindProgram => {
             let p = with(|m| m.programs.get(&a[1]).cloned().unwrap_or_default());
-            let id = c.process().memory.read(a[1] + PROGRAM_ID, 4).map_or(u32::MAX, |b| u32::from_le_bytes(b[..4].try_into().unwrap()));
+            let id = c
+                .process()
+                .memory
+                .read(a[1] + PROGRAM_ID, 4)
+                .map_or(u32::MAX, |b| u32::from_le_bytes(b[..4].try_into().unwrap()));
             record(Cmd::Program(a[1], id, p));
         }
         Hook::SetRenderTargets => {
             let n = a[1].min(8);
-            let list = |at: u64| if at == 0 { vec![0; n as usize] } else { read_u64s(c, at, n) };
+            let list = |at: u64| {
+                if at == 0 {
+                    vec![0; n as usize]
+                } else {
+                    read_u64s(c, at, n)
+                }
+            };
             let (mut textures, mut views) = (list(a[2]), list(a[3]));
             textures.resize(8, 0);
             views.resize(8, 0);
@@ -627,15 +789,28 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
             }
             let what = (a[3] as u32 & 0xf) << 2 | (a[1] as u32 & 0xf) << 6;
             if what & 0x3c != 0 {
-                record(Cmd::Clear(Clear { what, values, target: 0 }));
+                record(Cmd::Clear(Clear {
+                    what,
+                    values,
+                    target: 0,
+                }));
             }
         }
         Hook::ClearDepthStencil => {
             let (depth, stencil) = (a[1] as u8 != 0, a[3] as u8 != 0);
             let what = depth as u32 | (stencil as u32) << 1;
-            let values = [if depth { c.v[0][0] as u32 } else { 0 }, if stencil { a[2] as u32 & 0xff } else { 0 }, 0, 0];
+            let values = [
+                if depth { c.v[0][0] as u32 } else { 0 },
+                if stencil { a[2] as u32 & 0xff } else { 0 },
+                0,
+                0,
+            ];
             if what != 0 {
-                record(Cmd::Clear(Clear { what, values, target: 0 }));
+                record(Cmd::Clear(Clear {
+                    what,
+                    values,
+                    target: 0,
+                }));
             }
         }
         Hook::Resource(call) => {
@@ -648,14 +823,25 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
                 call_guest(c, real, false);
                 let ret = c.x[0];
                 let gpu = &c.process().gpu;
-                let reserved = Some(gpu.last_reserved()).filter(|r| r.0 != reserved.0).map(|r| r.1);
+                let reserved = Some(gpu.last_reserved())
+                    .filter(|r| r.0 != reserved.0)
+                    .map(|r| r.1);
                 let mem = &c.process().memory;
                 let read = |at: u64, len: u64| mem.read(at, len);
                 with(|m| {
                     let mut logged = Vec::new();
-                    m.res.after(call, &a, ret, &|cpu| gpu.gpu_addresses_of(cpu), &read, &mut |k, s| logged.push((k, s)));
+                    m.res.after(
+                        call,
+                        &a,
+                        ret,
+                        &|cpu| gpu.gpu_addresses_of(cpu),
+                        &read,
+                        &mut |k, s| logged.push((k, s)),
+                    );
                     if let resources::Call::PoolInitialize = call {
-                        m.res.pool_mappings.insert(a[0], gpu.gpu_mappings_of(m.res.pool_memory(a[1])));
+                        m.res
+                            .pool_mappings
+                            .insert(a[0], gpu.gpu_mappings_of(m.res.pool_memory(a[1])));
                         if let Some(va) = reserved {
                             m.res.reserved(a[0], a[1], va);
                         }
@@ -695,16 +881,50 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
                 _ => (a[5] as i32, a[6] as u32, a[7] as u32),
             };
             let _ = index_size(a[2]);
-            record(Cmd::Draw(Draw { indexed: true, count: a[3] as u32, start: a[4], base_vertex, base_instance, instances, index_type: a[2] as u8, mode: a[1] as u32, ..Default::default() }));
+            record(Cmd::Draw(Draw {
+                indexed: true,
+                count: a[3] as u32,
+                start: a[4],
+                base_vertex,
+                base_instance,
+                instances,
+                index_type: a[2] as u8,
+                mode: a[1] as u32,
+                ..Default::default()
+            }));
         }
         Hook::DrawArrays | Hook::DrawArraysInstanced => {
-            let (base_instance, instances) = if matches!(hook, Hook::DrawArrays) { (0, 1) } else { (a[4] as u32, a[5] as u32) };
-            record(Cmd::Draw(Draw { indexed: false, count: a[3] as u32, start: a[2], base_instance, instances, mode: a[1] as u32, ..Default::default() }));
+            let (base_instance, instances) = if matches!(hook, Hook::DrawArrays) {
+                (0, 1)
+            } else {
+                (a[4] as u32, a[5] as u32)
+            };
+            record(Cmd::Draw(Draw {
+                indexed: false,
+                count: a[3] as u32,
+                start: a[2],
+                base_instance,
+                instances,
+                mode: a[1] as u32,
+                ..Default::default()
+            }));
         }
         Hook::DispatchCompute => record(Cmd::Dispatch([a[1] as u32, a[2] as u32, a[3] as u32])),
-        Hook::BindUniformBuffer => record(Cmd::Uniform { stage: a[1] as u8, index: a[2] as u8, range: (a[3], a[4]) }),
-        Hook::BindVertexBuffer => record(Cmd::Vertex { index: a[1] as u8, address: a[2], size: a[3] }),
-        Hook::BindTexture => record(Cmd::Texture { stage: a[1] as u8, index: a[2] as u16, handle: a[3] }),
+        Hook::BindUniformBuffer => record(Cmd::Uniform {
+            stage: a[1] as u8,
+            index: a[2] as u8,
+            range: (a[3], a[4]),
+        }),
+        Hook::BindVertexBuffer => record(Cmd::Vertex {
+            index: a[1] as u8,
+            address: a[2],
+            size: a[3],
+        }),
+        Hook::BindTexture => record(Cmd::Texture {
+            stage: a[1] as u8,
+            index: a[2] as u16,
+            handle: a[3],
+        }),
         Hook::Setter(s) => with(|m| m.objects.set(s, &a)),
         Hook::BindChannelMaskState => record(Cmd::State(with(|m| m.objects.channel_mask(a[1])))),
         Hook::BindColorState => record(Cmd::State(with(|m| m.objects.color(a[1])))),
@@ -715,29 +935,60 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
         Hook::BindVertexStreamState => record(Cmd::State(with(|m| m.objects.streams(a[2], a[1])))),
         Hook::SetBlendColor => {
             let words = c.process().memory.read(a[1], 16).unwrap_or_default();
-            let color = words.chunks(4).enumerate().map(|(i, w)| (Field(state::Kind::BlendColor, i as u8), u32::from_le_bytes(w.try_into().unwrap()) as u64));
+            let color = words.chunks(4).enumerate().map(|(i, w)| {
+                (
+                    Field(state::Kind::BlendColor, i as u8),
+                    u32::from_le_bytes(w.try_into().unwrap()) as u64,
+                )
+            });
             record(Cmd::State(color.collect()));
         }
-        Hook::Stencil(kind) => record(Cmd::State((0..2u8).filter(|f| a[1] >> f & 1 == 1).map(|f| (Field(kind, f), a[2] & 0xff)).collect())),
+        Hook::Stencil(kind) => record(Cmd::State(
+            (0..2u8)
+                .filter(|f| a[1] >> f & 1 == 1)
+                .map(|f| (Field(kind, f), a[2] & 0xff))
+                .collect(),
+        )),
         Hook::Flag(kind) => record(Cmd::State(vec![(Field(kind, 0), a[1] & 0xff)])),
         Hook::Float(kind) => record(Cmd::State(vec![(Field(kind, 0), c.v[0][0] as u32 as u64)])),
         Hook::DepthBounds => {
             let on = a[1] & 0xff;
             let mut fields = vec![(Field(state::Kind::DepthBoundsEnable, 0), on)];
             if on != 0 {
-                fields.push((Field(state::Kind::DepthBoundsMin, 0), c.v[0][0] as u32 as u64));
-                fields.push((Field(state::Kind::DepthBoundsMax, 0), c.v[1][0] as u32 as u64));
+                fields.push((
+                    Field(state::Kind::DepthBoundsMin, 0),
+                    c.v[0][0] as u32 as u64,
+                ));
+                fields.push((
+                    Field(state::Kind::DepthBoundsMax, 0),
+                    c.v[1][0] as u32 as u64,
+                ));
             }
             record(Cmd::State(fields));
         }
         Hook::BindMultisampleState => record(Cmd::Multisample(a[1])),
         Hook::Barrier => record(Cmd::Barrier(a[1])),
         Hook::UpdateUniformBuffer => {
-            let data = c.process().memory.read(a[5], a[4].min(MAX_UNIFORM_UPDATE)).unwrap_or_default();
-            record(Cmd::UniformUpdate { address: a[1] + a[3], data: Arc::new(data) });
+            let data = c
+                .process()
+                .memory
+                .read(a[5], a[4].min(MAX_UNIFORM_UPDATE))
+                .unwrap_or_default();
+            record(Cmd::UniformUpdate {
+                address: a[1] + a[3],
+                data: Arc::new(data),
+            });
         }
-        Hook::BindStorageBuffer => record(Cmd::Storage { stage: a[1] as u8, index: a[2] as u8, address: a[3], size: a[4] }),
-        Hook::ReportCounter => record(Cmd::Report { counter: a[1], address: a[2] }),
+        Hook::BindStorageBuffer => record(Cmd::Storage {
+            stage: a[1] as u8,
+            index: a[2] as u8,
+            address: a[3],
+            size: a[4],
+        }),
+        Hook::ReportCounter => record(Cmd::Report {
+            counter: a[1],
+            address: a[2],
+        }),
         Hook::SetPool(texture) => {
             let address = with(|m| m.pool_vas.get(&a[1]).copied().unwrap_or(0));
             record(Cmd::Pool { texture, address });
@@ -746,7 +997,10 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
             let mem = &c.process().memory;
             let read = |at: u64, len: u64| mem.read(at, len);
             let address = with(|m| m.res.pool_address(a[1], &read)).map_or(0, |va| va + a[2]);
-            record(Cmd::Scratch { address, size: a[3] });
+            record(Cmd::Scratch {
+                address,
+                size: a[3],
+            });
         }
         Hook::PoolInitialize(_) => {
             let mem = &c.process().memory;
@@ -757,10 +1011,27 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
                 }
             });
         }
-        Hook::SetPolygonOffset => record(Cmd::State((0..3).map(|i| (Field(state::Kind::PolygonOffset, i as u8), c.v[i][0] as u32 as u64)).collect())),
+        Hook::SetPolygonOffset => record(Cmd::State(
+            (0..3)
+                .map(|i| {
+                    (
+                        Field(state::Kind::PolygonOffset, i as u8),
+                        c.v[i][0] as u32 as u64,
+                    )
+                })
+                .collect(),
+        )),
         Hook::SetViewport | Hook::SetScissor => {
-            let k = if matches!(hook, Hook::SetViewport) { state::Kind::Viewport } else { state::Kind::Scissor };
-            record(Cmd::State((0..4).map(|i| (Field(k, i as u8), a[1 + i] as u32 as i32 as i64 as u64)).collect()));
+            let k = if matches!(hook, Hook::SetViewport) {
+                state::Kind::Viewport
+            } else {
+                state::Kind::Scissor
+            };
+            record(Cmd::State(
+                (0..4)
+                    .map(|i| (Field(k, i as u8), a[1 + i] as u32 as i32 as i64 as u64))
+                    .collect(),
+            ));
         }
     }
     c.pc = real;
@@ -768,9 +1039,17 @@ pub fn run(hook: Hook, c: &mut Cpu, real: u64, real_of: &dyn Fn(&str) -> Option<
 
 impl Model {
     fn flatten(&self, handle: u64, depth: u32, out: &mut Vec<(u64, u64, u64, List, bool)>) {
-        let Some(list) = self.lists.get(&handle) else { return };
+        let Some(list) = self.lists.get(&handle) else {
+            return;
+        };
         if let Some(&(start, end)) = self.list_ranges.get(&handle) {
-            out.push((start, end, handle, list.clone(), !self.unsupported.contains(&handle)));
+            out.push((
+                start,
+                end,
+                handle,
+                list.clone(),
+                !self.unsupported.contains(&handle),
+            ));
         }
         for (_, cmd) in list.iter() {
             if let Cmd::Call(handles) = cmd
@@ -792,7 +1071,9 @@ impl Model {
             self.tracker.apply(cmd);
             match cmd {
                 Cmd::Clear(cl) => self.expected.push_back(Work::Clear(self.tracker.clear(cl))),
-                Cmd::Draw(d) => self.expected.push_back(Work::Draw(Box::new(self.tracker.draw(d)))),
+                Cmd::Draw(d) => self
+                    .expected
+                    .push_back(Work::Draw(Box::new(self.tracker.draw(d)))),
                 Cmd::Dispatch(g) => self.expected.push_back(Work::Dispatch(*g)),
                 Cmd::Call(handles) if depth < 8 => {
                     for &h in handles {
@@ -813,10 +1094,22 @@ impl Model {
     }
 
     fn pending_draw(&self, d: &Draw, instance: u32) -> Option<&Draw> {
-        let continues = self.held.as_ref().is_some_and(|h| instance > 0 && instance == h.instances && (Draw { instances: h.instances, ..d.clone() }) == *h);
+        let continues = self.held.as_ref().is_some_and(|h| {
+            instance > 0
+                && instance == h.instances
+                && (Draw {
+                    instances: h.instances,
+                    ..d.clone()
+                }) == *h
+        });
         let at = (self.held.is_some() && !continues) as usize;
         match self.expected.get(at) {
-            Some(Work::Draw(e)) if (e.indexed, e.count, e.start, e.base_vertex) == (d.indexed, d.count, d.start, d.base_vertex) => Some(e),
+            Some(Work::Draw(e))
+                if (e.indexed, e.count, e.start, e.base_vertex)
+                    == (d.indexed, d.count, d.start, d.base_vertex) =>
+            {
+                Some(e)
+            }
             _ => None,
         }
     }
@@ -825,7 +1118,10 @@ impl Model {
         if let (Work::Draw(d), Some(held)) = (&w, &mut self.held)
             && instance > 0
             && instance == held.instances
-            && (Draw { instances: held.instances, ..(**d).clone() }) == *held
+            && (Draw {
+                instances: held.instances,
+                ..(**d).clone()
+            }) == *held
         {
             held.instances += 1;
             return;
@@ -840,31 +1136,61 @@ impl Model {
         self.compare();
     }
 
-    fn constant_bindings(&self, programs: &[u64], read: &dyn Fn(u64, u64) -> Option<Vec<u8>>) -> Option<ConstantBindings> {
+    fn constant_bindings(
+        &self,
+        programs: &[u64],
+        read: &dyn Fn(u64, u64) -> Option<Vec<u8>>,
+    ) -> Option<ConstantBindings> {
         let mut out = Vec::new();
         for &code in programs {
-            let ty = read(code, 4).map_or(99, |b| (u32::from_le_bytes(b[..4].try_into().unwrap()) >> 10 & 0xf) as usize);
-            let Some(g) = [None, Some(0), Some(1), Some(2), Some(3), Some(4)].get(ty).copied().flatten() else { continue };
+            let ty = read(code, 4).map_or(99, |b| {
+                (u32::from_le_bytes(b[..4].try_into().unwrap()) >> 10 & 0xf) as usize
+            });
+            let Some(g) = [None, Some(0), Some(1), Some(2), Some(3), Some(4)]
+                .get(ty)
+                .copied()
+                .flatten()
+            else {
+                continue;
+            };
             out.push((g, 1, (*self.stage_constants.get(&code)?, CONSTANTS_SIZE)));
         }
         Some(out)
     }
 
-    fn cached_prediction(&mut self, d: &Draw, regs: &[u32], read: &dyn Fn(u64, u64) -> Option<Vec<u8>>) -> Result<Cached, String> {
+    fn cached_prediction(
+        &mut self,
+        d: &Draw,
+        regs: &[u32],
+        read: &dyn Fn(u64, u64) -> Option<Vec<u8>>,
+    ) -> Result<Cached, String> {
         use crate::gpu::threed::reg;
         let key = PredictKey {
             tracker: self.exec.generation,
             learned: self.learned.generation,
-            regs: (regs[reg::CT_SELECT], regs[reg::PROGRAM_REGION], regs[reg::PROGRAM_REGION + 1]),
+            regs: (
+                regs[reg::CT_SELECT],
+                regs[reg::PROGRAM_REGION],
+                regs[reg::PROGRAM_REGION + 1],
+            ),
         };
         if let Some((k, r, b)) = &self.predicted
             && *k == key
         {
             return Ok((key, r.clone(), b.clone()));
         }
-        let full = self.exec.draw(&Draw { indexed: false, ..d.clone() });
-        let predicted = Arc::new(super::encode::predict_complete(&full, &self.learned, regs, read).map_err(|e| format!("draw: {e}"))?);
-        let bindings = Arc::new(self.constant_bindings(&full.programs, read).ok_or_else(|| "program constants unknown".to_string())?);
+        let full = self.exec.draw(&Draw {
+            indexed: false,
+            ..d.clone()
+        });
+        let predicted = Arc::new(
+            super::encode::predict_complete(&full, &self.learned, regs, read)
+                .map_err(|e| format!("draw: {e}"))?,
+        );
+        let bindings = Arc::new(
+            self.constant_bindings(&full.programs, read)
+                .ok_or_else(|| "program constants unknown".to_string())?,
+        );
         self.predicted = Some((key, predicted.clone(), bindings.clone()));
         Ok((key, predicted, bindings))
     }
@@ -891,17 +1217,26 @@ impl Model {
         const AHEAD: usize = 16;
         while let (Some(e), Some(d)) = (self.expected.front(), self.decoded.front()) {
             if Self::same(e, d) {
-                let (e, d) = (self.expected.pop_front().unwrap(), self.decoded.pop_front().unwrap());
+                let (e, d) = (
+                    self.expected.pop_front().unwrap(),
+                    self.decoded.pop_front().unwrap(),
+                );
                 self.stats.matched += 1;
                 if let (Work::Clear(e), Work::Clear(d)) = (&e, &d) {
                     self.stats.clears += 1;
                     if e.values != d.values {
                         self.stats.clear_values += 1;
-                        self.log("clear values", format!("clear values: model {e:x?}, command processor {d:x?}"));
+                        self.log(
+                            "clear values",
+                            format!("clear values: model {e:x?}, command processor {d:x?}"),
+                        );
                     }
                     if e.target != d.target {
                         self.stats.clear_targets += 1;
-                        self.log("clear targets", format!("clear target: model {e:x?}, command processor {d:x?}"));
+                        self.log(
+                            "clear targets",
+                            format!("clear target: model {e:x?}, command processor {d:x?}"),
+                        );
                     }
                 }
                 if let (Work::Draw(e), Work::Draw(d)) = (&e, &d)
@@ -910,58 +1245,125 @@ impl Model {
                     let programs_ok = d.programs.iter().all(|p| *p == 0 || e.programs.contains(p));
                     if !programs_ok {
                         self.stats.programs += 1;
-                        self.log("program", format!("program: model {:x?}, command processor {:x?}", e.programs, d.programs));
+                        self.log(
+                            "program",
+                            format!(
+                                "program: model {:x?}, command processor {:x?}",
+                                e.programs, d.programs
+                            ),
+                        );
                     }
                     if e.targets != d.targets {
                         self.stats.targets += 1;
-                        self.log("targets", format!("targets: model {:x?}, command processor {:x?} (draw {d:x?})", e.targets, d.targets));
+                        self.log(
+                            "targets",
+                            format!(
+                                "targets: model {:x?}, command processor {:x?} (draw {d:x?})",
+                                e.targets, d.targets
+                            ),
+                        );
                     }
-                    let cp_uniform = |k: &(u8, u8)| d.uniforms.iter().find(|u| u.0 == *k).map(|u| u.1);
-                    if let Some(u) = e.uniforms.iter().find(|u| cp_uniform(&u.0).is_none_or(|v| v.0 != u.1.0)) {
+                    let cp_uniform =
+                        |k: &(u8, u8)| d.uniforms.iter().find(|u| u.0 == *k).map(|u| u.1);
+                    if let Some(u) = e
+                        .uniforms
+                        .iter()
+                        .find(|u| cp_uniform(&u.0).is_none_or(|v| v.0 != u.1.0))
+                    {
                         self.stats.uniforms += 1;
-                        let msg = format!("uniform {:?}: model {:x?}, command processor {:x?}", u.0, u.1, cp_uniform(&u.0));
+                        let msg = format!(
+                            "uniform {:?}: model {:x?}, command processor {:x?}",
+                            u.0,
+                            u.1,
+                            cp_uniform(&u.0)
+                        );
                         self.log("uniforms", msg);
                     }
                     let cp_vertex = |i: u8| d.vertex.iter().find(|v| v.0 == i).map(|v| v.1);
                     if let Some(v) = e.vertex.iter().find(|v| cp_vertex(v.0) != Some(v.1)) {
                         self.stats.vertex += 1;
-                        let msg = format!("vertex stream {}: model {:#x}, command processor {:x?}", v.0, v.1, cp_vertex(v.0));
+                        let msg = format!(
+                            "vertex stream {}: model {:#x}, command processor {:x?}",
+                            v.0,
+                            v.1,
+                            cp_vertex(v.0)
+                        );
                         self.log("vertex", msg);
                     }
                     for &(f, v) in &e.state {
                         if let Some(&(_, r)) = d.state.iter().find(|x| x.0 == f)
                             && !self.learned.examples.contains_key(&(f.0, v, r))
                         {
-                            let blend: Vec<u64> = d.state.iter().filter(|x| x.0.0 == state::Kind::BlendRegister).map(|x| x.1).collect();
-                            let format = d.state.iter().find(|x| x.0 == Field(state::Kind::TargetFormat, f.1)).map(|x| x.1);
-                            let model: Vec<(Field, u64)> = e.state.iter().filter(|x| x.0.1 == f.1).copied().collect();
+                            let blend: Vec<u64> = d
+                                .state
+                                .iter()
+                                .filter(|x| x.0.0 == state::Kind::BlendRegister)
+                                .map(|x| x.1)
+                                .collect();
+                            let format = d
+                                .state
+                                .iter()
+                                .find(|x| x.0 == Field(state::Kind::TargetFormat, f.1))
+                                .map(|x| x.1);
+                            let model: Vec<(Field, u64)> =
+                                e.state.iter().filter(|x| x.0.1 == f.1).copied().collect();
                             self.learned.examples.insert((f.0, v, r), format!("field {f:?}, target format {format:x?}, blend registers {blend:x?}, model {model:x?}"));
                         }
                     }
                     for (f, v, learned, now) in self.learned.add(&e.state, &d.state) {
-                        let format = d.state.iter().find(|x| x.0 == Field(state::Kind::TargetFormat, f.1)).map(|x| x.1);
-                        let blend: Vec<u64> = d.state.iter().filter(|x| x.0.0 == state::Kind::BlendRegister).map(|x| x.1).collect();
-                        let model: Vec<(Field, u64)> = e.state.iter().filter(|x| x.0.1 == f.1 && format!("{:?}", x.0.0).starts_with("Blend")).copied().collect();
+                        let format = d
+                            .state
+                            .iter()
+                            .find(|x| x.0 == Field(state::Kind::TargetFormat, f.1))
+                            .map(|x| x.1);
+                        let blend: Vec<u64> = d
+                            .state
+                            .iter()
+                            .filter(|x| x.0.0 == state::Kind::BlendRegister)
+                            .map(|x| x.1)
+                            .collect();
+                        let model: Vec<(Field, u64)> = e
+                            .state
+                            .iter()
+                            .filter(|x| x.0.1 == f.1 && format!("{:?}", x.0.0).starts_with("Blend"))
+                            .copied()
+                            .collect();
                         self.log("state", format!("state {f:?}: NVN {v:#x} gave {now:#x}, before {learned:#x} (target format {format:x?}; blend registers {blend:x?}; model {model:x?})"));
                     }
-                    let cp_texture = |k: &(u8, u16)| d.textures.iter().find(|t| t.0 == *k).map(|t| t.1);
-                    if let Some(t) = e.textures.iter().find(|t| cp_texture(&t.0).is_some_and(|h| h != t.1 & 0xffff_ffff)) {
+                    let cp_texture =
+                        |k: &(u8, u16)| d.textures.iter().find(|t| t.0 == *k).map(|t| t.1);
+                    if let Some(t) = e
+                        .textures
+                        .iter()
+                        .find(|t| cp_texture(&t.0).is_some_and(|h| h != t.1 & 0xffff_ffff))
+                    {
                         self.stats.textures += 1;
                         let msg = format!(
                             "texture {:?}: model {:#x}, command processor {:x?}; model {:x?}, command processor group {}: {:x?}",
                             t.0,
                             t.1,
                             cp_texture(&t.0),
-                            e.textures.iter().filter(|x| x.0.0 == t.0.0).collect::<Vec<_>>(),
+                            e.textures
+                                .iter()
+                                .filter(|x| x.0.0 == t.0.0)
+                                .collect::<Vec<_>>(),
                             t.0.0,
-                            d.textures.iter().filter(|x| x.0.0 == t.0.0).map(|x| x.1).collect::<Vec<_>>()
+                            d.textures
+                                .iter()
+                                .filter(|x| x.0.0 == t.0.0)
+                                .map(|x| x.1)
+                                .collect::<Vec<_>>()
                         );
                         self.log("textures", msg);
                     }
                     for &(k, handle) in &e.textures {
-                        let Some(&(_, cp)) = d.texture_addresses.iter().find(|x| x.0 == k) else { continue };
+                        let Some(&(_, cp)) = d.texture_addresses.iter().find(|x| x.0 == k) else {
+                            continue;
+                        };
                         let id = (handle & 0xfffff) as u32;
-                        let Some(&(Some(t), view)) = self.res.registered.get(&id) else { continue };
+                        let Some(&(Some(t), view)) = self.res.registered.get(&id) else {
+                            continue;
+                        };
                         self.stats.texture_addresses_checked += 1;
                         let model = t.address + t.view_offset(&view);
                         if model != cp {
@@ -972,18 +1374,34 @@ impl Model {
                 }
                 continue;
             }
-            if let Some(k) = self.expected.iter().take(AHEAD).position(|x| Self::same(x, d)) {
+            if let Some(k) = self
+                .expected
+                .iter()
+                .take(AHEAD)
+                .position(|x| Self::same(x, d))
+            {
                 self.stats.missing += k as u64;
                 let skipped: Vec<Work> = self.expected.drain(..k).collect();
                 self.log("missing", format!("not decoded: {skipped:?}"));
-            } else if let Some(k) = self.decoded.iter().take(AHEAD).position(|x| Self::same(e, x)) {
+            } else if let Some(k) = self
+                .decoded
+                .iter()
+                .take(AHEAD)
+                .position(|x| Self::same(e, x))
+            {
                 self.stats.extra += k as u64;
                 let skipped: Vec<Work> = self.decoded.drain(..k).collect();
                 self.log("extra", format!("not in the model: {skipped:?}"));
             } else {
                 self.stats.shape += 1;
-                let (e, d) = (self.expected.pop_front().unwrap(), self.decoded.pop_front().unwrap());
-                self.log("differ", format!("differ: model {e:?}, command processor {d:?}"));
+                let (e, d) = (
+                    self.expected.pop_front().unwrap(),
+                    self.decoded.pop_front().unwrap(),
+                );
+                self.log(
+                    "differ",
+                    format!("differ: model {e:?}, command processor {d:?}"),
+                );
             }
         }
         while self.expected.len() > 100_000 {
@@ -1009,14 +1427,33 @@ pub(super) fn stage_group(stage: u8) -> Option<u8> {
     [0, 4, 3, 1, 2].get(stage as usize).copied()
 }
 
-fn target_address(c: &mut Cpu, tex: u64, view: u64, real_of: &dyn Fn(&str) -> Option<u64>) -> (u64, Option<resources::Surface>) {
+fn target_address(
+    c: &mut Cpu,
+    tex: u64,
+    view: u64,
+    real_of: &dyn Fn(&str) -> Option<u64>,
+) -> (u64, Option<resources::Surface>) {
     let mem = &c.process().memory;
     let read = |at: u64, len: u64| mem.read(at, len);
-    let (t, v) = with(|m| (m.res.texture(tex, &read), if view == 0 { resources::View::default() } else { m.res.view(view, &read) }));
+    let (t, v) = with(|m| {
+        (
+            m.res.texture(tex, &read),
+            if view == 0 {
+                resources::View::default()
+            } else {
+                m.res.view(view, &read)
+            },
+        )
+    });
     let model = t.map(|t| t.address + t.view_offset(&v));
-    let (address, offset) = (real_of("nvnTextureGetTextureAddress"), real_of("nvnTextureGetViewOffset"));
+    let (address, offset) = (
+        real_of("nvnTextureGetTextureAddress"),
+        real_of("nvnTextureGetViewOffset"),
+    );
     let driver = address.map(|f| query(c, f, &[tex]));
-    let driver_offset = offset.filter(|_| view != 0).map_or(0, |g| query(c, g, &[tex, view]));
+    let driver_offset = offset
+        .filter(|_| view != 0)
+        .map_or(0, |g| query(c, g, &[tex, view]));
     with(|m| {
         m.res.checks.textures += 1;
         if view != 0 {
@@ -1025,14 +1462,23 @@ fn target_address(c: &mut Cpu, tex: u64, view: u64, real_of: &dyn Fn(&str) -> Op
         if let (Some(t), Some(d)) = (t, driver) {
             if t.address != d {
                 m.res.checks.textures_differ += 1;
-                m.log("texture objects", format!("texture {tex:#x}: model {:#x} ({t:x?}), driver {d:#x}", t.address));
+                m.log(
+                    "texture objects",
+                    format!(
+                        "texture {tex:#x}: model {:#x} ({t:x?}), driver {d:#x}",
+                        t.address
+                    ),
+                );
             } else if view != 0 && t.view_offset(&v) != driver_offset {
                 m.res.checks.views_differ += 1;
                 m.log("views", format!("view of {tex:#x}: model +{:#x} ({t:x?}, {v:?}), driver +{driver_offset:#x}", t.view_offset(&v)));
             }
         }
     });
-    (model.or(driver.map(|d| d + driver_offset)).unwrap_or(0), t.map(|t| t.surface(&v)))
+    (
+        model.or(driver.map(|d| d + driver_offset)).unwrap_or(0),
+        t.map(|t| t.surface(&v)),
+    )
 }
 
 pub fn cp_clear(regs: &[u32], v: u32) {
@@ -1044,35 +1490,82 @@ pub fn cp_clear(regs: &[u32], v: u32) {
     let what = v & 0x3ff;
     let (values, target) = if what & 0x3c != 0 {
         let rt = reg::COLOR_TARGET + 16 * (v >> 6 & 0xf) as usize;
-        ([regs[reg::CLEAR_COLOR], regs[reg::CLEAR_COLOR + 1], regs[reg::CLEAR_COLOR + 2], regs[reg::CLEAR_COLOR + 3]], address(regs, rt))
+        (
+            [
+                regs[reg::CLEAR_COLOR],
+                regs[reg::CLEAR_COLOR + 1],
+                regs[reg::CLEAR_COLOR + 2],
+                regs[reg::CLEAR_COLOR + 3],
+            ],
+            address(regs, rt),
+        )
     } else {
         let depth = if v & 1 == 1 { regs[0x364] } else { 0 };
         let stencil = if v & 2 == 2 { regs[0x368] & 0xff } else { 0 };
-        ([depth, stencil, 0, 0], if regs[0x54e] & 1 == 1 { address(regs, reg::ZT_A) } else { 0 })
+        (
+            [depth, stencil, 0, 0],
+            if regs[0x54e] & 1 == 1 {
+                address(regs, reg::ZT_A)
+            } else {
+                0
+            },
+        )
     };
-    with(|m| m.decoded(Work::Clear(Clear { what, values, target }), 0));
+    with(|m| {
+        m.decoded(
+            Work::Clear(Clear {
+                what,
+                values,
+                target,
+            }),
+            0,
+        )
+    });
 }
 
-pub fn cp_draw(regs: &[u32], cbs: &[[Option<(u64, u32)>; crate::gpu::threed::CB_SLOTS]; 5], read: &dyn Fn(u64, u64) -> Option<Vec<u8>>, draw: &crate::gpu::threed::Draw) {
+pub fn cp_draw(
+    regs: &[u32],
+    cbs: &[[Option<(u64, u32)>; crate::gpu::threed::CB_SLOTS]; 5],
+    read: &dyn Fn(u64, u64) -> Option<Vec<u8>>,
+    draw: &crate::gpu::threed::Draw,
+) {
     use crate::gpu::threed::{address, reg, stage_enabled};
     if super::exec::ON.load(Ordering::Relaxed)
         && with(|m| {
-            m.support = (cbs[0][0].map(|b| b.0), std::array::from_fn(|g| cbs[g][2].map(|b| b.0)));
+            m.support = (
+                cbs[0][0].map(|b| b.0),
+                std::array::from_fn(|g| cbs[g][2].map(|b| b.0)),
+            );
             m.expected.is_empty() && m.held.is_none()
         })
     {
         return;
     }
     let base = address(regs, reg::PROGRAM_REGION);
-    let programs: Vec<u64> = [1, 5].iter().filter(|&&s| stage_enabled(regs, s)).map(|&s| base + regs[reg::PIPELINE + 16 * s + 1] as u64).collect();
+    let programs: Vec<u64> = [1, 5]
+        .iter()
+        .filter(|&&s| stage_enabled(regs, s))
+        .map(|&s| base + regs[reg::PIPELINE + 16 * s + 1] as u64)
+        .collect();
     let (start, base_vertex) = match draw.index_size {
-        Some(size) => (address(regs, reg::INDEX_BUFFER) + draw.first as u64 * size as u64, regs[reg::VB_ELEMENT_BASE] as i32),
+        Some(size) => (
+            address(regs, reg::INDEX_BUFFER) + draw.first as u64 * size as u64,
+            regs[reg::VB_ELEMENT_BASE] as i32,
+        ),
         None => (draw.first as u64, 0),
     };
-    let depth = if regs[0x54e] & 1 == 1 { address(regs, 0x3f8) } else { 0 };
+    let depth = if regs[0x54e] & 1 == 1 {
+        address(regs, 0x3f8)
+    } else {
+        0
+    };
     let ct = regs[reg::CT_SELECT];
     let rt0 = reg::COLOR_TARGET + 16 * (ct >> 4 & 7) as usize;
-    let color = if ct & 0xf > 0 && regs[rt0 + 4] != 0 { address(regs, rt0) } else { 0 };
+    let color = if ct & 0xf > 0 && regs[rt0 + 4] != 0 {
+        address(regs, rt0)
+    } else {
+        0
+    };
     let mut uniforms = Vec::new();
     let mut textures = Vec::new();
     let mut texture_addresses = Vec::new();
@@ -1085,7 +1578,10 @@ pub fn cp_draw(regs: &[u32], cbs: &[[Option<(u64, u32)>; crate::gpu::threed::CB_
             }
         }
         if let Some((addr, size)) = cbs[g as usize].get(bindless).copied().flatten()
-            && let Some(bytes) = read(addr + TEXTURE_HANDLES, (size as u64).saturating_sub(TEXTURE_HANDLES).min(8 * 32))
+            && let Some(bytes) = read(
+                addr + TEXTURE_HANDLES,
+                (size as u64).saturating_sub(TEXTURE_HANDLES).min(8 * 32),
+            )
         {
             for (i, w) in bytes.as_chunks::<8>().0.iter().enumerate() {
                 let handle = u32::from_le_bytes(w[..4].try_into().unwrap());
@@ -1097,29 +1593,64 @@ pub fn cp_draw(regs: &[u32], cbs: &[[Option<(u64, u32)>; crate::gpu::threed::CB_
                     for (w, b) in words.iter_mut().zip(tic.as_chunks::<4>().0) {
                         *w = u32::from_le_bytes(*b);
                     }
-                    texture_addresses.push(((g, i as u16), crate::gpu::tic::texture_header(&words).address));
+                    texture_addresses.push((
+                        (g, i as u16),
+                        crate::gpu::tic::texture_header(&words).address,
+                    ));
                 }
             }
         }
     }
-    let vertex: Vec<(u8, u64)> = (0..16u8).map(|s| (s, address(regs, reg::VERTEX_STREAM + 4 * s as usize + 1))).collect();
+    let vertex: Vec<(u8, u64)> = (0..16u8)
+        .map(|s| (s, address(regs, reg::VERTEX_STREAM + 4 * s as usize + 1)))
+        .collect();
     let state = state::from_registers(regs);
-    let d = Draw { indexed: draw.index_size.is_some(), count: draw.count, start, base_vertex, instances: 1, programs, targets: [color, depth], uniforms, vertex, textures, state, texture_addresses, ..Default::default() };
+    let d = Draw {
+        indexed: draw.index_size.is_some(),
+        count: draw.count,
+        start,
+        base_vertex,
+        instances: 1,
+        programs,
+        targets: [color, depth],
+        uniforms,
+        vertex,
+        textures,
+        state,
+        texture_addresses,
+        ..Default::default()
+    };
     with(|m| {
-        m.support = (cbs[0][0].map(|b| b.0), std::array::from_fn(|g| cbs[g][2].map(|b| b.0)));
+        m.support = (
+            cbs[0][0].map(|b| b.0),
+            std::array::from_fn(|g| cbs[g][2].map(|b| b.0)),
+        );
         if let Some(mode) = m.pending_draw(&d, draw.instance).map(|e| e.mode) {
             m.stats.topology_checked += 1;
             if mode != draw.topology {
                 m.stats.topology_differ += 1;
-                let msg = format!("draw mode {mode:#x}, command processor topology {:#x}", draw.topology);
+                let msg = format!(
+                    "draw mode {mode:#x}, command processor topology {:#x}",
+                    draw.topology
+                );
                 m.log("topology", msg);
             }
         }
         if let Some(e) = m.pending_draw(&d, draw.instance).filter(|e| e.program != 0) {
             let (program, codes) = (e.program, e.programs.clone());
             for code in codes {
-                let Some(ty) = read(code, 4).map(|b| (u32::from_le_bytes(b[..4].try_into().unwrap()) >> 10 & 0xf) as usize) else { continue };
-                let Some(g) = [None, Some(0), Some(1), Some(2), Some(3), Some(4)].get(ty).copied().flatten() else { continue };
+                let Some(ty) = read(code, 4)
+                    .map(|b| (u32::from_le_bytes(b[..4].try_into().unwrap()) >> 10 & 0xf) as usize)
+                else {
+                    continue;
+                };
+                let Some(g) = [None, Some(0), Some(1), Some(2), Some(3), Some(4)]
+                    .get(ty)
+                    .copied()
+                    .flatten()
+                else {
+                    continue;
+                };
                 let seen = cbs[g][1];
                 let model = m.stage_constants.get(&code).map(|&a| (a, CONSTANTS_SIZE));
                 m.stats.constants_checked += 1;
@@ -1130,7 +1661,9 @@ pub fn cp_draw(regs: &[u32], cbs: &[[Option<(u64, u32)>; crate::gpu::threed::CB_
             }
         }
         if super::encode::ON.load(Ordering::Relaxed) {
-            let prediction = m.pending_draw(&d, draw.instance).map(|e| super::encode::predict(e, &m.learned, regs, read));
+            let prediction = m
+                .pending_draw(&d, draw.instance)
+                .map(|e| super::encode::predict(e, &m.learned, regs, read));
             super::encode::check(prediction, regs);
         }
         m.decoded(Work::Draw(Box::new(d)), draw.instance)
@@ -1164,9 +1697,7 @@ pub fn report() {
         );
         eprintln!(
             "kirikae:         nvn shadow state: {} fields checked, {} gave another register value than before, {} binds of objects no setter filled; NVN value -> register values:",
-            m.learned.checked,
-            m.learned.conflicts,
-            m.objects.unknown
+            m.learned.checked, m.learned.conflicts, m.objects.unknown
         );
         let s = &m.stats;
         eprintln!(
@@ -1178,7 +1709,11 @@ pub fn report() {
             s.texture_addresses_checked,
             s.texture_addresses
         );
-        eprintln!("kirikae:         nvn shadow resources: {:?}, {} texture pools", m.res.checks, m.res.texture_pools.len());
+        eprintln!(
+            "kirikae:         nvn shadow resources: {:?}, {} texture pools",
+            m.res.checks,
+            m.res.texture_pools.len()
+        );
         eprintln!(
             "kirikae:         nvn model commands: {} uniform updates ({} bytes, last at {:#x}), barrier bits seen {:#x}, {} counter reports, {} storage buffers bound, multisample state {:#x}, shader scratch {:x?}",
             m.stats.uniform_updates,
@@ -1205,7 +1740,11 @@ pub fn report() {
         );
         let mut missing: Vec<_> = m.stats.words_missing.iter().collect();
         missing.sort_by_key(|w| std::cmp::Reverse(*w.1));
-        let missing: Vec<String> = missing.iter().take(12).map(|(k, n)| format!("{k} {n}")).collect();
+        let missing: Vec<String> = missing
+            .iter()
+            .take(12)
+            .map(|(k, n)| format!("{k} {n}"))
+            .collect();
         eprintln!(
             "kirikae:         nvn program constants: {} checked, {} differ; draw topology: {} checked, {} differ; driver uploads: {} words seen, not predicted: {}; predicted but not seen: {:?}",
             m.stats.constants_checked,
@@ -1218,17 +1757,32 @@ pub fn report() {
         );
         let mut calls: Vec<_> = m.unsupported_calls.iter().collect();
         calls.sort_by_key(|c| std::cmp::Reverse(*c.1));
-        let calls: Vec<String> = calls.iter().take(20).map(|(n, k)| format!("{} {k}", n.trim_start_matches("nvnCommandBuffer"))).collect();
-        eprintln!("kirikae:         nvn commands the model does not follow yet: {}", calls.join(", "));
+        let calls: Vec<String> = calls
+            .iter()
+            .take(20)
+            .map(|(n, k)| format!("{} {k}", n.trim_start_matches("nvnCommandBuffer")))
+            .collect();
+        eprintln!(
+            "kirikae:         nvn commands the model does not follow yet: {}",
+            calls.join(", ")
+        );
         eprint!("{}", m.learned.report());
         eprint!("{}", m.learned.odd_examples());
     });
 }
 
-pub fn exec_steps(plan: &Plan, regs: &[u32], cbs: &Bindings, read: &dyn Fn(u64, u64) -> Option<Vec<u8>>) -> Option<Vec<Step>> {
+pub fn exec_steps(
+    plan: &Plan,
+    regs: &[u32],
+    cbs: &Bindings,
+    read: &dyn Fn(u64, u64) -> Option<Vec<u8>>,
+) -> Option<Vec<Step>> {
     with(|m| {
         let mut bound = *cbs;
-        let cmds: Vec<&Cmd> = segment(&plan.list, plan.va, plan.end).iter().map(|(_, c)| c).collect();
+        let cmds: Vec<&Cmd> = segment(&plan.list, plan.va, plan.end)
+            .iter()
+            .map(|(_, c)| c)
+            .collect();
         let (slot0, slot2) = m.support;
         let mut why = match () {
             _ if slot0.is_none() => Some("driver constants unknown".to_string()),
@@ -1282,35 +1836,63 @@ pub fn exec_steps(plan: &Plan, regs: &[u32], cbs: &Bindings, read: &dyn Fn(u64, 
                         bind(&mut steps, &mut bound, g, slot, Some(b));
                     }
                     for (&(g, slot), &(address, size)) in &m.exec.uniforms {
-                        bind(&mut steps, &mut bound, g as usize, slot as usize, Some((address, size as u32)));
+                        bind(
+                            &mut steps,
+                            &mut bound,
+                            g as usize,
+                            slot as usize,
+                            Some((address, size as u32)),
+                        );
                     }
                     let based = d.base_vertex != 0 || d.base_instance != 0;
                     if based {
-                        steps.push(Step::Write { at: base + BASE_VERTEX, words: vec![d.base_vertex as u32, d.base_instance] });
+                        steps.push(Step::Write {
+                            at: base + BASE_VERTEX,
+                            words: vec![d.base_vertex as u32, d.base_instance],
+                        });
                     }
                     let index_size = d.indexed.then(|| 1 << (d.index_type & 3));
                     let first = if d.indexed { 0 } else { d.start as u32 };
                     for instance in 0..d.instances.max(1) {
-                        steps.push(Step::Draw(crate::gpu::threed::Draw { topology: d.mode, first, count: d.count, index_size, instance }));
+                        steps.push(Step::Draw(crate::gpu::threed::Draw {
+                            topology: d.mode,
+                            first,
+                            count: d.count,
+                            index_size,
+                            instance,
+                        }));
                     }
                     if based {
-                        steps.push(Step::Write { at: base + BASE_VERTEX, words: vec![0, 0] });
+                        steps.push(Step::Write {
+                            at: base + BASE_VERTEX,
+                            words: vec![0, 0],
+                        });
                     }
                     if d.indexed && d.base_vertex != 0 {
-                        steps.push(Step::Regs(Arc::new(vec![(crate::gpu::threed::reg::VB_ELEMENT_BASE, u32::MAX, 0), (0x446, u32::MAX, 0)])));
+                        steps.push(Step::Regs(Arc::new(vec![
+                            (crate::gpu::threed::reg::VB_ELEMENT_BASE, u32::MAX, 0),
+                            (0x446, u32::MAX, 0),
+                        ])));
                     }
                 }
                 Cmd::Clear(cl) => {
                     let full = m.exec.draw(&Draw::default());
-                    let mut regs_now = match super::encode::predict_complete(&full, &m.learned, regs, read) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            why = Some(format!("clear: {e}"));
-                            continue;
-                        }
-                    };
+                    let mut regs_now =
+                        match super::encode::predict_complete(&full, &m.learned, regs, read) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                why = Some(format!("clear: {e}"));
+                                continue;
+                            }
+                        };
                     if cl.what & 0x3c != 0 {
-                        regs_now.extend((0..4).map(|i| (crate::gpu::threed::reg::CLEAR_COLOR + i, u32::MAX, cl.values[i])));
+                        regs_now.extend((0..4).map(|i| {
+                            (
+                                crate::gpu::threed::reg::CLEAR_COLOR + i,
+                                u32::MAX,
+                                cl.values[i],
+                            )
+                        }));
                     } else {
                         regs_now.push((0x364, u32::MAX, cl.values[0]));
                         regs_now.push((0x368, 0xff, cl.values[1]));
@@ -1321,17 +1903,43 @@ pub fn exec_steps(plan: &Plan, regs: &[u32], cbs: &Bindings, read: &dyn Fn(u64, 
                         steps.push(Step::Clear(cl.what | layer << 10));
                     }
                 }
-                Cmd::Texture { stage, index, handle } => match stage_group(*stage).and_then(|g| slot2[g as usize]) {
-                    Some(s2) => steps.push(Step::Write { at: s2 + TEXTURE_HANDLES + 8 * *index as u64, words: vec![*handle as u32] }),
+                Cmd::Texture {
+                    stage,
+                    index,
+                    handle,
+                } => match stage_group(*stage).and_then(|g| slot2[g as usize]) {
+                    Some(s2) => steps.push(Step::Write {
+                        at: s2 + TEXTURE_HANDLES + 8 * *index as u64,
+                        words: vec![*handle as u32],
+                    }),
                     None => why = Some("texture handles unknown".to_string()),
                 },
                 Cmd::UniformUpdate { address, data } => {
-                    steps.push(Step::Write { at: *address, words: data.as_chunks::<4>().0.iter().map(|w| u32::from_le_bytes(*w)).collect() });
+                    steps.push(Step::Write {
+                        at: *address,
+                        words: data
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .map(|w| u32::from_le_bytes(*w))
+                            .collect(),
+                    });
                 }
-                Cmd::Storage { index, address, size, .. } => {
-                    steps.push(Step::Write { at: base + STORAGE_BUFFERS + 0x10 * *index as u64, words: vec![*address as u32, (*address >> 32) as u32, *size as u32] });
+                Cmd::Storage {
+                    index,
+                    address,
+                    size,
+                    ..
+                } => {
+                    steps.push(Step::Write {
+                        at: base + STORAGE_BUFFERS + 0x10 * *index as u64,
+                        words: vec![*address as u32, (*address >> 32) as u32, *size as u32],
+                    });
                 }
-                Cmd::Multisample(_) => steps.push(Step::Write { at: base + 0x620, words: vec![0; 8] }),
+                Cmd::Multisample(_) => steps.push(Step::Write {
+                    at: base + 0x620,
+                    words: vec![0; 8],
+                }),
                 _ => {}
             }
         }
@@ -1345,7 +1953,13 @@ pub fn exec_steps(plan: &Plan, regs: &[u32], cbs: &Bindings, read: &dyn Fn(u64, 
                         bind(&mut steps, &mut bound, g, slot, Some(b));
                     }
                     for (&(g, slot), &(address, size)) in &m.exec.uniforms {
-                        bind(&mut steps, &mut bound, g as usize, slot as usize, Some((address, size as u32)));
+                        bind(
+                            &mut steps,
+                            &mut bound,
+                            g as usize,
+                            slot as usize,
+                            Some((address, size as u32)),
+                        );
                     }
                 }
                 Err(e) => why = Some(format!("segment end: {e}")),
@@ -1353,7 +1967,9 @@ pub fn exec_steps(plan: &Plan, regs: &[u32], cbs: &Bindings, read: &dyn Fn(u64, 
         }
         if why.is_none() {
             m.stats.executed += works.len() as u64;
-        } else if super::exec::ON.load(Ordering::Relaxed) && why.as_deref().is_some_and(|w| w.contains(": ")) {
+        } else if super::exec::ON.load(Ordering::Relaxed)
+            && why.as_deref().is_some_and(|w| w.contains(": "))
+        {
             m.expected.extend(works);
         }
         super::exec::counted(why.as_deref());

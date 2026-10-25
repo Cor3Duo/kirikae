@@ -9,13 +9,20 @@ fn bits(words: &[u32; 8], lo: usize, n: usize) -> u32 {
 
 pub fn words(bytes: &[u8]) -> Option<[u32; 8]> {
     let b = bytes.get(..32)?;
-    Some(std::array::from_fn(|i| u32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().unwrap())))
+    Some(std::array::from_fn(|i| {
+        u32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().unwrap())
+    }))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Layout {
-    BlockLinear { block_height_log2: u32, block_depth_log2: u32 },
-    Pitch { pitch: u32 },
+    BlockLinear {
+        block_height_log2: u32,
+        block_depth_log2: u32,
+    },
+    Pitch {
+        pitch: u32,
+    },
     Buffer,
 }
 
@@ -40,19 +47,36 @@ pub struct TextureHeader {
 pub fn texture_header(w: &[u32; 8]) -> TextureHeader {
     let version = bits(w, 85, 3);
     let layout = match version {
-        3 | 4 => Layout::BlockLinear { block_height_log2: bits(w, 99, 3), block_depth_log2: bits(w, 102, 3) },
-        1 | 2 => Layout::Pitch { pitch: bits(w, 96, 16) << 5 },
+        3 | 4 => Layout::BlockLinear {
+            block_height_log2: bits(w, 99, 3),
+            block_depth_log2: bits(w, 102, 3),
+        },
+        1 | 2 => Layout::Pitch {
+            pitch: bits(w, 96, 16) << 5,
+        },
         _ => Layout::Buffer,
     };
     let address = match layout {
-        Layout::BlockLinear { .. } => (bits(w, 41, 23) as u64) << 9 | (bits(w, 64, 16) as u64) << 32,
+        Layout::BlockLinear { .. } => {
+            (bits(w, 41, 23) as u64) << 9 | (bits(w, 64, 16) as u64) << 32
+        }
         _ => (bits(w, 37, 27) as u64) << 5 | (bits(w, 64, 16) as u64) << 32,
     };
     TextureHeader {
         components: bits(w, 0, 7),
         data_type: bits(w, 7, 3),
-        data_types: [bits(w, 7, 3), bits(w, 10, 3), bits(w, 13, 3), bits(w, 16, 3)],
-        swizzle: [bits(w, 19, 3), bits(w, 22, 3), bits(w, 25, 3), bits(w, 28, 3)],
+        data_types: [
+            bits(w, 7, 3),
+            bits(w, 10, 3),
+            bits(w, 13, 3),
+            bits(w, 16, 3),
+        ],
+        swizzle: [
+            bits(w, 19, 3),
+            bits(w, 22, 3),
+            bits(w, 25, 3),
+            bits(w, 28, 3),
+        ],
         address,
         layout,
         width: bits(w, 128, 16) + 1,
@@ -113,7 +137,13 @@ mod tests {
         let h = texture_header(&w);
         assert_eq!((h.components, h.data_type, h.swizzle), (8, 2, [2, 3, 4, 5]));
         assert_eq!(h.address, 0x56_0000_0000 | 0x1234 << 9);
-        assert_eq!(h.layout, Layout::BlockLinear { block_height_log2: 4, block_depth_log2: 0 });
+        assert_eq!(
+            h.layout,
+            Layout::BlockLinear {
+                block_height_log2: 4,
+                block_depth_log2: 0
+            }
+        );
         assert_eq!((h.width, h.height, h.texture_type), (1920, 1080, 1));
     }
 }

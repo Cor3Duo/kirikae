@@ -50,7 +50,13 @@ pub fn report() {
     let predicted = predicted_registers();
     let guard = COVERAGE.lock().unwrap();
     let Some(c) = guard.as_ref() else { return };
-    let mut rows: Vec<(u64, usize)> = c.changes.iter().enumerate().filter(|(i, n)| **n > 0 && !predicted.contains(i)).map(|(i, n)| (*n, i)).collect();
+    let mut rows: Vec<(u64, usize)> = c
+        .changes
+        .iter()
+        .enumerate()
+        .filter(|(i, n)| **n > 0 && !predicted.contains(i))
+        .map(|(i, n)| (*n, i))
+        .collect();
     rows.sort_by_key(|r| std::cmp::Reverse(r.0));
     let constant = c.values.iter().filter(|v| v.len() == 1).count();
     eprintln!(
@@ -62,7 +68,12 @@ pub fn report() {
     let line = |&(n, i): &(u64, usize)| {
         let v = &c.values[i];
         let sample: Vec<String> = v.iter().take(6).map(|x| format!("{x:#x}")).collect();
-        format!("{i:#05x} changed {n} times, {}{} values: {}", v.len(), if v.len() >= DISTINCT { "+" } else { "" }, sample.join(" "))
+        format!(
+            "{i:#05x} changed {n} times, {}{} values: {}",
+            v.len(),
+            if v.len() >= DISTINCT { "+" } else { "" },
+            sample.join(" ")
+        )
     };
     for r in rows.iter().take(12) {
         eprintln!("kirikae:           {}", line(r));
@@ -79,11 +90,21 @@ const MACRO_PROGRAM: usize = 0xd1d;
 
 const MACRO_DEPTH_TARGET: usize = 0xd29;
 
-pub fn predict(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u64) -> Option<Vec<u8>>) -> Prediction {
+pub fn predict(
+    d: &Draw,
+    learned: &Learned,
+    regs: &[u32],
+    read: &dyn Fn(u64, u64) -> Option<Vec<u8>>,
+) -> Prediction {
     predict_inner(d, learned, regs, read).0
 }
 
-pub fn predict_complete(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u64) -> Option<Vec<u8>>) -> Result<Prediction, String> {
+pub fn predict_complete(
+    d: &Draw,
+    learned: &Learned,
+    regs: &[u32],
+    read: &dyn Fn(u64, u64) -> Option<Vec<u8>>,
+) -> Result<Prediction, String> {
     let (p, missing) = predict_inner(d, learned, regs, read);
     match missing {
         None => Ok(p),
@@ -91,7 +112,12 @@ pub fn predict_complete(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn
     }
 }
 
-fn predict_inner(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u64) -> Option<Vec<u8>>) -> (Prediction, Option<String>) {
+fn predict_inner(
+    d: &Draw,
+    learned: &Learned,
+    regs: &[u32],
+    read: &dyn Fn(u64, u64) -> Option<Vec<u8>>,
+) -> (Prediction, Option<String>) {
     let mut missing = None;
     let mut out: Prediction = Vec::with_capacity(256);
     let mut put = |r: usize, mask: u32, value: u32| out.push((r, mask, value & mask));
@@ -101,7 +127,10 @@ fn predict_inner(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u
     let fields: crate::gpu::fxhash::FastMap<Field, u64> = d.state.iter().copied().collect();
     let raw = |k: Kind, i: usize| fields.get(&Field(k, i as u8)).copied();
     let field = |k: Kind, i: usize| raw(k, i).and_then(|v| learned.usual(k, v));
-    let (attribs, streams) = (raw(Kind::AttribCount, 0).map_or(32, |v| v as usize), raw(Kind::StreamCount, 0).map_or(16, |v| v as usize));
+    let (attribs, streams) = (
+        raw(Kind::AttribCount, 0).map_or(32, |v| v as usize),
+        raw(Kind::StreamCount, 0).map_or(16, |v| v as usize),
+    );
     let offset = field(Kind::PolygonOffsetEnables, 0).is_some_and(|r| r != 0);
     let stencil_test = field(Kind::StencilTest, 0) == Some(1);
     let depth_test = field(Kind::DepthTest, 0) == Some(1);
@@ -124,7 +153,9 @@ fn predict_inner(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u
             _ => {}
         }
         let stale = match kind {
-            Kind::AttribFormat | Kind::AttribOffset | Kind::AttribStream => i >= attribs || disabled(i),
+            Kind::AttribFormat | Kind::AttribOffset | Kind::AttribStream => {
+                i >= attribs || disabled(i)
+            }
             Kind::StreamStride | Kind::StreamDivisor => i >= streams,
             _ => false,
         };
@@ -134,9 +165,17 @@ fn predict_inner(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u
         let unused = match kind {
             Kind::ChannelMask | Kind::BlendEnable => !bound(i),
             Kind::DepthWrite | Kind::DepthFunc => !depth_test,
-            Kind::StencilRef | Kind::StencilValueMask | Kind::StencilMask | Kind::StencilFunc | Kind::StencilFail | Kind::StencilDepthFail | Kind::StencilPass => !stencil_test,
+            Kind::StencilRef
+            | Kind::StencilValueMask
+            | Kind::StencilMask
+            | Kind::StencilFunc
+            | Kind::StencilFail
+            | Kind::StencilDepthFail
+            | Kind::StencilPass => !stencil_test,
             Kind::BlendEquation | Kind::BlendSrc | Kind::BlendDst => !bound(i) || !blended(i),
-            Kind::BlendEquationAlpha | Kind::BlendSrcAlpha | Kind::BlendDstAlpha => !bound(i) || !blended(i) || !alpha(i),
+            Kind::BlendEquationAlpha | Kind::BlendSrcAlpha | Kind::BlendDstAlpha => {
+                !bound(i) || !blended(i) || !alpha(i)
+            }
             Kind::PolygonOffset => !offset,
             _ => false,
         };
@@ -144,14 +183,21 @@ fn predict_inner(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u
             if unused {
                 continue;
             }
-            if !matches!(kind, Kind::Viewport | Kind::Scissor | Kind::AttribCount | Kind::StreamCount) {
+            if !matches!(
+                kind,
+                Kind::Viewport | Kind::Scissor | Kind::AttribCount | Kind::StreamCount
+            ) {
                 missing.get_or_insert_with(|| format!("{kind:?} {v:#x}"));
             }
             continue;
         };
         let r = r as u32;
         match kind {
-            Kind::ChannelMask => put(0x680 + i, 0x1111, (r & 1) | (r & 2) << 3 | (r & 4) << 6 | (r & 8) << 9),
+            Kind::ChannelMask => put(
+                0x680 + i,
+                0x1111,
+                (r & 1) | (r & 2) << 3 | (r & 4) << 6 | (r & 8) << 9,
+            ),
             Kind::BlendEnable => put(0x4d8 + i, 1, r),
             Kind::BlendEquation => put(0x781 + 8 * i, u32::MAX, r),
             Kind::BlendSrc => put(0x782 + 8 * i, u32::MAX, r),
@@ -196,7 +242,13 @@ fn predict_inner(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u
             Kind::DepthBoundsEnable => put(0x66f, 1, r),
             Kind::DepthBoundsMin => put(0x3e7, u32::MAX, r),
             Kind::DepthBoundsMax => put(0x3e8, u32::MAX, r),
-            Kind::Viewport | Kind::Scissor | Kind::TargetFormat | Kind::BlendRegister | Kind::AttribCount | Kind::StreamCount | Kind::DepthFormat => {}
+            Kind::Viewport
+            | Kind::Scissor
+            | Kind::TargetFormat
+            | Kind::BlendRegister
+            | Kind::AttribCount
+            | Kind::StreamCount
+            | Kind::DepthFormat => {}
         }
     }
     if let Some(c) = cull {
@@ -206,7 +258,12 @@ fn predict_inner(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u
         }
     }
     if viewport[2] != 0 {
-        let (x, y, w, h) = (viewport[0] as f32, viewport[1] as f32, viewport[2] as f32, viewport[3] as f32);
+        let (x, y, w, h) = (
+            viewport[0] as f32,
+            viewport[1] as f32,
+            viewport[2] as f32,
+            viewport[3] as f32,
+        );
         put(0x280, u32::MAX, (w / 2.0).to_bits());
         put(0x281, 0x7fff_ffff, (h / 2.0).to_bits());
         put(0x283, u32::MAX, (x + w / 2.0).to_bits());
@@ -221,24 +278,43 @@ fn predict_inner(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u
         r(at, 0xff, (a >> 32) as u32);
         r(at + 1, u32::MAX, a as u32);
     };
-    for (pool, at) in d.pools.iter().zip([reg::TEX_HEADER_POOL, reg::TEX_SAMPLER_POOL]) {
+    for (pool, at) in d
+        .pools
+        .iter()
+        .zip([reg::TEX_HEADER_POOL, reg::TEX_SAMPLER_POOL])
+    {
         if *pool != 0 {
             address(&mut put, at, *pool);
         }
     }
-    let colors = d.surfaces.iter().filter(|s| s.0 < 8).map(|s| s.0 as u32 + 1).max().unwrap_or(0);
+    let colors = d
+        .surfaces
+        .iter()
+        .filter(|s| s.0 < 8)
+        .map(|s| s.0 as u32 + 1)
+        .max()
+        .unwrap_or(0);
     put(reg::CT_SELECT, u32::MAX, 0xfac_6880 | colors);
     put(0x54e, 1, d.surfaces.iter().any(|s| s.0 == 8) as u32);
     for k in (0..8).filter(|&k| !bound(k)) {
         put(reg::COLOR_TARGET + 16 * k + 4, u32::MAX, 0);
     }
     for &(k, s) in &d.surfaces {
-        let format = learned.usual(if k < 8 { Kind::TargetFormat } else { Kind::DepthFormat }, s.format as u64);
+        let format = learned.usual(
+            if k < 8 {
+                Kind::TargetFormat
+            } else {
+                Kind::DepthFormat
+            },
+            s.format as u64,
+        );
         let memory = match s.pitch {
             Some(_) => 0x1000,
             None => s.block_height_log2 << 4,
         };
-        let width = ((s.width * s.bytes).div_ceil(64) * 64).checked_div(s.bytes).unwrap_or(s.width);
+        let width = ((s.width * s.bytes).div_ceil(64) * 64)
+            .checked_div(s.bytes)
+            .unwrap_or(s.width);
         let width = if s.pitch.is_some() { s.width } else { width };
         if k < 8 {
             let base = reg::COLOR_TARGET + 16 * k as usize;
@@ -262,8 +338,16 @@ fn predict_inner(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u
     }
     if viewport[2] != 0 {
         for at in [0x300, 0x3fd] {
-            put(at, u32::MAX, viewport[0] as u32 | (viewport[2] as u32) << 16);
-            put(at + 1, u32::MAX, viewport[1] as u32 | (viewport[3] as u32) << 16);
+            put(
+                at,
+                u32::MAX,
+                viewport[0] as u32 | (viewport[2] as u32) << 16,
+            );
+            put(
+                at + 1,
+                u32::MAX,
+                viewport[1] as u32 | (viewport[3] as u32) << 16,
+            );
         }
     }
     if d.targets[0] != 0 {
@@ -281,7 +365,11 @@ fn predict_inner(d: &Draw, learned: &Learned, regs: &[u32], read: &dyn Fn(u64, u
     for &(s, size) in &d.vertex_sizes {
         let a = d.vertex.iter().find(|v| v.0 == s).map_or(0, |v| v.1);
         if a != 0 && size != 0 && (s as usize) < streams {
-            address(&mut put, reg::VERTEX_STREAM_LIMIT + 2 * s as usize, a + size - 1);
+            address(
+                &mut put,
+                reg::VERTEX_STREAM_LIMIT + 2 * s as usize,
+                a + size - 1,
+            );
         }
     }
     if d.indexed {
@@ -346,7 +434,12 @@ pub fn check(prediction: Option<Prediction>, regs: &[u32]) {
 fn report_checks() {
     let guard = CHECKS.lock().unwrap();
     let Some(c) = guard.as_ref() else { return };
-    let wrong: Vec<String> = c.registers.iter().filter(|e| e.1.1 > 0).map(|(r, (n, bad, ex))| format!("{r:#05x} {bad}/{n} ({ex})")).collect();
+    let wrong: Vec<String> = c
+        .registers
+        .iter()
+        .filter(|e| e.1.1 > 0)
+        .map(|(r, (n, bad, ex))| format!("{r:#05x} {bad}/{n} ({ex})"))
+        .collect();
     eprintln!(
         "kirikae:         nvn encode: {} draws predicted ({} not paired), {} registers predicted, {} with mismatches",
         c.draws,
@@ -360,5 +453,10 @@ fn report_checks() {
 }
 
 pub fn predicted_registers() -> BTreeSet<usize> {
-    CHECKS.lock().unwrap().as_ref().map(|c| c.registers.keys().copied().collect()).unwrap_or_default()
+    CHECKS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|c| c.registers.keys().copied().collect())
+        .unwrap_or_default()
 }

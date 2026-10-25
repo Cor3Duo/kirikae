@@ -1,7 +1,7 @@
-use crate::gpu::fxhash::FastMap as HashMap;
 use super::Renderer;
 use super::images::ImageKey;
 use super::textures::{CROP, DERIVED};
+use crate::gpu::fxhash::FastMap as HashMap;
 
 #[derive(Default)]
 pub(super) struct PendingPages {
@@ -36,7 +36,10 @@ impl PendingPages {
     }
 
     pub(super) fn overlapping(&self, cpu: u64, len: u64) -> impl Iterator<Item = &(u64, Pending)> {
-        pages_of(cpu, len).filter_map(|p| self.pages.get(&p)).flatten().filter(move |(_, p)| p.0 < cpu + len && cpu < p.0 + p.1)
+        pages_of(cpu, len)
+            .filter_map(|p| self.pages.get(&p))
+            .flatten()
+            .filter(move |(_, p)| p.0 < cpu + len && cpu < p.0 + p.1)
     }
 }
 
@@ -82,8 +85,19 @@ impl CpWrites {
         if pages.end() - pages.start() >= (self.all.len() - seen) as u64 {
             return self.all[seen..].iter().any(|&(s, e)| s < c + size && c < e);
         }
-        self.wide.iter().rev().take_while(|&&i| i as usize >= seen).any(hits)
-            || pages.into_iter().any(|p| self.by_page.get(&p).is_some_and(|v| v.iter().rev().take_while(|&&i| i as usize >= seen).any(hits)))
+        self.wide
+            .iter()
+            .rev()
+            .take_while(|&&i| i as usize >= seen)
+            .any(hits)
+            || pages.into_iter().any(|p| {
+                self.by_page.get(&p).is_some_and(|v| {
+                    v.iter()
+                        .rev()
+                        .take_while(|&&i| i as usize >= seen)
+                        .any(hits)
+                })
+            })
     }
 }
 
@@ -97,7 +111,10 @@ impl Renderer {
     }
 
     pub(super) fn restamped(&mut self, key: ImageKey) {
-        if key.cpu & DERIVED == 0 && self.newest.insert(key.cpu, key) != Some(key) && self.at(key.cpu).len() > 1 {
+        if key.cpu & DERIVED == 0
+            && self.newest.insert(key.cpu, key) != Some(key)
+            && self.at(key.cpu).len() > 1
+        {
             self.forget_textures(key.cpu, false);
         }
     }
@@ -113,7 +130,12 @@ impl Renderer {
     }
 
     pub fn forget_guest_range(&mut self, cpu: u64, len: u64) {
-        let stale: Vec<ImageKey> = self.by_cpu.range(cpu..cpu + len).flat_map(|(_, keys)| keys.iter().copied()).filter(|k| k.cpu & CROP == 0).collect();
+        let stale: Vec<ImageKey> = self
+            .by_cpu
+            .range(cpu..cpu + len)
+            .flat_map(|(_, keys)| keys.iter().copied())
+            .filter(|k| k.cpu & CROP == 0)
+            .collect();
         for key in stale {
             self.destroy_image(key);
         }

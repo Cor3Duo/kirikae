@@ -1,12 +1,14 @@
+pub mod clock;
 pub mod h264;
 pub mod nvdec;
+pub mod surface;
 pub mod vic;
 pub mod vp9;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 
-use crate::gpu::{block_linear_offset, Gpu, NvMap};
+use crate::gpu::{Gpu, NvMap, block_linear_offset};
 use crate::mem::GuestMemory;
 use crate::process::Process;
 
@@ -69,16 +71,27 @@ pub struct Dma<'a> {
 type Later<'a> = (&'static Process, &'a Arc<Mutex<Iova>>, &'a Arc<Worker>);
 
 impl Dma<'_> {
-    pub fn defer(&self, job: impl FnOnce(&Dma) -> Result<(), String> + Send + 'static) -> Result<(), String> {
+    pub fn defer(
+        &self,
+        job: impl FnOnce(&Dma) -> Result<(), String> + Send + 'static,
+    ) -> Result<(), String> {
         static ASYNC: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let deferred = *ASYNC.get_or_init(|| std::env::var_os("KIRIKAE_NVDEC_ASYNC").is_some());
         match self.later {
             Some((p, iova, worker)) if deferred => {
                 let iova = iova.clone();
-                worker.push(p, Box::new(move || {
-                    let iova = iova.lock().unwrap();
-                    job(&Dma { iova: &iova, mem: &p.memory, gpu: &p.gpu, later: None })
-                }));
+                worker.push(
+                    p,
+                    Box::new(move || {
+                        let iova = iova.lock().unwrap();
+                        job(&Dma {
+                            iova: &iova,
+                            mem: &p.memory,
+                            gpu: &p.gpu,
+                            later: None,
+                        })
+                    }),
+                );
                 Ok(())
             }
             _ => job(self),
@@ -90,8 +103,15 @@ impl Dma<'_> {
         self.mem.read(cpu, len as u64)
     }
 
+    /// Translates an engine-address offset into the guest address it maps.
+    pub fn cpu(&self, offset: u32, len: usize) -> Option<u64> {
+        self.iova.translate((offset as u64) << 8, len as u64)
+    }
+
     pub fn write(&self, offset: u32, bytes: &[u8]) -> bool {
-        let Some(cpu) = self.iova.translate((offset as u64) << 8, bytes.len() as u64) else { return false };
+        let Some(cpu) = self.cpu(offset, bytes.len()) else {
+            return false;
+        };
         let ok = self.mem.write(cpu, bytes);
         self.gpu.guest_memory_written(cpu, bytes.len() as u64);
         ok
@@ -121,7 +141,9 @@ impl Worker {
         if !st.2 {
             st.2 = true;
             let w = self.clone();
-            let _ = std::thread::Builder::new().name("kirikae-host1x".into()).spawn(move || w.run(p));
+            let _ = std::thread::Builder::new()
+                .name("kirikae-host1x".into())
+                .spawn(move || w.run(p));
         }
         self.changed.notify_all();
     }
@@ -167,16 +189,28 @@ impl Host1x {
         self.worker.drain();
     }
 
-    pub fn submit(&self, p: &'static Process, context: u32, class: u32, words: &[u32]) -> Vec<String> {
+    pub fn submit(
+        &self,
+        p: &'static Process,
+        context: u32,
+        class: u32,
+        words: &[u32],
+    ) -> Vec<String> {
         if class != CLASS_NVDEC {
             self.drain();
         }
         let (gpu, mem) = (&p.gpu, &p.memory);
         let iova = self.iova.lock().unwrap();
-        let dma = Dma { iova: &iova, mem, gpu, later: Some((p, &self.iova, &self.worker)) };
+        let dma = Dma {
+            iova: &iova,
+            mem,
+            gpu,
+            later: Some((p, &self.iova, &self.worker)),
+        };
         let mut engines = self.engines.lock().unwrap();
         let mut errors = Vec::new();
-        let (mut class, mut offset, mut count, mut mask, mut incrementing) = (class, 0u32, 0u32, 0u32, false);
+        let (mut class, mut offset, mut count, mut mask, mut incrementing) =
+            (class, 0u32, 0u32, 0u32, false);
         for &w in words {
             let reg = if mask != 0 {
                 let bit = mask.trailing_zeros();
@@ -220,7 +254,15 @@ impl Host1x {
 }
 
 impl Engines {
-    fn write(&mut self, dma: &Dma, context: u32, class: u32, reg: u32, value: u32, errors: &mut Vec<String>) {
+    fn write(
+        &mut self,
+        dma: &Dma,
+        context: u32,
+        class: u32,
+        reg: u32,
+        value: u32,
+        errors: &mut Vec<String>,
+    ) {
         let method = match class {
             CLASS_NVDEC => &mut self.nvdec_method,
             CLASS_VIC => &mut self.vic_method,
@@ -259,7 +301,8 @@ pub(crate) fn bits(b: &[u8], lsb: usize, len: usize) -> u32 {
 }
 
 pub(crate) fn u32_at(b: &[u8], o: usize) -> u32 {
-    b.get(o..o + 4).map_or(0, |s| u32::from_le_bytes(s.try_into().unwrap()))
+    b.get(o..o + 4)
+        .map_or(0, |s| u32::from_le_bytes(s.try_into().unwrap()))
 }
 
 pub fn block_linear_size(width_bytes: usize, height: usize, block_height_log2: u32) -> usize {
@@ -267,7 +310,13 @@ pub fn block_linear_size(width_bytes: usize, height: usize, block_height_log2: u
     width_bytes.div_ceil(64) * 64 * height.div_ceil(rows) * rows
 }
 
-pub fn to_block_linear(src: &[u8], pitch: usize, width_bytes: usize, height: usize, block_height_log2: u32) -> Vec<u8> {
+pub fn to_block_linear(
+    src: &[u8],
+    pitch: usize,
+    width_bytes: usize,
+    height: usize,
+    block_height_log2: u32,
+) -> Vec<u8> {
     let mut out = vec![0u8; block_linear_size(width_bytes, height, block_height_log2)];
     for y in 0..height {
         let row = &src[(y * pitch).min(src.len())..];
@@ -276,19 +325,26 @@ pub fn to_block_linear(src: &[u8], pitch: usize, width_bytes: usize, height: usi
             if n == 0 {
                 break;
             }
-            let o = block_linear_offset(x as u64, y as u64, width_bytes as u64, block_height_log2) as usize;
+            let o = block_linear_offset(x as u64, y as u64, width_bytes as u64, block_height_log2)
+                as usize;
             out[o..o + n].copy_from_slice(&row[x..x + n]);
         }
     }
     out
 }
 
-pub fn from_block_linear(raw: &[u8], width_bytes: usize, height: usize, block_height_log2: u32) -> Vec<u8> {
+pub fn from_block_linear(
+    raw: &[u8],
+    width_bytes: usize,
+    height: usize,
+    block_height_log2: u32,
+) -> Vec<u8> {
     let mut out = vec![0u8; width_bytes * height];
     for y in 0..height {
         for x in (0..width_bytes).step_by(16) {
             let n = 16.min(width_bytes - x);
-            let o = block_linear_offset(x as u64, y as u64, width_bytes as u64, block_height_log2) as usize;
+            let o = block_linear_offset(x as u64, y as u64, width_bytes as u64, block_height_log2)
+                as usize;
             if let Some(s) = raw.get(o..o + n) {
                 out[y * width_bytes + x..y * width_bytes + x + n].copy_from_slice(s);
             }
@@ -328,9 +384,37 @@ mod tests {
     #[test]
     fn iova_follows_nvmap() {
         let mut io = Iova::default();
-        let a = io.map(7, NvMap { size: 0x1800, addr: 0x8000_0000, ..NvMap::default() }).unwrap();
-        let b = io.map(9, NvMap { size: 0x100, addr: 0x9000_0000, ..NvMap::default() }).unwrap();
-        assert_eq!(io.map(7, NvMap { size: 0x1800, addr: 0x8000_0000, ..NvMap::default() }), Some(a));
+        let a = io
+            .map(
+                7,
+                NvMap {
+                    size: 0x1800,
+                    addr: 0x8000_0000,
+                    ..NvMap::default()
+                },
+            )
+            .unwrap();
+        let b = io
+            .map(
+                9,
+                NvMap {
+                    size: 0x100,
+                    addr: 0x9000_0000,
+                    ..NvMap::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            io.map(
+                7,
+                NvMap {
+                    size: 0x1800,
+                    addr: 0x8000_0000,
+                    ..NvMap::default()
+                }
+            ),
+            Some(a)
+        );
         assert!(b as u64 >= a as u64 + 0x2000);
         assert_eq!(io.translate(a as u64 + 0x10, 0x10), Some(0x8000_0010));
         assert_eq!(io.translate(a as u64 + 0x1ff0, 0x20), None);

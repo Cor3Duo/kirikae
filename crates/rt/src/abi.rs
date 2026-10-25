@@ -20,24 +20,45 @@ pub const OFF_PC: usize = offset_of!(Cpu, pc);
 pub const OFF_NZCV: usize = offset_of!(Cpu, nzcv);
 pub const OFF_HALTED: usize = offset_of!(Cpu, halted);
 pub const OFF_FPCR: usize = offset_of!(Cpu, fpcr);
+pub const OFF_FPSR: usize = offset_of!(Cpu, fpsr);
 pub const OFF_EXCL_ADDR: usize = offset_of!(Cpu, excl_addr);
 pub const OFF_EXCL_LO: usize = offset_of!(Cpu, excl_lo);
 pub const OFF_EXCL_HI: usize = offset_of!(Cpu, excl_hi);
 pub const OFF_BUDGET: usize = Cpu::OFF_BUDGET;
 pub const OFF_MEM: usize = Cpu::OFF_MEM;
 
-pub fn helpers() -> Vec<(&'static str, *const u8)> {
-    vec![
-        ("kirikae_svc", kirikae_svc as *const u8),
-        ("kirikae_undefined", kirikae_undefined as *const u8),
-        ("kirikae_call_indirect", kirikae_call_indirect as *const u8),
-        ("kirikae_poll_slow", kirikae_poll_slow as *const u8),
-        ("kirikae_sysreg", kirikae_sysreg as *const u8),
-        ("kirikae_set_sysreg", kirikae_set_sysreg as *const u8),
-        ("kirikae_op", kirikae_op as *const u8),
-        ("kirikae_simd", kirikae_simd as *const u8),
-        ("kirikae_store_exclusive", kirikae_store_exclusive as *const u8),
+/// The order `kirikae_bind` and the generated chunk modules use for `helper_table`.
+pub const HELPER_NAMES: [&str; 9] = [
+    "kirikae_svc",
+    "kirikae_undefined",
+    "kirikae_call_indirect",
+    "kirikae_poll_slow",
+    "kirikae_sysreg",
+    "kirikae_set_sysreg",
+    "kirikae_op",
+    "kirikae_simd",
+    "kirikae_store_exclusive",
+];
+
+/// The address of every ABI helper, in [`HELPER_NAMES`] order. A recompiled code chunk that is
+/// linked into its own DLL cannot reference the runtime's symbols, so the executable hands it
+/// these pointers before any generated code runs.
+pub fn helper_table() -> [*const u8; 9] {
+    [
+        kirikae_svc as *const u8,
+        kirikae_undefined as *const u8,
+        kirikae_call_indirect as *const u8,
+        kirikae_poll_slow as *const u8,
+        kirikae_sysreg as *const u8,
+        kirikae_set_sysreg as *const u8,
+        kirikae_op as *const u8,
+        kirikae_simd as *const u8,
+        kirikae_store_exclusive as *const u8,
     ]
+}
+
+pub fn helpers() -> Vec<(&'static str, *const u8)> {
+    HELPER_NAMES.into_iter().zip(helper_table()).collect()
 }
 
 #[unsafe(no_mangle)]
@@ -62,7 +83,13 @@ pub extern "C" fn kirikae_poll_slow(c: &mut Cpu) -> u32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kirikae_store_exclusive(c: &mut Cpu, size: u32, addr: u64, lo: u64, hi: u64) -> u64 {
+pub extern "C" fn kirikae_store_exclusive(
+    c: &mut Cpu,
+    size: u32,
+    addr: u64,
+    lo: u64,
+    hi: u64,
+) -> u64 {
     c.store_exclusive(size as u8, addr, lo, hi)
 }
 

@@ -52,7 +52,14 @@ pub mod reg {
 const OCCLUSION_VISIBLE: u64 = 1 << 24;
 
 pub const STAGES: usize = 6;
-pub const STAGE_NAMES: [&str; STAGES] = ["vertex A", "vertex B", "tess control", "tess eval", "geometry", "fragment"];
+pub const STAGE_NAMES: [&str; STAGES] = [
+    "vertex A",
+    "vertex B",
+    "tess control",
+    "tess eval",
+    "geometry",
+    "fragment",
+];
 
 pub fn stage_enabled(regs: &[u32], stage: usize) -> bool {
     stage == 1 || regs[reg::PIPELINE + 16 * stage] & 1 == 1
@@ -70,7 +77,14 @@ pub struct Macros {
 
 impl Default for Macros {
     fn default() -> Self {
-        Macros { code: std::sync::Arc::new(vec![0; 0x2000]), starts: vec![0; 0x80], code_pointer: 0, start_pointer: 0, pending: None, spare: Vec::new() }
+        Macros {
+            code: std::sync::Arc::new(vec![0; 0x2000]),
+            starts: vec![0; 0x80],
+            code_pointer: 0,
+            start_pointer: 0,
+            pending: None,
+            spare: Vec::new(),
+        }
     }
 }
 
@@ -154,11 +168,19 @@ impl Gpu {
                 }
                 data.extend_from_slice(&v.to_le_bytes());
             }
-            m if (reg::BIND_GROUP_CONSTANT_BUFFER..reg::BIND_GROUP_CONSTANT_BUFFER + 5 * 8).contains(&m) && (m - reg::BIND_GROUP_CONSTANT_BUFFER).is_multiple_of(8) => {
+            m if (reg::BIND_GROUP_CONSTANT_BUFFER..reg::BIND_GROUP_CONSTANT_BUFFER + 5 * 8)
+                .contains(&m)
+                && (m - reg::BIND_GROUP_CONSTANT_BUFFER).is_multiple_of(8) =>
+            {
                 let group = ((m - reg::BIND_GROUP_CONSTANT_BUFFER) / 8) as usize;
                 let slot = ((v >> 4) & 0x1f) as usize;
                 let regs = &e.regs[&super::CLASS_3D];
-                let binding = (v & 1 == 1).then(|| (address(regs, reg::CONSTANT_BUFFER_SELECTOR + 1), regs[reg::CONSTANT_BUFFER_SELECTOR]));
+                let binding = (v & 1 == 1).then(|| {
+                    (
+                        address(regs, reg::CONSTANT_BUFFER_SELECTOR + 1),
+                        regs[reg::CONSTANT_BUFFER_SELECTOR],
+                    )
+                });
                 if let Some(s) = e.threed.constant_buffers[group].get_mut(slot) {
                     *s = binding;
                 }
@@ -179,21 +201,42 @@ impl Gpu {
             }
             reg::END => {
                 if let Some((first, count, index_size)) = e.threed.draw.pending.take() {
-                    let draw = Draw { topology: e.threed.draw.topology, first, count, index_size, instance: e.threed.draw.instance };
+                    let draw = Draw {
+                        topology: e.threed.draw.topology,
+                        first,
+                        count,
+                        index_size,
+                        instance: e.threed.draw.instance,
+                    };
                     let cbs = e.threed.constant_buffers;
                     self.draw(mem, &e.regs[&super::CLASS_3D], &cbs, draw);
                 }
             }
-            reg::DRAW_VERTEX_ARRAY_BEGIN_END_INSTANCE_FIRST | reg::DRAW_VERTEX_ARRAY_BEGIN_END_INSTANCE_SUBSEQUENT => {
-                let instance = e.threed.draw.step_instance((m == reg::DRAW_VERTEX_ARRAY_BEGIN_END_INSTANCE_SUBSEQUENT) as u32);
-                let draw = Draw { topology: v >> 28, first: v & 0xffff, count: (v >> 16) & 0xfff, index_size: None, instance };
+            reg::DRAW_VERTEX_ARRAY_BEGIN_END_INSTANCE_FIRST
+            | reg::DRAW_VERTEX_ARRAY_BEGIN_END_INSTANCE_SUBSEQUENT => {
+                let instance = e.threed.draw.step_instance(
+                    (m == reg::DRAW_VERTEX_ARRAY_BEGIN_END_INSTANCE_SUBSEQUENT) as u32,
+                );
+                let draw = Draw {
+                    topology: v >> 28,
+                    first: v & 0xffff,
+                    count: (v >> 16) & 0xfff,
+                    index_size: None,
+                    instance,
+                };
                 let cbs = e.threed.constant_buffers;
                 self.draw(mem, &e.regs[&super::CLASS_3D], &cbs, draw);
             }
             m if reg::DRAW_INDEX_BUFFER_INLINE.contains(&m) => {
                 let size = [4, 2, 1][((m - 0x5f9) % 3) as usize];
                 let instance = e.threed.draw.step_instance((m - 0x5f9 >= 3) as u32);
-                let draw = Draw { topology: v >> 28, first: v & 0xffff, count: (v >> 16) & 0xfff, index_size: Some(size), instance };
+                let draw = Draw {
+                    topology: v >> 28,
+                    first: v & 0xffff,
+                    count: (v >> 16) & 0xfff,
+                    index_size: Some(size),
+                    instance,
+                };
                 let cbs = e.threed.constant_buffers;
                 self.draw(mem, &e.regs[&super::CLASS_3D], &cbs, draw);
             }
@@ -207,7 +250,13 @@ impl Gpu {
         }
     }
 
-    pub(super) fn draw(&self, mem: &GuestMemory, regs: &[u32], cbs: &[[Option<(u64, u32)>; CB_SLOTS]; 5], draw: Draw) {
+    pub(super) fn draw(
+        &self,
+        mem: &GuestMemory,
+        regs: &[u32],
+        cbs: &[[Option<(u64, u32)>; CB_SLOTS]; 5],
+        draw: Draw,
+    ) {
         let n = self.stats.draws.fetch_add(1, Ordering::Relaxed);
         if crate::nvn::exec::CHECK.load(Ordering::Relaxed) {
             crate::nvn::exec::cp_draw(regs, cbs, &draw);
@@ -216,7 +265,13 @@ impl Gpu {
             let base = address(regs, reg::PROGRAM_REGION);
             let stages: Vec<String> = (0..STAGES)
                 .filter(|&s| stage_enabled(regs, s))
-                .map(|s| format!("{}@{:#x}", STAGE_NAMES[s], base + regs[reg::PIPELINE + 16 * s + 1] as u64))
+                .map(|s| {
+                    format!(
+                        "{}@{:#x}",
+                        STAGE_NAMES[s],
+                        base + regs[reg::PIPELINE + 16 * s + 1] as u64
+                    )
+                })
                 .collect();
             let rt = reg::COLOR_TARGET;
             eprintln!(
@@ -227,26 +282,45 @@ impl Gpu {
                 regs[rt + 4],
                 regs[reg::CT_SELECT],
                 stages.join(", "),
-                cbs[4].iter().enumerate().filter_map(|(i, b)| b.map(|b| (i, b))).collect::<Vec<_>>()
+                cbs[4]
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, b)| b.map(|b| (i, b)))
+                    .collect::<Vec<_>>()
             );
             if crate::env_var!("KIRIKAE_TRACE_REGS").is_some() {
-                let nz: Vec<String> = regs.iter().enumerate().filter(|(_, v)| **v != 0).map(|(i, v)| format!("{i:x}={v:x}")).collect();
+                let nz: Vec<String> = regs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, v)| **v != 0)
+                    .map(|(i, v)| format!("{i:x}={v:x}"))
+                    .collect();
                 eprintln!("gpu:   regs {}", nz.join(" "));
             }
             let ct = regs[reg::CT_SELECT];
             for k in 1..(ct & 0xf).min(8) {
                 let base = reg::COLOR_TARGET + 16 * (ct >> (4 + 3 * k) & 7) as usize;
-                eprintln!("gpu:   target {k}: {:#x} regs {:x?}", address(regs, base), &regs[base + 2..base + 9]);
+                eprintln!(
+                    "gpu:   target {k}: {:#x} regs {:x?}",
+                    address(regs, base),
+                    &regs[base + 2..base + 9]
+                );
             }
             if regs[reg::COLOR_TARGET + 6] & 0xffff > 1 || regs[reg::COLOR_TARGET + 8] != 0 {
-                eprintln!("gpu:   target 0 layered: regs {:x?}", &regs[reg::COLOR_TARGET + 2..reg::COLOR_TARGET + 9]);
+                eprintln!(
+                    "gpu:   target 0 layered: regs {:x?}",
+                    &regs[reg::COLOR_TARGET + 2..reg::COLOR_TARGET + 9]
+                );
             }
         }
         if let Some(dir) = crate::env_var!("KIRIKAE_SHADER_DUMP") {
             let base = address(regs, reg::PROGRAM_REGION);
             for s in (0..STAGES).filter(|&s| stage_enabled(regs, s)) {
                 let va = base + regs[reg::PIPELINE + 16 * s + 1] as u64;
-                let path = std::path::Path::new(&dir).join(format!("{va:010x}_{}.bin", STAGE_NAMES[s].replace(' ', "_")));
+                let path = std::path::Path::new(&dir).join(format!(
+                    "{va:010x}_{}.bin",
+                    STAGE_NAMES[s].replace(' ', "_")
+                ));
                 if !path.exists()
                     && let Some(code) = self.read(mem, va, 0x8000)
                 {
@@ -266,7 +340,17 @@ impl Gpu {
     pub(super) fn clear(&self, mem: &GuestMemory, regs: &[u32], v: u32) {
         if crate::nvn::exec::CHECK.load(Ordering::Relaxed) {
             let cbs = [[None; CB_SLOTS]; 5];
-            crate::nvn::exec::cp_draw(regs, &cbs, &Draw { topology: crate::nvn::exec::CLEAR, first: v, count: 0, index_size: None, instance: 0 });
+            crate::nvn::exec::cp_draw(
+                regs,
+                &cbs,
+                &Draw {
+                    topology: crate::nvn::exec::CLEAR,
+                    first: v,
+                    count: 0,
+                    index_size: None,
+                    instance: 0,
+                },
+            );
         }
         self.stats.clears.fetch_add(1, Ordering::Relaxed);
         if crate::nvn::shadow::ON.load(Ordering::Relaxed) {
@@ -281,12 +365,16 @@ impl Gpu {
         let rt = (v >> 6 & 0xf) as usize;
         let base = reg::COLOR_TARGET + rt * 0x10;
         let addr = address(regs, base);
-        let (width, height, format) = (regs[base + 2] as u64, regs[base + 3] as u64, regs[base + 4]);
-        let color: Vec<f32> = (0..4).map(|k| f32::from_bits(regs[reg::CLEAR_COLOR + k])).collect();
+        let (width, height, format) =
+            (regs[base + 2] as u64, regs[base + 3] as u64, regs[base + 4]);
+        let color: Vec<f32> = (0..4)
+            .map(|k| f32::from_bits(regs[reg::CLEAR_COLOR + k]))
+            .collect();
         if trace() {
             eprintln!(
                 "gpu: clear rt{rt} at {addr:#x} (guest {}) {width}x{height} format {format:#x} color {color:?} mask {:#x} layer {} flags {:#x} scissor {:#x} {:#x} {:#x}",
-                self.translate(addr).map_or("unmapped".into(), |a| format!("{a:#x}")),
+                self.translate(addr)
+                    .map_or("unmapped".into(), |a| format!("{a:#x}")),
                 v >> 2 & 0xf,
                 v >> 10 & 0x7ff,
                 regs[0x43e],
@@ -296,8 +384,15 @@ impl Gpu {
             );
         }
         let surface = super::vulkan::color_surface(regs, base);
-        let bits = [regs[reg::CLEAR_COLOR], regs[reg::CLEAR_COLOR + 1], regs[reg::CLEAR_COLOR + 2], regs[reg::CLEAR_COLOR + 3]];
-        let rendered = self.with_renderer(|r| r.clear(self, mem, &surface, bits)).is_some();
+        let bits = [
+            regs[reg::CLEAR_COLOR],
+            regs[reg::CLEAR_COLOR + 1],
+            regs[reg::CLEAR_COLOR + 2],
+            regs[reg::CLEAR_COLOR + 3],
+        ];
+        let rendered = self
+            .with_renderer(|r| r.clear(self, mem, &surface, bits))
+            .is_some();
         if rendered && crate::env_var!("KIRIKAE_CPU_CLEARS").is_none() {
             return;
         }
@@ -318,7 +413,10 @@ impl Gpu {
 
     pub(super) fn report(&self, mem: &GuestMemory, regs: &[u32]) {
         let addr = address(regs, reg::REPORT_SEMAPHORE);
-        let (payload, control) = (regs[reg::REPORT_SEMAPHORE + 2], regs[reg::REPORT_SEMAPHORE + 3]);
+        let (payload, control) = (
+            regs[reg::REPORT_SEMAPHORE + 2],
+            regs[reg::REPORT_SEMAPHORE + 3],
+        );
         let value = match control & 3 {
             0 => payload as u64,
             2 => match control >> 23 & 0x1f {

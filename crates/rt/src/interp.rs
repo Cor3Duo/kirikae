@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use kirikae_a64::{lift, Expr, Insn, Stmt};
+use kirikae_a64::{Expr, Insn, Stmt, lift};
 
 use crate::cpu::Cpu;
 use crate::horizon;
@@ -37,7 +37,9 @@ pub fn exec(c: &mut Cpu, insn: &Insn) {
                 let v = eval(c, e, &tmp);
                 c.set_sysreg(*r, v);
             }
-            Stmt::SetV { reg, hi, value } => c.v[*reg as usize][*hi as usize] = eval(c, value, &tmp),
+            Stmt::SetV { reg, hi, value } => {
+                c.v[*reg as usize][*hi as usize] = eval(c, value, &tmp)
+            }
             Stmt::Store { size, addr, value } => {
                 let (a, v) = (eval(c, addr, &tmp), eval(c, value, &tmp));
                 c.store(*size, a, v);
@@ -46,7 +48,13 @@ pub fn exec(c: &mut Cpu, insn: &Insn) {
                 let (a, l, h) = (eval(c, addr, &tmp), eval(c, lo, &tmp), eval(c, hi, &tmp));
                 c.monitor(a, l, h);
             }
-            Stmt::StoreExclusive { size, addr, lo, hi, status } => {
+            Stmt::StoreExclusive {
+                size,
+                addr,
+                lo,
+                hi,
+                status,
+            } => {
                 let (a, l, h) = (eval(c, addr, &tmp), eval(c, lo, &tmp), eval(c, hi, &tmp));
                 let r = c.store_exclusive(*size, a, l, h);
                 if *status != 31 {
@@ -65,7 +73,11 @@ pub fn exec(c: &mut Cpu, insn: &Insn) {
                 return;
             }
             Stmt::JumpIf(cond, t) => {
-                c.pc = if eval(c, cond, &tmp) != 0 { *t } else { insn.next() };
+                c.pc = if eval(c, cond, &tmp) != 0 {
+                    *t
+                } else {
+                    insn.next()
+                };
                 return;
             }
             Stmt::JumpIndirect(e) | Stmt::CallIndirect(e) => {
@@ -97,7 +109,10 @@ pub fn step(c: &mut Cpu) {
         Some(i) => i,
         None => {
             if !pc.is_multiple_of(4) || !p.memory.is_mapped(pc, 4) {
-                horizon::fault(c, format!("jumped to unmapped or misaligned address {pc:#x}"));
+                horizon::fault(
+                    c,
+                    format!("jumped to unmapped or misaligned address {pc:#x}"),
+                );
                 return;
             }
             let insn = Arc::new(lift(pc, c.ld32(pc) as u32));

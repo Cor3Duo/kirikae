@@ -5,9 +5,13 @@ use vp9dec::compressed_header::{CompressedHeader, CompressedHeaderProbs};
 use vp9dec::counts::{Counts, TokenCounts};
 use vp9dec::dpb::RefFrameData;
 use vp9dec::framebuffer::Plane;
-use vp9dec::header::{ColorConfig, FrameType, BILINEAR, EIGHTTAP, EIGHTTAP_SHARP, EIGHTTAP_SMOOTH, SWITCHABLE, LoopFilterParams, NewFrameHeader, QuantizationParams, SegmentationParams, CS_UNKNOWN};
+use vp9dec::header::{
+    BILINEAR, CS_UNKNOWN, ColorConfig, EIGHTTAP, EIGHTTAP_SHARP, EIGHTTAP_SMOOTH, FrameType,
+    LoopFilterParams, NewFrameHeader, QuantizationParams, SWITCHABLE, SegmentationParams,
+};
 use vp9dec::tile::{MiGrid, TileDecoder};
 
+use super::surface::{BitDepth, Yuv420};
 use super::{from_block_linear, u32_at};
 
 pub const PICTURE_INFO_SIZE: usize = 0x100;
@@ -46,19 +50,40 @@ impl PictureInfo {
             let mask = u32_at(b, 0x84 + 4 * s);
             for f in 0..4 {
                 feature_enabled[s][f] = mask >> f & 1 != 0;
-                feature_data[s][f] = i16::from_le_bytes([b[0xa4 + 8 * s + 2 * f], b[0xa5 + 8 * s + 2 * f]]) as i32;
+                feature_data[s][f] =
+                    i16::from_le_bytes([b[0xa4 + 8 * s + 2 * f], b[0xa5 + 8 * s + 2 * f]]) as i32;
             }
         }
-        let (base_q_idx, y_dc, uv_ac, uv_dc) = (b[0x72], i8_at(0x73) as i32, i8_at(0x74) as i32, i8_at(0x75) as i32);
+        let (base_q_idx, y_dc, uv_ac, uv_dc) = (
+            b[0x72],
+            i8_at(0x73) as i32,
+            i8_at(0x74) as i32,
+            i8_at(0x75) as i32,
+        );
         let header = NewFrameHeader {
             profile: 0,
-            frame_type: if key { FrameType::KeyFrame } else { FrameType::NonKeyFrame },
+            frame_type: if key {
+                FrameType::KeyFrame
+            } else {
+                FrameType::NonKeyFrame
+            },
             show_frame: true,
             error_resilient_mode: flags & ERROR_RESILIENT != 0,
             frame_is_intra: key || intra_only,
             intra_only,
             reset_frame_context: 0,
-            color_config: Some(ColorConfig { bit_depth: 8, color_space: CS_UNKNOWN, color_range: false, subsampling_x: 1, subsampling_y: 1 }),
+            // Tegra X1's NVDEC decodes VP9 Profile 0 only (8-bit 4:2:0), and the
+            // picture info we parse from the guest carries no profile field, so
+            // every stream we can be handed is Profile 0. The surface writer and
+            // the reference reload still handle 10-bit pictures for a backend
+            // that reports Profile 2 (`vp9dec` decodes 8, 10 and 12 bits).
+            color_config: Some(ColorConfig {
+                bit_depth: 8,
+                color_space: CS_UNKNOWN,
+                color_range: false,
+                subsampling_x: 1,
+                subsampling_y: 1,
+            }),
             width,
             height,
             render_width: width,
@@ -78,7 +103,13 @@ impl PictureInfo {
                 ref_deltas: std::array::from_fn(|i| i8_at(0xe5 + i)),
                 mode_deltas: std::array::from_fn(|i| i8_at(0xe9 + i)),
             },
-            quantization: QuantizationParams { base_q_idx, delta_q_y_dc: y_dc, delta_q_uv_dc: uv_dc, delta_q_uv_ac: uv_ac, lossless: b[0x76] != 0 },
+            quantization: QuantizationParams {
+                base_q_idx,
+                delta_q_y_dc: y_dc,
+                delta_q_uv_dc: uv_dc,
+                delta_q_uv_ac: uv_ac,
+                lossless: b[0x76] != 0,
+            },
             segmentation: SegmentationParams {
                 enabled: b[0x80] != 0,
                 update_map: b[0x81] != 0,
@@ -244,8 +275,24 @@ pub fn backward_updates(c: &Counts) -> Vec<u8> {
     w.extend(c.mv_fr.as_flattened());
     w.extend(c.mv_class0_hp.as_flattened());
     w.extend(c.mv_hp.as_flattened());
-    let flat = |t: &TokenCounts| -> Vec<[u32; 3]> { t.iter().flatten().flatten().flatten().flatten().copied().collect() };
-    let more: Vec<[u32; 2]> = c.more_coefs.iter().flatten().flatten().flatten().flatten().copied().collect();
+    let flat = |t: &TokenCounts| -> Vec<[u32; 3]> {
+        t.iter()
+            .flatten()
+            .flatten()
+            .flatten()
+            .flatten()
+            .copied()
+            .collect()
+    };
+    let more: Vec<[u32; 2]> = c
+        .more_coefs
+        .iter()
+        .flatten()
+        .flatten()
+        .flatten()
+        .flatten()
+        .copied()
+        .collect();
     for (t, m) in flat(&c.token).iter().zip(&more) {
         w.extend_from_slice(&[t[0], t[1], t[2], m[0]]);
     }
@@ -255,25 +302,87 @@ pub fn backward_updates(c: &Counts) -> Vec<u8> {
 
 pub type Picture = Arc<RefFrameData>;
 
-pub fn picture_from_nv12(y: &[u8], uv: &[u8], width: usize, height: usize) -> Picture {
+/// Rebuilds a reference picture from the guest surface it was written to.
+///
+/// `depth` is the depth the surface was written at, which is the depth of the
+/// picture that produced it: 8-bit surfaces are NV12 and 10-bit ones are P010.
+pub fn picture_from_surface(
+    y: &[u8],
+    uv: &[u8],
+    width: usize,
+    height: usize,
+    depth: BitDepth,
+) -> Picture {
     let (cw, ch) = (width.div_ceil(2), height.div_ceil(2));
+    let (cw, ch) = (cw.max(1), ch.max(1));
     let mut py = Plane::new(width, height);
-    for (d, s) in py.as_mut_slice().iter_mut().zip(from_block_linear(y, width, height, 1)) {
-        *d = s as u16;
+    for (d, s) in py
+        .as_mut_slice()
+        .iter_mut()
+        .zip(samples(y, width, height, depth))
+    {
+        *d = s;
     }
-    let uv = from_block_linear(uv, cw * 2, ch, 1);
+    let uv = samples(uv, cw * 2, ch, depth);
     let (mut pu, mut pv) = (Plane::new(cw, ch), Plane::new(cw, ch));
-    for (i, (u, v)) in pu.as_mut_slice().iter_mut().zip(pv.as_mut_slice().iter_mut()).enumerate() {
-        *u = uv[2 * i] as u16;
-        *v = uv[2 * i + 1] as u16;
+    for (i, (u, v)) in pu
+        .as_mut_slice()
+        .iter_mut()
+        .zip(pv.as_mut_slice().iter_mut())
+        .enumerate()
+    {
+        *u = uv[2 * i];
+        *v = uv[2 * i + 1];
     }
-    Arc::new(RefFrameData { width: width as u32, height: height as u32, subsampling_x: 1, subsampling_y: 1, bit_depth: 8, y: py, u: pu, v: pv })
+    Arc::new(RefFrameData {
+        width: width as u32,
+        height: height as u32,
+        subsampling_x: 1,
+        subsampling_y: 1,
+        bit_depth: depth.bits() as u8,
+        y: py,
+        u: pu,
+        v: pv,
+    })
 }
 
-pub fn nv12(p: &RefFrameData) -> (Vec<u8>, Vec<u8>) {
-    let y = p.y.as_slice().iter().map(|&v| v as u8).collect();
-    let uv = p.u.as_slice().iter().zip(p.v.as_slice()).flat_map(|(&u, &v)| [u as u8, v as u8]).collect();
-    (y, uv)
+/// Reads a block-linear plane into samples at `depth`.
+fn samples(raw: &[u8], width: usize, height: usize, depth: BitDepth) -> Vec<u16> {
+    let rows = from_block_linear(raw, width * depth.bytes(), height, 1);
+    match depth {
+        BitDepth::Eight => rows.iter().map(|&v| v as u16).collect(),
+        BitDepth::Ten => rows
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|w| u16::from_le_bytes(*w) >> 6)
+            .collect(),
+    }
+}
+
+/// Flattens a decoded picture into the shared 4:2:0 form used for the guest
+/// surface. `vp9dec` keeps real samples for 10- and 12-bit streams, so the depth
+/// travels with the picture instead of being assumed to be 8.
+pub fn yuv420(p: &RefFrameData) -> Result<Yuv420, String> {
+    let depth = BitDepth::from_bits(p.bit_depth).ok_or_else(|| {
+        format!(
+            "VP9 bit depth {} is not supported (8 and 10 bits only)",
+            p.bit_depth
+        )
+    })?;
+    Ok(Yuv420 {
+        width: p.width as usize,
+        height: p.height as usize,
+        bit_depth: depth,
+        y: p.y.as_slice().to_vec(),
+        uv: p
+            .u
+            .as_slice()
+            .iter()
+            .zip(p.v.as_slice())
+            .flat_map(|(&u, &v)| [u, v])
+            .collect(),
+    })
 }
 
 #[derive(Default)]
@@ -289,7 +398,13 @@ pub struct Decoded {
 }
 
 impl Decoder {
-    pub fn decode(&mut self, info: &PictureInfo, probs: &[u8], refs: [Option<Picture>; 3], tiles: &[u8]) -> Result<Decoded, String> {
+    pub fn decode(
+        &mut self,
+        info: &PictureInfo,
+        probs: &[u8],
+        refs: [Option<Picture>; 3],
+        tiles: &[u8],
+    ) -> Result<Decoded, String> {
         let mut header = info.header.clone();
         let (probs, seg_tree, seg_pred) = parse_probs(probs);
         header.segmentation.tree_probs = seg_tree;
@@ -299,12 +414,22 @@ impl Decoder {
             return Err(format!("VP9 frame size {width}x{height}"));
         }
         let independent = header.frame_is_intra || header.error_resilient_mode;
-        let use_prev_mvs = !independent && info.flags & (FRAME_SIZE_CHANGED | LAST_SHOW_FRAME) == LAST_SHOW_FRAME && self.prev_size == (width, height) && self.prev_grid.is_some();
+        let use_prev_mvs = !independent
+            && info.flags & (FRAME_SIZE_CHANGED | LAST_SHOW_FRAME) == LAST_SHOW_FRAME
+            && self.prev_size == (width, height)
+            && self.prev_grid.is_some();
         let mi_count = (width.div_ceil(8) * height.div_ceil(8)) as usize;
-        if independent || self.prev_size != (width, height) || self.prev_segment_ids.len() != mi_count {
+        if independent
+            || self.prev_size != (width, height)
+            || self.prev_segment_ids.len() != mi_count
+        {
             self.prev_segment_ids = Arc::new(vec![0; mi_count]);
         }
-        let refs = if header.frame_is_intra { [None, None, None] } else { refs };
+        let refs = if header.frame_is_intra {
+            [None, None, None]
+        } else {
+            refs
+        };
         if !header.frame_is_intra && refs.iter().any(Option::is_none) {
             return Err("VP9 reference picture missing".into());
         }
@@ -316,9 +441,23 @@ impl Decoder {
             comp_var_ref: info.comp_var_ref,
         };
         let color = header.color_config.unwrap();
-        let prev_grid = if use_prev_mvs { self.prev_grid.clone() } else { None };
-        let mut tiles_decoder = TileDecoder::new_with_prev(&header, color, &compressed, use_prev_mvs, prev_grid, refs, self.prev_segment_ids.clone());
-        tiles_decoder.decode_tiles(tiles).map_err(|e| format!("VP9 tiles: {e:?}"))?;
+        let prev_grid = if use_prev_mvs {
+            self.prev_grid.clone()
+        } else {
+            None
+        };
+        let mut tiles_decoder = TileDecoder::new_with_prev(
+            &header,
+            color,
+            &compressed,
+            use_prev_mvs,
+            prev_grid,
+            refs,
+            self.prev_segment_ids.clone(),
+        );
+        tiles_decoder
+            .decode_tiles(tiles)
+            .map_err(|e| format!("VP9 tiles: {e:?}"))?;
         if header.loop_filter.level != 0 {
             tiles_decoder.apply_loop_filter(&header.loop_filter);
         }
@@ -330,7 +469,7 @@ impl Decoder {
             height,
             subsampling_x: 1,
             subsampling_y: 1,
-            bit_depth: 8,
+            bit_depth: color.bit_depth,
             y: planes[0].crop_to_plane(w, h),
             u: planes[1].crop_to_plane(w.div_ceil(2), h.div_ceil(2)),
             v: planes[2].crop_to_plane(w.div_ceil(2), h.div_ceil(2)),
@@ -338,7 +477,12 @@ impl Decoder {
         if header.segmentation.enabled && header.segmentation.update_map {
             let grid = tiles_decoder.mi_grid();
             let (cols, rows) = (width.div_ceil(8), height.div_ceil(8));
-            self.prev_segment_ids = Arc::new((0..rows).flat_map(|r| (0..cols).map(move |c| (r, c))).map(|(r, c)| grid.get(r, c).segment_id).collect());
+            self.prev_segment_ids = Arc::new(
+                (0..rows)
+                    .flat_map(|r| (0..cols).map(move |c| (r, c)))
+                    .map(|(r, c)| grid.get(r, c).segment_id)
+                    .collect(),
+            );
         }
         self.prev_grid = Some(Arc::new(tiles_decoder.into_mi_grid()));
         self.prev_size = (width, height);
@@ -363,7 +507,11 @@ impl Pictures {
         self.clock += 1;
         self.by_surface.insert(luma, (self.clock, p));
         if self.by_surface.len() > Self::KEEP
-            && let Some(&oldest) = self.by_surface.iter().min_by_key(|(_, (t, _))| *t).map(|(k, _)| k)
+            && let Some(&oldest) = self
+                .by_surface
+                .iter()
+                .min_by_key(|(_, (t, _))| *t)
+                .map(|(k, _)| k)
         {
             self.by_surface.remove(&oldest);
         }
@@ -378,8 +526,18 @@ mod tests {
     fn layouts() {
         let d = CompressedHeaderProbs::default();
         let mut b = vec![0u8; PROBS_SIZE];
-        b[0x400..0x41c].copy_from_slice(&d.inter_mode_probs.map(|r| [r[0], r[1], r[2], 0]).concat());
-        b[0x5a0..].copy_from_slice(&d.coef_probs.as_flattened().as_flattened().as_flattened().as_flattened().iter().flat_map(|c| [c[0], c[1], c[2], 0]).collect::<Vec<_>>());
+        b[0x400..0x41c]
+            .copy_from_slice(&d.inter_mode_probs.map(|r| [r[0], r[1], r[2], 0]).concat());
+        b[0x5a0..].copy_from_slice(
+            &d.coef_probs
+                .as_flattened()
+                .as_flattened()
+                .as_flattened()
+                .as_flattened()
+                .iter()
+                .flat_map(|c| [c[0], c[1], c[2], 0])
+                .collect::<Vec<_>>(),
+        );
         b[0x4e0..0x520].copy_from_slice(&d.partition_probs.map(|r| [r[0], r[1], r[2], 0]).concat());
         b[0x56c..0x580].copy_from_slice(&d.mv_bits_prob.concat());
         let (p, _, _) = parse_probs(&b);
@@ -394,8 +552,51 @@ mod tests {
     fn nv12_round_trip() {
         let (w, h) = (34usize, 18usize);
         let y: Vec<u8> = (0..w * h).map(|i| i as u8).collect();
-        let uv: Vec<u8> = (0..w.div_ceil(2) * 2 * h.div_ceil(2)).map(|i| (i * 3) as u8).collect();
-        let p = picture_from_nv12(&super::super::to_block_linear(&y, w, w, h, 1), &super::super::to_block_linear(&uv, w, w, h / 2, 1), w, h);
-        assert_eq!(nv12(&p), (y, uv));
+        let uv: Vec<u8> = (0..w.div_ceil(2) * 2 * h.div_ceil(2))
+            .map(|i| (i * 3) as u8)
+            .collect();
+        let p = picture_from_surface(
+            &super::super::to_block_linear(&y, w, w, h, 1),
+            &super::super::to_block_linear(&uv, w, w, h / 2, 1),
+            w,
+            h,
+            BitDepth::Eight,
+        );
+        let picture = yuv420(&p).unwrap();
+        assert_eq!(picture.bit_depth, BitDepth::Eight);
+        assert_eq!(picture.pack(BitDepth::Eight), (y, uv));
+    }
+
+    #[test]
+    fn p010_reference_round_trip() {
+        let (w, h) = (18usize, 10usize);
+        let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+        let y: Vec<u16> = (0..w * h).map(|i| (i * 7 % 1024) as u16).collect();
+        let uv: Vec<u16> = (0..cw * 2 * ch).map(|i| (i * 11 % 1024) as u16).collect();
+        let picture = Yuv420 {
+            width: w,
+            height: h,
+            bit_depth: BitDepth::Ten,
+            y: y.clone(),
+            uv: uv.clone(),
+        };
+        let (packed_y, packed_uv) = picture.pack(BitDepth::Ten);
+        let p = picture_from_surface(
+            &super::super::to_block_linear(&packed_y, w * 2, w * 2, h, 1),
+            &super::super::to_block_linear(&packed_uv, cw * 4, cw * 4, ch, 1),
+            w,
+            h,
+            BitDepth::Ten,
+        );
+        assert_eq!(p.bit_depth, 10);
+        assert_eq!(p.y.as_slice(), &y[..]);
+        assert_eq!(
+            p.u.as_slice()
+                .iter()
+                .zip(p.v.as_slice())
+                .flat_map(|(&u, &v)| [u, v])
+                .collect::<Vec<_>>(),
+            uv
+        );
     }
 }

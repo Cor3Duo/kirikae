@@ -10,8 +10,15 @@ pub struct AdpcmContext {
 
 impl AdpcmContext {
     pub fn parse(d: &[u8]) -> AdpcmContext {
-        let h = |o: usize| d.get(o..o + 2).map_or(0, |b| u16::from_le_bytes([b[0], b[1]]));
-        AdpcmContext { pred_scale: h(0), history0: h(2) as i16, history1: h(4) as i16 }
+        let h = |o: usize| {
+            d.get(o..o + 2)
+                .map_or(0, |b| u16::from_le_bytes([b[0], b[1]]))
+        };
+        AdpcmContext {
+            pred_scale: h(0),
+            history0: h(2) as i16,
+            history1: h(4) as i16,
+        }
     }
 }
 
@@ -25,7 +32,14 @@ pub fn adpcm_size(samples: u64) -> u64 {
     adpcm_nibble(samples).div_ceil(2)
 }
 
-pub fn decode_adpcm(data: &[u8], start: u64, count: usize, coefficients: &[i16; 16], ctx: &mut AdpcmContext, out: &mut Vec<f32>) -> usize {
+pub fn decode_adpcm(
+    data: &[u8],
+    start: u64,
+    count: usize,
+    coefficients: &[i16; 16],
+    ctx: &mut AdpcmContext,
+    out: &mut Vec<f32>,
+) -> usize {
     let first = adpcm_nibble(start);
     let mut nibble = first - (first & !1);
     let mut scale = u32::from(ctx.pred_scale & 0xf);
@@ -35,16 +49,25 @@ pub fn decode_adpcm(data: &[u8], start: u64, count: usize, coefficients: &[i16; 
     let mut abs = first;
     while done < count {
         if abs.is_multiple_of(ADPCM_NIBBLES_PER_FRAME) {
-            let Some(&header) = data.get((nibble / 2) as usize) else { break };
+            let Some(&header) = data.get((nibble / 2) as usize) else {
+                break;
+            };
             ctx.pred_scale = u16::from(header);
             scale = u32::from(header & 0xf);
             index = usize::from((header >> 4) & 7);
             nibble += 2;
             abs += 2;
         }
-        let Some(&byte) = data.get((nibble / 2) as usize) else { break };
-        let value = if nibble & 1 == 0 { (byte as i8) >> 4 } else { ((byte << 4) as i8) >> 4 };
-        let prediction = i64::from(coefficients[index * 2]) * h0 + i64::from(coefficients[index * 2 + 1]) * h1;
+        let Some(&byte) = data.get((nibble / 2) as usize) else {
+            break;
+        };
+        let value = if nibble & 1 == 0 {
+            (byte as i8) >> 4
+        } else {
+            ((byte << 4) as i8) >> 4
+        };
+        let prediction =
+            i64::from(coefficients[index * 2]) * h0 + i64::from(coefficients[index * 2 + 1]) * h1;
         let sample = (((i64::from(value) << 11) << scale) + prediction + 1024) >> 11;
         let sample = sample.clamp(i16::MIN.into(), i16::MAX.into());
         h1 = h0;
@@ -71,7 +94,11 @@ pub fn resample(input: &[f32], out: &mut [f32], ratio: f32, fraction: f32) -> f3
         let p1 = input[i + 1];
         let p2 = input[i + 2];
         let p3 = input[i + 3];
-        *o = p1 + 0.5 * t * (p2 - p0 + t * (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3 + t * (3.0 * (p1 - p2) + p3 - p0)));
+        *o = p1
+            + 0.5
+                * t
+                * (p2 - p0
+                    + t * (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3 + t * (3.0 * (p1 - p2) + p3 - p0)));
     }
     let end = fraction + ratio * out.len() as f32;
     end - end.floor()
@@ -125,17 +152,41 @@ mod tests {
         data.extend(frame(0x10, [1; 14]));
         let mut ctx = AdpcmContext::default();
         let mut out = Vec::new();
-        assert_eq!(decode_adpcm(&data, 0, 28, &coefficients, &mut ctx, &mut out), 28);
+        assert_eq!(
+            decode_adpcm(&data, 0, 28, &coefficients, &mut ctx, &mut out),
+            28
+        );
         assert_eq!(&out[..4], &[16.0, 0.0, 0.0, -16.0]);
         assert_eq!(out[13], 112.0);
         assert_eq!(out[14], 113.0);
         assert_eq!(out[27], 126.0);
-        assert_eq!(ctx, AdpcmContext { pred_scale: 0x10, history0: 126, history1: 125 });
+        assert_eq!(
+            ctx,
+            AdpcmContext {
+                pred_scale: 0x10,
+                history0: 126,
+                history1: 125
+            }
+        );
 
-        let mut ctx2 = AdpcmContext { pred_scale: 0x10, history0: 113, history1: 112 };
+        let mut ctx2 = AdpcmContext {
+            pred_scale: 0x10,
+            history0: 113,
+            history1: 112,
+        };
         let mut tail = Vec::new();
         let first = adpcm_nibble(15) & !1;
-        assert_eq!(decode_adpcm(&data[(first / 2) as usize..], 15, 13, &coefficients, &mut ctx2, &mut tail), 13);
+        assert_eq!(
+            decode_adpcm(
+                &data[(first / 2) as usize..],
+                15,
+                13,
+                &coefficients,
+                &mut ctx2,
+                &mut tail
+            ),
+            13
+        );
         assert_eq!(tail, out[15..].to_vec());
     }
 

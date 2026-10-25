@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::cpu::Cpu;
 
@@ -24,7 +24,12 @@ pub enum Section {
 }
 
 impl Section {
-    const ALL: [Section; 4] = [Section::Services, Section::Svc, Section::Ioctl, Section::Shaders];
+    const ALL: [Section; 4] = [
+        Section::Services,
+        Section::Svc,
+        Section::Ioctl,
+        Section::Shaders,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -80,7 +85,9 @@ impl Id {
     }
 
     fn from_json(v: &Value) -> Option<Id> {
-        v.as_u64().map(Id::Num).or_else(|| v.as_str().map(|s| Id::Name(s.to_string())))
+        v.as_u64()
+            .map(Id::Num)
+            .or_else(|| v.as_str().map(|s| Id::Name(s.to_string())))
     }
 }
 
@@ -144,13 +151,23 @@ pub struct Recorder {
 }
 
 fn unix_now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 impl Recorder {
     pub fn open(path: PathBuf, title_id: u64) -> Recorder {
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("game").to_string();
-        let stem = name.strip_suffix(".coverage.json").or_else(|| name.rsplit_once('.').map(|(s, _)| s)).unwrap_or(&name).to_string();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("game")
+            .to_string();
+        let stem = name
+            .strip_suffix(".coverage.json")
+            .or_else(|| name.rsplit_once('.').map(|(s, _)| s))
+            .unwrap_or(&name)
+            .to_string();
         let events_dir = path.with_file_name(format!("{stem}-coverage"));
         let mut r = Recorder {
             events_dir,
@@ -175,7 +192,11 @@ impl Recorder {
                 Ok(v) if v["format"].as_u64() == Some(FORMAT) => r.load(&v),
                 _ => {
                     let bad = r.path.with_extension("json.bad");
-                    eprintln!("kirikae: {} is not a coverage file this kirikae reads; moved to {}", r.path.display(), bad.display());
+                    eprintln!(
+                        "kirikae: {} is not a coverage file this kirikae reads; moved to {}",
+                        r.path.display(),
+                        bad.display()
+                    );
                     let _ = std::fs::rename(&r.path, bad);
                 }
             }
@@ -185,7 +206,11 @@ impl Recorder {
 
     fn load(&mut self, v: &Value) {
         for it in v["items"].as_array().into_iter().flatten() {
-            let (Some(section), Some(iface), Some(id)) = (it["section"].as_str().and_then(Section::parse), it["interface"].as_str(), Id::from_json(&it["id"])) else {
+            let (Some(section), Some(iface), Some(id)) = (
+                it["section"].as_str().and_then(Section::parse),
+                it["interface"].as_str(),
+                Id::from_json(&it["id"]),
+            ) else {
                 continue;
             };
             let f = &it["first"];
@@ -201,12 +226,18 @@ impl Recorder {
                 },
                 event: it["event"].as_u64().map(|n| n as u32),
             };
-            self.base_items.insert((section, iface.to_string(), id), item);
+            self.base_items
+                .insert((section, iface.to_string(), id), item);
         }
         self.base_runs = v["runs"].as_array().cloned().unwrap_or_default();
         self.base_events = v["events"].as_array().cloned().unwrap_or_default();
         self.run = self.base_runs.len() as u32;
-        self.next_event = self.base_events.iter().filter_map(|e| e["n"].as_u64()).max().map_or(1, |n| n as u32 + 1);
+        self.next_event = self
+            .base_events
+            .iter()
+            .filter_map(|e| e["n"].as_u64())
+            .max()
+            .map_or(1, |n| n as u32 + 1);
     }
 
     pub fn set_event_limit(&mut self, limit: u32) {
@@ -249,9 +280,13 @@ impl Recorder {
                 item.note = note.to_string();
                 item
             }
-            None => {
-                per.entry(id.clone()).or_insert(Item { count: uses, status, note: note.to_string(), first: when(), event: None })
-            }
+            None => per.entry(id.clone()).or_insert(Item {
+                count: uses,
+                status,
+                note: note.to_string(),
+                first: when(),
+                event: None,
+            }),
         };
         if status == Status::Implemented || item.event.is_some() {
             return None;
@@ -288,7 +323,11 @@ impl Recorder {
     }
 
     pub fn event_dir(&self, n: u32) -> (String, PathBuf) {
-        let name = self.events_dir.file_name().and_then(|s| s.to_str()).unwrap_or("coverage");
+        let name = self
+            .events_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("coverage");
         (format!("{name}/{n}"), self.events_dir.join(n.to_string()))
     }
 
@@ -307,6 +346,37 @@ impl Recorder {
         if let Some(e) = self.event_mut(n) {
             e.saves = Some(rel);
             self.dirty = true;
+        }
+    }
+
+    /// Records a draw whose shaders still use instructions with no
+    /// translation. Counts one hit per draw so the cost of the gap is visible.
+    fn draw_untranslated(
+        &mut self,
+        va: u64,
+        unsupported: &[&'static str],
+        partial: bool,
+        when: When,
+    ) {
+        let note = if partial {
+            "drawn without it (KIRIKAE_DRAW_PARTIAL)"
+        } else {
+            "draw skipped"
+        };
+        for &u in unsupported {
+            self.record(
+                Section::Shaders,
+                SHADER_DRAWS,
+                Id::Name(u.to_string()),
+                Status::Missing,
+                note,
+                1,
+                || when,
+                || Context {
+                    backtrace: Vec::new(),
+                    args: format!("shader at gpu va {va:#x}"),
+                },
+            );
         }
     }
 
@@ -410,7 +480,12 @@ fn round(s: f64) -> f64 {
 }
 
 pub fn hex(b: &[u8]) -> String {
-    let mut s: String = b.iter().take(ARG_BYTES).map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" ");
+    let mut s: String = b
+        .iter()
+        .take(ARG_BYTES)
+        .map(|x| format!("{x:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     if b.len() > ARG_BYTES {
         s += &format!(" … ({} bytes)", b.len());
     }
@@ -422,7 +497,9 @@ pub fn backtrace(c: &Cpu) -> Vec<String> {
     let mut out = vec![format!("lr {}", p.describe(c.x[30]))];
     let mut fp = c.x[29];
     for _ in 0..16 {
-        let Some(rec) = p.memory.read(fp, 16) else { break };
+        let Some(rec) = p.memory.read(fp, 16) else {
+            break;
+        };
         let next = u64::from_le_bytes(rec[..8].try_into().unwrap());
         let lr = u64::from_le_bytes(rec[8..].try_into().unwrap());
         if lr == 0 {
@@ -469,7 +546,11 @@ fn crc32(chunks: &[&[u8]]) -> u32 {
         for (i, e) in t.iter_mut().enumerate() {
             let mut c = i as u32;
             for _ in 0..8 {
-                c = if c & 1 != 0 { 0xedb8_8320 ^ (c >> 1) } else { c >> 1 };
+                c = if c & 1 != 0 {
+                    0xedb8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
             }
             *e = c;
         }
@@ -506,7 +587,10 @@ pub fn png_level(width: u32, height: u32, rgb: &[u8], level: u8) -> Vec<u8> {
     ihdr.extend_from_slice(&height.to_be_bytes());
     ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
     chunk(b"IHDR", &ihdr);
-    chunk(b"IDAT", &miniz_oxide::deflate::compress_to_vec_zlib(&raw, level));
+    chunk(
+        b"IDAT",
+        &miniz_oxide::deflate::compress_to_vec_zlib(&raw, level),
+    );
     chunk(b"IEND", &[]);
     out
 }
@@ -562,30 +646,37 @@ fn frames() -> u64 {
 pub fn start(title_id: u64) {
     let Some(path) = path() else { return };
     let mut r = Recorder::open(path, title_id);
-    if let Some(n) = std::env::var("KIRIKAE_COVERAGE_EVENTS").ok().and_then(|v| v.parse().ok()) {
+    if let Some(n) = std::env::var("KIRIKAE_COVERAGE_EVENTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
         r.set_event_limit(n);
     }
     TITLE.store(title_id, Ordering::Relaxed);
     init_clock(&r);
     *STATE.lock().unwrap() = Some(r);
     ON.store(true, Ordering::Relaxed);
-    let _ = std::thread::Builder::new().name("kirikae-coverage".into()).spawn(|| {
-        loop {
-            let mut st = STATE.lock().unwrap();
-            st = WAKE.wait_timeout(st, FLUSH_EVERY).unwrap().0;
-            let Some(r) = st.as_mut() else { return };
-            if r.dirty {
-                flush(r);
+    let _ = std::thread::Builder::new()
+        .name("kirikae-coverage".into())
+        .spawn(|| {
+            loop {
+                let mut st = STATE.lock().unwrap();
+                st = WAKE.wait_timeout(st, FLUSH_EVERY).unwrap().0;
+                let Some(r) = st.as_mut() else { return };
+                if r.dirty {
+                    flush(r);
+                }
             }
-        }
-    });
+        });
 }
 
 fn flush(r: &mut Recorder) {
     for (imm, n) in SVC_COUNT.iter().enumerate() {
         let n = n.swap(0, Ordering::Relaxed);
         if n > 0
-            && let Some(item) = r.items[Section::Svc as usize].get_mut("SVCs").and_then(|m| m.get_mut(&Id::Num(imm as u64)))
+            && let Some(item) = r.items[Section::Svc as usize]
+                .get_mut("SVCs")
+                .and_then(|m| m.get_mut(&Id::Num(imm as u64)))
         {
             item.count += n;
         }
@@ -620,11 +711,31 @@ pub fn new_events() -> u32 {
     NEW_EVENTS.load(Ordering::Relaxed)
 }
 
-fn record(c: Option<&Cpu>, section: Section, iface: &str, id: Id, status: Status, note: &str, args: impl FnOnce() -> String) {
+fn record(
+    c: Option<&Cpu>,
+    section: Section,
+    iface: &str,
+    id: Id,
+    status: Status,
+    note: &str,
+    args: impl FnOnce() -> String,
+) {
     let mut st = STATE.lock().unwrap();
     let Some(r) = st.as_mut() else { return };
     let frame = frames();
-    let Some(e) = r.record(section, iface, id, status, note, 1, || r_now(frame), || Context { backtrace: c.map(backtrace).unwrap_or_default(), args: args() }) else {
+    let Some(e) = r.record(
+        section,
+        iface,
+        id,
+        status,
+        note,
+        1,
+        || r_now(frame),
+        || Context {
+            backtrace: c.map(backtrace).unwrap_or_default(),
+            args: args(),
+        },
+    ) else {
         return;
     };
     NEW_EVENTS.fetch_add(1, Ordering::Relaxed);
@@ -635,20 +746,35 @@ fn record(c: Option<&Cpu>, section: Section, iface: &str, id: Id, status: Status
         Id::Num(n) => format!("{n:#x}"),
         Id::Name(s) => s.clone(),
     };
-    eprintln!("kirikae: coverage: new {} item #{}: {} {id} ({}{}) at {:.1}s, frame {}", section.as_str(), e.n, e.interface, e.status.as_str(), if e.note.is_empty() { String::new() } else { format!(", {}", e.note) }, e.when.seconds, e.when.frame);
+    eprintln!(
+        "kirikae: coverage: new {} item #{}: {} {id} ({}{}) at {:.1}s, frame {}",
+        section.as_str(),
+        e.n,
+        e.interface,
+        e.status.as_str(),
+        if e.note.is_empty() {
+            String::new()
+        } else {
+            format!(", {}", e.note)
+        },
+        e.when.seconds,
+        e.when.frame
+    );
     let saves = crate::services::fs::saves_root(TITLE.load(Ordering::Relaxed));
     let n = e.n;
     BUSY.fetch_add(1, Ordering::Relaxed);
     let _ = std::fs::create_dir_all(&dir);
     let _ = std::fs::write(dir.join("event.txt"), event_text(&e, &saves));
-    let spawned = std::thread::Builder::new().name("kirikae-coverage-saves".into()).spawn(move || {
-        let copied = saves.is_dir() && copy_tree(&saves, &dir.join("saves")).is_ok();
-        if copied && let Some(r) = STATE.lock().unwrap().as_mut() {
-            r.set_saves(n, format!("{rel}/saves"));
-        }
-        BUSY.fetch_sub(1, Ordering::Relaxed);
-        WAKE.notify_one();
-    });
+    let spawned = std::thread::Builder::new()
+        .name("kirikae-coverage-saves".into())
+        .spawn(move || {
+            let copied = saves.is_dir() && copy_tree(&saves, &dir.join("saves")).is_ok();
+            if copied && let Some(r) = STATE.lock().unwrap().as_mut() {
+                r.set_saves(n, format!("{rel}/saves"));
+            }
+            BUSY.fetch_sub(1, Ordering::Relaxed);
+            WAKE.notify_one();
+        });
     if spawned.is_err() {
         BUSY.fetch_sub(1, Ordering::Relaxed);
     }
@@ -656,7 +782,12 @@ fn record(c: Option<&Cpu>, section: Section, iface: &str, id: Id, status: Status
 
 fn r_now(frame: u64) -> When {
     let started = START.get().copied().unwrap_or_else(Instant::now);
-    When { run: RUN.load(Ordering::Relaxed), seconds: started.elapsed().as_secs_f64(), frame, unix: unix_now() }
+    When {
+        run: RUN.load(Ordering::Relaxed),
+        seconds: started.elapsed().as_secs_f64(),
+        frame,
+        unix: unix_now(),
+    }
 }
 
 static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
@@ -669,7 +800,11 @@ fn event_text(e: &Event, saves: &Path) -> String {
         e.interface,
         e.id,
         e.status.as_str(),
-        if e.note.is_empty() { String::new() } else { format!(" ({})", e.note) },
+        if e.note.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", e.note)
+        },
         e.when.run,
         e.when.seconds,
         e.when.frame,
@@ -687,7 +822,9 @@ pub fn frame_wanted() -> bool {
 }
 
 pub fn frame(width: u32, height: u32, pixels: Option<&[u32]>) {
-    let Some(pixels) = pixels.filter(|_| frame_wanted()) else { return };
+    let Some(pixels) = pixels.filter(|_| frame_wanted()) else {
+        return;
+    };
     if width == 0 || height == 0 || pixels.len() < (width * height) as usize {
         return;
     }
@@ -695,28 +832,33 @@ pub fn frame(width: u32, height: u32, pixels: Option<&[u32]>) {
         let mut st = STATE.lock().unwrap();
         let Some(r) = st.as_mut() else { return };
         WANT_SHOT.store(false, Ordering::Relaxed);
-        std::mem::take(&mut r.want_shot).into_iter().map(|n| {
-            let (rel, dir) = r.event_dir(n);
-            (n, rel, dir)
-        }).collect()
+        std::mem::take(&mut r.want_shot)
+            .into_iter()
+            .map(|n| {
+                let (rel, dir) = r.event_dir(n);
+                (n, rel, dir)
+            })
+            .collect()
     };
     if targets.is_empty() {
         return;
     }
     let (w, h, rgb) = scale(width, height, pixels);
     BUSY.fetch_add(1, Ordering::Relaxed);
-    let spawned = std::thread::Builder::new().name("kirikae-coverage-shot".into()).spawn(move || {
-        let data = png(w, h, &rgb);
-        for (n, rel, dir) in targets {
-            let _ = std::fs::create_dir_all(&dir);
-            if std::fs::write(dir.join("frame.png"), &data).is_ok()
-                && let Some(r) = STATE.lock().unwrap().as_mut()
-            {
-                r.set_screenshot(n, format!("{rel}/frame.png"));
+    let spawned = std::thread::Builder::new()
+        .name("kirikae-coverage-shot".into())
+        .spawn(move || {
+            let data = png(w, h, &rgb);
+            for (n, rel, dir) in targets {
+                let _ = std::fs::create_dir_all(&dir);
+                if std::fs::write(dir.join("frame.png"), &data).is_ok()
+                    && let Some(r) = STATE.lock().unwrap().as_mut()
+                {
+                    r.set_screenshot(n, format!("{rel}/frame.png"));
+                }
             }
-        }
-        BUSY.fetch_sub(1, Ordering::Relaxed);
-    });
+            BUSY.fetch_sub(1, Ordering::Relaxed);
+        });
     if spawned.is_err() {
         BUSY.fetch_sub(1, Ordering::Relaxed);
     }
@@ -744,14 +886,40 @@ pub fn end_ipc(c: &Cpu, iface: &str, req: &crate::services::Request) {
         return;
     }
     let (status, note) = CALL.with(|s| s.get());
-    record(Some(c), Section::Services, iface, Id::Num(req.cmd as u64), status, note, || {
-        format!("data: {}; buffers A={} B={} X={} C={} W={}, handles copy={} move={}", hex(&req.data), req.a.len(), req.b.len(), req.x.len(), req.c.len(), req.w.len(), req.copy_handles.len(), req.move_handles.len())
-    });
+    record(
+        Some(c),
+        Section::Services,
+        iface,
+        Id::Num(req.cmd as u64),
+        status,
+        note,
+        || {
+            format!(
+                "data: {}; buffers A={} B={} X={} C={} W={}, handles copy={} move={}",
+                hex(&req.data),
+                req.a.len(),
+                req.b.len(),
+                req.x.len(),
+                req.c.len(),
+                req.w.len(),
+                req.copy_handles.len(),
+                req.move_handles.len()
+            )
+        },
+    );
 }
 
 pub fn command(c: &Cpu, iface: &str, cmd: u64, status: Status, note: &'static str, args: &[u8]) {
     if on() {
-        record(Some(c), Section::Services, iface, Id::Num(cmd), status, note, || format!("data: {}", hex(args)));
+        record(
+            Some(c),
+            Section::Services,
+            iface,
+            Id::Num(cmd),
+            status,
+            note,
+            || format!("data: {}", hex(args)),
+        );
     }
 }
 
@@ -761,8 +929,20 @@ pub fn svc(imm: u16) {
         let mut st = STATE.lock().unwrap();
         if let Some(r) = st.as_mut() {
             let frame = frames();
-            if !r.items[Section::Svc as usize].get("SVCs").is_some_and(|m| m.contains_key(&Id::Num(imm as u64))) {
-                r.record(Section::Svc, "SVCs", Id::Num(imm as u64), Status::Implemented, "", 0, || r_now(frame), Context::default);
+            if !r.items[Section::Svc as usize]
+                .get("SVCs")
+                .is_some_and(|m| m.contains_key(&Id::Num(imm as u64)))
+            {
+                r.record(
+                    Section::Svc,
+                    "SVCs",
+                    Id::Num(imm as u64),
+                    Status::Implemented,
+                    "",
+                    0,
+                    || r_now(frame),
+                    Context::default,
+                );
             }
         }
     }
@@ -770,20 +950,69 @@ pub fn svc(imm: u16) {
 
 pub fn svc_missing(c: &Cpu, imm: u16) {
     if on() {
-        record(Some(c), Section::Svc, "SVCs", Id::Num(imm as u64), Status::Missing, "not handled", || {
-            format!("x0={:#x} x1={:#x} x2={:#x} x3={:#x} x4={:#x} x5={:#x}", c.x[0], c.x[1], c.x[2], c.x[3], c.x[4], c.x[5])
-        });
+        record(
+            Some(c),
+            Section::Svc,
+            "SVCs",
+            Id::Num(imm as u64),
+            Status::Missing,
+            "not handled",
+            || {
+                format!(
+                    "x0={:#x} x1={:#x} x2={:#x} x3={:#x} x4={:#x} x5={:#x}",
+                    c.x[0], c.x[1], c.x[2], c.x[3], c.x[4], c.x[5]
+                )
+            },
+        );
     }
 }
 
 pub fn ioctl(c: &Cpu, device: &str, cmd: u32, handled: bool, args: &[u8]) {
     if on() {
-        let (status, note) = if handled { (Status::Implemented, "") } else { (Status::Missing, "not handled") };
-        record(Some(c), Section::Ioctl, device, Id::Num(cmd as u64), status, note, || format!("cmd {cmd:#010x}, args: {}", hex(args)));
+        let (status, note) = if handled {
+            (Status::Implemented, "")
+        } else {
+            (Status::Missing, "not handled")
+        };
+        record(
+            Some(c),
+            Section::Ioctl,
+            device,
+            Id::Num(cmd as u64),
+            status,
+            note,
+            || format!("cmd {cmd:#010x}, args: {}", hex(args)),
+        );
     }
 }
 
 pub const SHADER_VARIANTS: &str = "maxwell (variantes)";
+
+/// Coverage label for draws that could not run because a variant is missing.
+pub const SHADER_DRAWS: &str = "maxwell (draws)";
+
+/// Keeps a skipped (or partially drawn) draw visible in the coverage report,
+/// with the variant that caused it.
+pub fn draw_untranslated(va: u64, unsupported: &[&'static str], partial: bool) {
+    if !on() {
+        return;
+    }
+    let frame = frames();
+    let mut st = STATE.lock().unwrap();
+    if let Some(r) = st.as_mut() {
+        r.draw_untranslated(va, unsupported, partial, r_now(frame));
+    }
+}
+
+/// A mnemonic is missing if the translator reported it either bare or with a
+/// precise sub-form label (`tex (bindless lod)`, `tld (multisample)`, ...).
+fn is_missing(mnemonic: &str, unsupported: &[&'static str]) -> bool {
+    unsupported.iter().any(|&u| {
+        u == mnemonic
+            || u.strip_prefix(mnemonic)
+                .is_some_and(|rest| rest.starts_with(' '))
+    })
+}
 
 pub fn shader(va: u64, mnemonics: &[(&'static str, u32)], unsupported: &[&'static str]) {
     if !on() {
@@ -793,23 +1022,52 @@ pub fn shader(va: u64, mnemonics: &[(&'static str, u32)], unsupported: &[&'stati
     // SAFETY: the guest thread running on this host thread; only read.
     let c = c.and_then(|p| unsafe { p.as_ref() });
     for &(m, n) in mnemonics {
-        let missing = unsupported.contains(&m);
-        let (status, note) = if missing { (Status::Missing, "no translation") } else { (Status::Implemented, "") };
+        let missing = is_missing(m, unsupported);
+        let (status, note) = if missing {
+            (Status::Missing, "no translation")
+        } else {
+            (Status::Implemented, "")
+        };
         let mut st = STATE.lock().unwrap();
         let Some(r) = st.as_mut() else { return };
         if !missing {
             let frame = frames();
-            r.record(Section::Shaders, "maxwell", Id::Name(m.to_string()), status, note, n as u64, || r_now(frame), Context::default);
+            r.record(
+                Section::Shaders,
+                "maxwell",
+                Id::Name(m.to_string()),
+                status,
+                note,
+                n as u64,
+                || r_now(frame),
+                Context::default,
+            );
             continue;
         }
         drop(st);
-        record(c, Section::Shaders, "maxwell", Id::Name(m.to_string()), status, note, || format!("shader at gpu va {va:#x}, {n} instruction(s)"));
+        record(
+            c,
+            Section::Shaders,
+            "maxwell",
+            Id::Name(m.to_string()),
+            status,
+            note,
+            || format!("shader at gpu va {va:#x}, {n} instruction(s)"),
+        );
     }
     for &u in unsupported {
         if mnemonics.iter().any(|&(m, _)| m == u) {
             continue;
         }
-        record(c, Section::Shaders, SHADER_VARIANTS, Id::Name(u.to_string()), Status::Missing, "left out of the program", || format!("shader at gpu va {va:#x}"));
+        record(
+            c,
+            Section::Shaders,
+            SHADER_VARIANTS,
+            Id::Name(u.to_string()),
+            Status::Missing,
+            "left out of the program",
+            || format!("shader at gpu va {va:#x}"),
+        );
     }
 }
 
@@ -822,19 +1080,38 @@ fn init_clock(r: &Recorder) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn subform_labels_mark_the_mnemonic_missing() {
+        assert!(is_missing("tex", &["tex"]));
+        assert!(is_missing("tex", &["tex (bindless lod)"]));
+        assert!(is_missing("tld", &["tld (multisample)"]));
+        assert!(!is_missing("tex", &["texs (unknown target)"]));
+        assert!(!is_missing("tex", &["tld (multisample)"]));
+        assert!(!is_missing("imad", &[]));
+    }
+
     fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kirikae-usage-test-{}-{name}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("kirikae-usage-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
     fn when() -> When {
-        When { run: 0, seconds: 1.5, frame: 10, unix: 1 }
+        When {
+            run: 0,
+            seconds: 1.5,
+            frame: 10,
+            unix: 1,
+        }
     }
 
     fn ctx() -> Context {
-        Context { backtrace: vec!["main+0x10".into()], args: "00 01".into() }
+        Context {
+            backtrace: vec!["main+0x10".into()],
+            args: "00 01".into(),
+        }
     }
 
     #[test]
@@ -842,16 +1119,92 @@ mod tests {
         let dir = temp("counts");
         let mut r = Recorder::open(dir.join("game.coverage.json"), 0x0100_0000_0000_1000);
         assert_eq!(r.events_dir(), dir.join("game-coverage"));
-        assert!(r.record(Section::Services, "hid", Id::Num(1), Status::Implemented, "", 1, when, ctx).is_none());
-        assert!(r.record(Section::Services, "hid", Id::Num(1), Status::Implemented, "", 1, when, ctx).is_none());
-        let e = r.record(Section::Services, "hid", Id::Num(2), Status::Stub, "plain ok", 1, when, ctx).unwrap();
+        assert!(
+            r.record(
+                Section::Services,
+                "hid",
+                Id::Num(1),
+                Status::Implemented,
+                "",
+                1,
+                when,
+                ctx
+            )
+            .is_none()
+        );
+        assert!(
+            r.record(
+                Section::Services,
+                "hid",
+                Id::Num(1),
+                Status::Implemented,
+                "",
+                1,
+                when,
+                ctx
+            )
+            .is_none()
+        );
+        let e = r
+            .record(
+                Section::Services,
+                "hid",
+                Id::Num(2),
+                Status::Stub,
+                "plain ok",
+                1,
+                when,
+                ctx,
+            )
+            .unwrap();
         assert_eq!((e.n, e.backtrace.len(), e.when.frame), (1, 1, 10));
-        assert!(r.record(Section::Services, "hid", Id::Num(2), Status::Stub, "plain ok", 1, when, ctx).is_none());
-        assert!(r.record(Section::Ioctl, "/dev/nvmap", Id::Num(0xc0080101), Status::Implemented, "", 1, when, ctx).is_none());
-        assert_eq!(r.record(Section::Ioctl, "/dev/nvmap", Id::Num(0xc0080101), Status::Missing, "x", 1, when, ctx).unwrap().n, 2);
+        assert!(
+            r.record(
+                Section::Services,
+                "hid",
+                Id::Num(2),
+                Status::Stub,
+                "plain ok",
+                1,
+                when,
+                ctx
+            )
+            .is_none()
+        );
+        assert!(
+            r.record(
+                Section::Ioctl,
+                "/dev/nvmap",
+                Id::Num(0xc0080101),
+                Status::Implemented,
+                "",
+                1,
+                when,
+                ctx
+            )
+            .is_none()
+        );
+        assert_eq!(
+            r.record(
+                Section::Ioctl,
+                "/dev/nvmap",
+                Id::Num(0xc0080101),
+                Status::Missing,
+                "x",
+                1,
+                when,
+                ctx
+            )
+            .unwrap()
+            .n,
+            2
+        );
         let all = r.merged();
         assert_eq!(all[&(Section::Services, "hid".into(), Id::Num(1))].count, 2);
-        assert_eq!(all[&(Section::Services, "hid".into(), Id::Num(2))].event, Some(1));
+        assert_eq!(
+            all[&(Section::Services, "hid".into(), Id::Num(2))].event,
+            Some(1)
+        );
         assert_eq!(r.new_events(), 2);
     }
 
@@ -860,18 +1213,78 @@ mod tests {
         let dir = temp("runs");
         let path = dir.join("game.coverage.json");
         let mut r = Recorder::open(path.clone(), 1);
-        r.record(Section::Svc, "SVCs", Id::Num(0x29), Status::Implemented, "", 3, when, ctx);
-        r.record(Section::Shaders, "maxwell", Id::Name("fadd".into()), Status::Implemented, "", 7, when, ctx);
-        r.record(Section::Svc, "SVCs", Id::Num(0x7f), Status::Missing, "not handled", 1, when, ctx).unwrap();
+        r.record(
+            Section::Svc,
+            "SVCs",
+            Id::Num(0x29),
+            Status::Implemented,
+            "",
+            3,
+            when,
+            ctx,
+        );
+        r.record(
+            Section::Shaders,
+            "maxwell",
+            Id::Name("fadd".into()),
+            Status::Implemented,
+            "",
+            7,
+            when,
+            ctx,
+        );
+        r.record(
+            Section::Svc,
+            "SVCs",
+            Id::Num(0x7f),
+            Status::Missing,
+            "not handled",
+            1,
+            when,
+            ctx,
+        )
+        .unwrap();
         r.set_screenshot(1, "game-coverage/1/frame.png".into());
         r.write(100).unwrap();
 
         let mut r = Recorder::open(path.clone(), 1);
         assert_eq!(r.run, 1);
-        assert!(r.record(Section::Svc, "SVCs", Id::Num(0x7f), Status::Missing, "not handled", 1, when, ctx).is_none());
-        let e = r.record(Section::Services, "acc:u0", Id::Num(60), Status::Stub, "unimplemented", 1, when, ctx).unwrap();
+        assert!(
+            r.record(
+                Section::Svc,
+                "SVCs",
+                Id::Num(0x7f),
+                Status::Missing,
+                "not handled",
+                1,
+                when,
+                ctx
+            )
+            .is_none()
+        );
+        let e = r
+            .record(
+                Section::Services,
+                "acc:u0",
+                Id::Num(60),
+                Status::Stub,
+                "unimplemented",
+                1,
+                when,
+                ctx,
+            )
+            .unwrap();
         assert_eq!(e.n, 2);
-        r.record(Section::Svc, "SVCs", Id::Num(0x29), Status::Implemented, "", 2, when, ctx);
+        r.record(
+            Section::Svc,
+            "SVCs",
+            Id::Num(0x29),
+            Status::Implemented,
+            "",
+            2,
+            when,
+            ctx,
+        );
         r.write(50).unwrap();
 
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -879,12 +1292,24 @@ mod tests {
         assert_eq!(v["events"].as_array().unwrap().len(), 2);
         assert_eq!(v["events"][0]["screenshot"], "game-coverage/1/frame.png");
         let items = v["items"].as_array().unwrap();
-        let get_info = items.iter().find(|i| i["section"] == "svc" && i["id"] == 0x29).unwrap();
+        let get_info = items
+            .iter()
+            .find(|i| i["section"] == "svc" && i["id"] == 0x29)
+            .unwrap();
         assert_eq!(get_info["count"], 5);
         assert_eq!(get_info["first"]["run"], 0);
         let fadd = items.iter().find(|i| i["id"] == "fadd").unwrap();
-        assert_eq!((fadd["count"].as_u64(), fadd["status"].as_str()), (Some(7), Some("implemented")));
-        assert_eq!(items.iter().find(|i| i["section"] == "svc" && i["id"] == 0x7f).unwrap()["event"], 1);
+        assert_eq!(
+            (fadd["count"].as_u64(), fadd["status"].as_str()),
+            (Some(7), Some("implemented"))
+        );
+        assert_eq!(
+            items
+                .iter()
+                .find(|i| i["section"] == "svc" && i["id"] == 0x7f)
+                .unwrap()["event"],
+            1
+        );
     }
 
     #[test]
@@ -892,12 +1317,70 @@ mod tests {
         let dir = temp("status");
         let path = dir.join("g.coverage.json");
         let mut r = Recorder::open(path.clone(), 1);
-        r.record(Section::Services, "hid", Id::Num(5), Status::Stub, "unimplemented", 1, when, ctx).unwrap();
+        r.record(
+            Section::Services,
+            "hid",
+            Id::Num(5),
+            Status::Stub,
+            "unimplemented",
+            1,
+            when,
+            ctx,
+        )
+        .unwrap();
         r.write(0).unwrap();
         let mut r = Recorder::open(path.clone(), 1);
-        r.record(Section::Services, "hid", Id::Num(5), Status::Implemented, "", 1, when, ctx);
+        r.record(
+            Section::Services,
+            "hid",
+            Id::Num(5),
+            Status::Implemented,
+            "",
+            1,
+            when,
+            ctx,
+        );
         let item = &r.merged()[&(Section::Services, "hid".into(), Id::Num(5))];
-        assert_eq!((item.status, item.count, item.event), (Status::Implemented, 2, Some(1)));
+        assert_eq!(
+            (item.status, item.count, item.event),
+            (Status::Implemented, 2, Some(1))
+        );
+    }
+
+    #[test]
+    fn untranslated_draws_are_recorded_per_draw() {
+        let dir = temp("draws");
+        let path = dir.join("g.coverage.json");
+        let mut r = Recorder::open(path.clone(), 1);
+        let key = (
+            Section::Shaders,
+            SHADER_DRAWS.to_string(),
+            Id::Name("tex (bindless)".into()),
+        );
+        r.draw_untranslated(0x1000, &["tex (bindless)"], false, when());
+        r.draw_untranslated(0x1000, &["tex (bindless)"], false, when());
+        let item = &r.merged()[&key];
+        assert_eq!(
+            (item.count, item.status, item.event, item.note.as_str()),
+            (2, Status::Missing, Some(1), "draw skipped")
+        );
+        r.draw_untranslated(0x1000, &["tex (bindless)"], true, when());
+        assert_eq!(r.merged()[&key].count, 3);
+        assert_eq!(r.new_events(), 1);
+        r.write(1).unwrap();
+
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let item = v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["interface"] == SHADER_DRAWS)
+            .unwrap();
+        assert_eq!(item["id"], "tex (bindless)");
+        assert_eq!(item["count"], 3);
+        assert_eq!(item["status"], "missing");
+        assert_eq!(item["note"], "draw skipped");
+        assert_eq!(v["events"].as_array().unwrap().len(), 1);
     }
 
     #[test]
@@ -905,12 +1388,40 @@ mod tests {
         let dir = temp("limit");
         let mut r = Recorder::open(dir.join("g.coverage.json"), 1);
         r.set_event_limit(3);
-        let made = (0..10).filter(|&i| r.record(Section::Services, "x", Id::Num(i), Status::Stub, "", 1, when, ctx).is_some()).count();
+        let made = (0..10)
+            .filter(|&i| {
+                r.record(
+                    Section::Services,
+                    "x",
+                    Id::Num(i),
+                    Status::Stub,
+                    "",
+                    1,
+                    when,
+                    ctx,
+                )
+                .is_some()
+            })
+            .count();
         assert_eq!(made, 3);
         assert_eq!(r.merged().len(), 10);
         r.write(0).unwrap();
         let mut r = Recorder::open(dir.join("g.coverage.json"), 1);
-        assert_eq!(r.record(Section::Services, "x", Id::Num(5), Status::Stub, "", 1, when, ctx).unwrap().n, 4);
+        assert_eq!(
+            r.record(
+                Section::Services,
+                "x",
+                Id::Num(5),
+                Status::Stub,
+                "",
+                1,
+                when,
+                ctx
+            )
+            .unwrap()
+            .n,
+            4
+        );
     }
 
     #[test]
@@ -926,7 +1437,9 @@ mod tests {
 
     #[test]
     fn screenshot_png() {
-        let px = [0xff0000, 0x00ff00, 0x0000ff, 0xffffff, 0xff0000, 0x00ff00, 0x0000ff, 0xffffff];
+        let px = [
+            0xff0000, 0x00ff00, 0x0000ff, 0xffffff, 0xff0000, 0x00ff00, 0x0000ff, 0xffffff,
+        ];
         let (w, h, rgb) = scale(4, 2, &px);
         assert_eq!((w, h, &rgb[..6]), (4, 2, &[255u8, 0, 0, 0, 255, 0][..]));
         let data = png(w, h, &rgb);
@@ -950,6 +1463,9 @@ mod tests {
         std::fs::write(dir.join("src/user/a.sav"), b"abc").unwrap();
         std::fs::write(dir.join("src/user/sub/b.sav"), b"de").unwrap();
         assert_eq!(copy_tree(&dir.join("src"), &dir.join("dst")).unwrap(), 5);
-        assert_eq!(std::fs::read(dir.join("dst/user/sub/b.sav")).unwrap(), b"de");
+        assert_eq!(
+            std::fs::read(dir.join("dst/user/sub/b.sav")).unwrap(),
+            b"de"
+        );
     }
 }

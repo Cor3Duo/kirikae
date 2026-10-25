@@ -3,10 +3,13 @@ use std::sync::Arc;
 
 use crate::arbiter;
 use crate::cpu::Cpu;
-use crate::kernel::{KObject, Session};
-use crate::threads;
-use crate::mem::{perm, state, PhysicalError, PAGE};
+use crate::kernel::{
+    CodeMemory, Event, GuestSession, KObject, Port, ResourceLimit, Session, TransferMemory,
+};
+use crate::mem::{ADDR_MASK, MirrorError, PAGE, PhysicalError, perm, state};
+use crate::process::Process;
 use crate::services::sm::Sm;
+use crate::threads;
 
 pub const TICK_HZ: u64 = 19_200_000;
 
@@ -20,6 +23,8 @@ pub const RESULT_LIMIT_REACHED: u64 = 0x10801;
 pub const RESULT_INVALID_NEW_MEMORY_PERMISSION: u64 = 0xd801;
 pub const RESULT_INVALID_POINTER: u64 = 0xe601;
 pub const RESULT_BUSY: u64 = 0xf401;
+pub const RESULT_TOO_MANY_HANDLES: u64 = 0xee01;
+pub const RESULT_REMOTE_DEAD: u64 = 0xf601;
 
 pub const ASLR_BASE: u64 = 0x0800_0000;
 pub const ASLR_SIZE: u64 = 0x7f_f800_0000;
@@ -35,6 +40,9 @@ const HEAP_ALIGN: u64 = 0x20_0000;
 pub const MAIN_THREAD_HANDLE: u64 = 0x0001_0001;
 pub const CURRENT_PROCESS: u64 = 0xffff_8001;
 
+/// The HIPC message buffer at `tpidrro_el0` holds one 0x100-byte message.
+const IPC_BUFFER_SIZE: u64 = 0x100;
+
 fn trace() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("KIRIKAE_TRACE_SVC").is_some())
@@ -45,9 +53,16 @@ pub fn svc(c: &mut Cpu, imm: u16) {
     crate::usage::svc(imm);
     crate::sched::kernel_enter(c);
     dispatch(c, imm);
+    if trace() {
+        eprintln!("svc {imm:#04x} -> x0={:#x} x1={:#x}", c.x[0], c.x[1]);
+    }
     crate::sched::kernel_exit();
     crate::sched::reschedule(c);
-    if c.process().sched.exiting.load(std::sync::atomic::Ordering::Relaxed) {
+    if c.process()
+        .sched
+        .exiting
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
         c.halt();
     }
 }
@@ -86,11 +101,7 @@ fn dispatch(c: &mut Cpu, imm: u16) {
         0x10 => threads::current_processor(c),
         0x11 => event_signal(c, true),
         0x12 | 0x17 => event_signal(c, false),
-        0x15 => {
-            let (addr, size) = (c.x[1], c.x[2]);
-            let h = c.process().handles.lock().unwrap().insert(KObject::TransferMemory { addr, size });
-            ok1(c, h as u64);
-        }
+        0x15 => create_transfer_memory(c),
         0x13 | 0x14 => {
             let (h, addr, perm) = (c.x[0] as u32, c.x[1], c.x[3] as u32);
             let p = c.process();
@@ -103,7 +114,11 @@ fn dispatch(c: &mut Cpu, imm: u16) {
                     return;
                 }
             };
-            c.x[0] = if done { RESULT_SUCCESS } else { RESULT_INVALID_MEMORY_STATE };
+            c.x[0] = if done {
+                RESULT_SUCCESS
+            } else {
+                RESULT_INVALID_MEMORY_STATE
+            };
         }
         0x16 => close_handle(c),
         0x18 => threads::wait_synchronization(c),
@@ -112,24 +127,62 @@ fn dispatch(c: &mut Cpu, imm: u16) {
         0x1b => arbiter::arbitrate_unlock(c),
         0x1c => arbiter::wait_process_wide_key(c),
         0x1d => arbiter::signal_process_wide_key(c),
+        0x23 => send_async_request(c),
         0x24 => threads::get_process_id(c),
         0x25 => threads::get_thread_id(c),
+        0x28 => return_from_exception(c),
+        0x2e => get_debug_future_thread_info(c),
         0x32 => threads::set_thread_activity(c),
         0x33 => threads::get_thread_context3(c),
         0x34 => arbiter::wait_for_address(c),
         0x35 => arbiter::signal_to_address(c),
+        0x37 => get_resource_limit_peak_value(c),
+        0x40 => create_session(c),
+        0x41 => accept_session(c),
+        0x42 => reply_and_receive_light(c),
+        0x43 => reply_and_receive(c, c.x[1], c.x[2], c.x[3] as u32, c.x[4] as i64),
+        0x44 => reply_and_receive_with_user_buffer(c),
         0x45 => threads::create_event(c),
+        0x4b => create_code_memory(c),
+        0x4c => control_code_memory(c),
+        0x51 => map_transfer_memory(c),
+        0x52 => unmap_transfer_memory(c),
+        0x53 => create_interrupt_event(c),
+        0x5d..=0x5f => process_data_cache(c, imm),
+        0x7d => create_resource_limit(c),
+        0x7e => set_resource_limit_limit_value(c),
         0x1f => connect_to_named_port(c),
-        0x21 => c.x[0] = crate::ipc::send_sync_request(c, c.x[0] as u32, c.tpidrro_el0, 0x100),
+        0x20 | 0x21 => send_sync_request(c),
         0x22 => c.x[0] = crate::ipc::send_sync_request(c, c.x[2] as u32, c.x[0], c.x[1]),
         0x1e => c.x[0] = c.process().ticks(),
         0x26 => break_(c),
         0x27 => output_debug_string(c),
         0x29 => get_info(c),
+        0x2a => flush_entire_data_cache(c),
+        0x2b => flush_data_cache(c),
         0x2c => map_physical_memory(c),
         0x2d => unmap_physical_memory(c),
+        0x2f => get_last_thread_info(c),
+        0x30 => get_resource_limit_value(c, false),
+        0x31 => get_resource_limit_value(c, true),
+        0x36 => synchronize_preemption_state(c),
+        // IoPool/IoRegion (0x39 CreateIoPool, 0x3A CreateIoRegion, 0x46
+        // MapIoRegion, 0x47 UnmapIoRegion) stay unimplemented on purpose. The
+        // runtime has no device physical address space: `mem::map_physical`
+        // commits zero-filled guest RAM in the alias region and charges it to
+        // the memory budget, while device registers are modelled per block in
+        // gpu/host1x. An IoRegion over the PCIe aperture (0x12000000-0x1FFFFFFF)
+        // would therefore fabricate RAM instead of mapping device memory.
+        //
+        // The device address space calls (0x55 QueryMemoryMapping, 0x56
+        // CreateDeviceAddressSpace .. 0x5C UnmapDeviceAddressSpace) depend on
+        // the same missing physical map and on an IOMMU, so they keep reporting
+        // 0x4201 rather than handing out synthetic physical addresses.
         _ => {
-            c.process().warn_once(format!("svc {imm:#04x} is not implemented (first call from {})", c.process().describe(c.pc - 4)));
+            c.process().warn_once(format!(
+                "svc {imm:#04x} is not implemented (first call from {})",
+                c.process().describe(c.pc - 4)
+            ));
             crate::usage::svc_missing(c, imm);
             c.x[0] = RESULT_NOT_IMPLEMENTED;
         }
@@ -166,6 +219,403 @@ fn connect_to_named_port(c: &mut Cpu) {
 }
 
 pub const RESULT_TIMED_OUT: u64 = 0xea01;
+
+fn send_sync_request(c: &mut Cpu) {
+    // svcSendSyncRequestLight (0x20) sends a 7-word light message in x1-x7
+    // without handles or buffers, while svcSendSyncRequest (0x21) uses the
+    // HIPC buffer at tpidrro_el0. The runtime serves both from the HIPC buffer:
+    // the light register form is not modelled, and every service the runtime
+    // itself provides replies inline. A guest session pair made with
+    // svcCreateSession goes through the rendezvous instead.
+    c.x[0] = crate::ipc::send_sync_request(c, c.x[0] as u32, c.tpidrro_el0, IPC_BUFFER_SIZE);
+}
+
+/// `svcSendAsyncRequestWithUserBuffer` (0x23): the kernel copies the request in
+/// the user buffer to the server, returns a readable event and signals it when
+/// the reply lands in that same buffer.
+///
+/// Every service in the runtime is a host object that replies inline, so the
+/// request is served through the synchronous IPC path before the event handle
+/// is returned. A guest session pair blocks here until the guest server replies,
+/// exactly as the synchronous path does. The observable client shape is the one
+/// games use: send, wait for the event, parse the reply from the buffer. The
+/// event is a plain `Event` (signaled at once), so it is also accepted by
+/// `svcSignalEvent`/`svcClearEvent`, which a real readable event would refuse.
+fn send_async_request(c: &mut Cpu) {
+    let (addr, size, handle) = (c.x[1], c.x[2], c.x[3] as u32);
+    if !addr.is_multiple_of(PAGE) {
+        c.x[0] = RESULT_INVALID_ADDRESS;
+        return;
+    }
+    if size == 0 || !size.is_multiple_of(PAGE) {
+        c.x[0] = RESULT_INVALID_SIZE;
+        return;
+    }
+    let p = c.process();
+    if p.handles.lock().unwrap().session(handle).is_none() {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    }
+    if !p.memory.is_mapped(addr, size) {
+        c.x[0] = RESULT_INVALID_POINTER;
+        return;
+    }
+    let result = crate::ipc::send_sync_request(c, handle, addr, size);
+    if result != RESULT_SUCCESS {
+        c.x[0] = result;
+        return;
+    }
+    let event = Arc::new(Event {
+        signaled: std::sync::atomic::AtomicBool::new(true),
+    });
+    let event_handle = c
+        .process()
+        .handles
+        .lock()
+        .unwrap()
+        .insert(KObject::Event(event));
+    ok1(c, event_handle as u64);
+}
+
+/// `svcCreateSession` (0x40): a session pair. The kernel takes the arguments as
+/// W2 = is_light and X3 = name and returns the server handle in W1 and the
+/// client handle in W2 (the library wrapper stores them in the caller's two out
+/// pointers); the server handle is a port whose queue holds the pair until
+/// `svcAcceptSession`.
+fn create_session(c: &mut Cpu) {
+    let (is_light, name) = (c.x[2], c.x[3]);
+    if is_light > 1 {
+        c.x[0] = RESULT_INVALID_ENUM;
+        return;
+    }
+    let p = c.process();
+    let (used, ceiling) = session_usage(p);
+    if used + 2 > ceiling {
+        c.x[0] = RESULT_LIMIT_REACHED;
+        return;
+    }
+    let link = GuestSession::with_wake(move || crate::sched::wake(p));
+    let port = Port::new(name, is_light == 1, link.clone());
+    let (server, client) = {
+        let mut table = p.handles.lock().unwrap();
+        (
+            table.insert(KObject::Port(port)),
+            table.insert(KObject::Session(Session::guest_client(link))),
+        )
+    };
+    p.log_ipc(format!(
+        "CreateSession(name={name:#x}, light={is_light}) -> {server:#x}, {client:#x}"
+    ));
+    ok1(c, server as u64);
+    c.x[2] = client as u64;
+}
+
+/// Sessions and ports the process holds, and the `LimitableResource_Sessions`
+/// ceiling of its resource limit (`u64::MAX` while the guest never asked for
+/// one).
+fn session_usage(p: &'static Process) -> (u64, u64) {
+    let table = p.handles.lock().unwrap();
+    let used = table.sessions_in_use();
+    let ceiling = table
+        .process_resource_limit()
+        .and_then(|h| table.get(h))
+        .and_then(|o| match o {
+            KObject::ResourceLimit(limit) => limit.limit(4),
+            _ => None,
+        })
+        .unwrap_or(u64::MAX);
+    (used, ceiling)
+}
+
+/// `svcAcceptSession` (0x41): pops the next queued client of a port and returns
+/// a server session handle in W1. With no connection waiting the kernel reports
+/// `0xf201`, which is why a server waits on the port (`svcWaitSynchronization`
+/// or the port entries of `svcReplyAndReceive`) before accepting. The session
+/// ceiling was charged when `svcCreateSession` queued the pair, so accepting
+/// moves the server end out of the port without accounting it twice.
+fn accept_session(c: &mut Cpu) {
+    let port_handle = c.x[1] as u32;
+    let p = c.process();
+    let Some(port) = p.handles.lock().unwrap().port(port_handle) else {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    };
+    let Some(link) = port.accept() else {
+        c.x[0] = RESULT_NOT_FOUND;
+        return;
+    };
+    let handle = p
+        .handles
+        .lock()
+        .unwrap()
+        .insert(KObject::Session(Session::guest_server(link)));
+    p.log_ipc(format!(
+        "AcceptSession(port {port_handle:#x}) -> {handle:#x}"
+    ));
+    ok1(c, handle as u64);
+}
+
+/// What a `svcReplyAndReceive` handle list entry waits for.
+enum Waitable {
+    /// A host service session: it replies inline and never has a request.
+    Host,
+    /// A server session of a guest pair.
+    Guest(Arc<GuestSession>),
+    /// A port with a connection waiting to be accepted.
+    Port(Arc<Port>),
+}
+
+/// What ended a `ReplyAndReceive` wait: the index that signalled with an
+/// optional request, or the result code and the index it applies to.
+type Received = Result<(usize, Option<Vec<u8>>), (u64, usize)>;
+
+/// Handles for `svcReplyAndReceive` (0x43) and its user-buffer form (0x44).
+/// Horizon validates the whole list before waiting, so an object that is not a
+/// session or a port is `0xe401` even when another entry is already signalled.
+fn read_reply_handles(c: &mut Cpu, addr: u64, count: u64) -> Option<Vec<(u32, Waitable)>> {
+    if count > 0x40 {
+        c.x[0] = RESULT_TOO_MANY_HANDLES;
+        return None;
+    }
+    let p = c.process();
+    let Some(raw) = p.memory.read(addr, count * 4) else {
+        c.x[0] = RESULT_INVALID_POINTER;
+        return None;
+    };
+    let handles: Vec<u32> = raw
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| u32::from_le_bytes(*b))
+        .collect();
+    let table = p.handles.lock().unwrap();
+    let mut waitable = Vec::with_capacity(handles.len());
+    for handle in handles {
+        match table.get(handle) {
+            Some(KObject::Session(s)) => {
+                let entry = match s.guest_server_link() {
+                    Some(link) => Waitable::Guest(link),
+                    None => Waitable::Host,
+                };
+                waitable.push((handle, entry));
+            }
+            Some(KObject::Port(port)) => waitable.push((handle, Waitable::Port(port))),
+            _ => {
+                c.x[0] = RESULT_INVALID_HANDLE;
+                return None;
+            }
+        }
+    }
+    Some(waitable)
+}
+
+/// Sends the reply the calling thread has in `buffer` to the session in
+/// service, if any. A host session replies inline, so there is nothing to send.
+fn send_reply(c: &Cpu, session: &Arc<Session>, buffer: (u64, u64)) {
+    let Some(link) = session.guest_server_link() else {
+        return;
+    };
+    if !link.in_service() {
+        return;
+    }
+    let p = c.process();
+    let Some(bytes) = p.memory.read(buffer.0, buffer.1) else {
+        p.warn_once(format!(
+            "ReplyAndReceive: the reply buffer {:#x} is not mapped",
+            buffer.0
+        ));
+        return;
+    };
+    // The pair wakes the process itself, so a host service posting from its own
+    // thread reaches the blocked client too.
+    link.post_reply(bytes);
+}
+
+/// Where `svcReplyAndReceive` receives: the TLS message buffer or the user
+/// buffer of the 0x44 form.
+#[derive(Clone, Copy)]
+struct ReceiveBuffer {
+    addr: u64,
+    size: u64,
+}
+
+impl ReceiveBuffer {
+    fn tls(c: &Cpu) -> ReceiveBuffer {
+        ReceiveBuffer {
+            addr: c.tpidrro_el0,
+            size: IPC_BUFFER_SIZE,
+        }
+    }
+}
+
+fn reply_and_receive(c: &mut Cpu, addr: u64, count: u64, target: u32, timeout: i64) {
+    let Some(handles) = read_reply_handles(c, addr, count) else {
+        return;
+    };
+    if !send_reply_to_target(c, target, (c.tpidrro_el0, IPC_BUFFER_SIZE)) {
+        return;
+    }
+    receive_request(c, handles, ReceiveBuffer::tls(c), timeout);
+}
+
+fn reply_and_receive_with_user_buffer(c: &mut Cpu) {
+    let (addr, size, list, count, target, timeout) =
+        (c.x[1], c.x[2], c.x[3], c.x[4], c.x[5] as u32, c.x[6] as i64);
+    if !addr.is_multiple_of(PAGE) {
+        c.x[0] = RESULT_INVALID_ADDRESS;
+        return;
+    }
+    if size == 0 || !size.is_multiple_of(PAGE) {
+        c.x[0] = RESULT_INVALID_SIZE;
+        return;
+    }
+    if !c.process().memory.is_mapped(addr, size) {
+        c.x[0] = RESULT_INVALID_POINTER;
+        return;
+    }
+    let Some(handles) = read_reply_handles(c, list, count) else {
+        return;
+    };
+    if !send_reply_to_target(c, target, (addr, size)) {
+        return;
+    }
+    receive_request(c, handles, ReceiveBuffer { addr, size }, timeout);
+}
+
+/// Sends the pending reply to `target` when it is not zero. `false` means the
+/// target handle is not a session and the SVC already stored its result.
+fn send_reply_to_target(c: &mut Cpu, target: u32, buffer: (u64, u64)) -> bool {
+    if target == 0 {
+        return true;
+    }
+    // The handle table is not held across the wakeup: a thread blocked in
+    // `sched::block` holds the scheduler lock and may touch the table.
+    let session = c.process().handles.lock().unwrap().session(target);
+    match session {
+        Some(session) => {
+            send_reply(c, &session, buffer);
+            true
+        }
+        None => {
+            c.x[0] = RESULT_INVALID_HANDLE;
+            false
+        }
+    }
+}
+
+/// `svcReplyAndReceiveLight` (0x42): replies on `handle` and receives the next
+/// request on it, with no timeout. A port handle only waits until a connection
+/// is ready to accept. The light message lives in registers on hardware; the
+/// runtime keeps both ends on the HIPC buffer, so a light pair behaves like a
+/// synchronous one.
+fn reply_and_receive_light(c: &mut Cpu) {
+    let handle = c.x[0] as u32;
+    let p = c.process();
+    let entry = p.handles.lock().unwrap().get(handle);
+    let waitable = match entry {
+        Some(KObject::Session(session)) => {
+            let Some(link) = session.guest_server_link() else {
+                // The argument is a port or a server session; a client session
+                // has nothing to receive.
+                c.x[0] = RESULT_INVALID_HANDLE;
+                return;
+            };
+            send_reply(c, &session, (c.tpidrro_el0, IPC_BUFFER_SIZE));
+            Waitable::Guest(link)
+        }
+        Some(KObject::Port(port)) => Waitable::Port(port),
+        _ => {
+            c.x[0] = RESULT_INVALID_HANDLE;
+            return;
+        }
+    };
+    receive_request(c, vec![(handle, waitable)], ReceiveBuffer::tls(c), -1);
+}
+
+/// Waits for a request (or a pending connection) on `handles` and copies it into
+/// `buffer`. Horizon enumerates the list in order: an incoming message wins over
+/// a closed handle that appears later, and the index of the entry that ended the
+/// wait is returned in W1. A session whose peer closed is `0xf601` with its
+/// index; nothing else can end the wait, since the runtime has no host server
+/// that messages a guest.
+fn receive_request(
+    c: &mut Cpu,
+    handles: Vec<(u32, Waitable)>,
+    buffer: ReceiveBuffer,
+    timeout: i64,
+) {
+    let p = c.process();
+    let me = c.thread.clone();
+    let lr = c.x[30];
+    let ids: Vec<u32> = handles.iter().map(|(h, _)| *h).collect();
+    let what = || format!("ReplyAndReceive({ids:x?}) from {}", p.describe(lr));
+    let ended: Option<Received> = crate::sched::block(c, timeout, what, |_| {
+        if me
+            .cancelled
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            return Some(Err((RESULT_CANCELLED, 0)));
+        }
+        for (i, (_, waitable)) in handles.iter().enumerate() {
+            match waitable {
+                Waitable::Guest(link) => {
+                    if let Some(bytes) = link.take_request() {
+                        return Some(Ok((i, Some(bytes))));
+                    }
+                    if !link.client_open() {
+                        return Some(Err((RESULT_REMOTE_DEAD, i)));
+                    }
+                }
+                Waitable::Port(port) => {
+                    if port.pending() > 0 {
+                        return Some(Ok((i, None)));
+                    }
+                }
+                Waitable::Host => {}
+            }
+        }
+        None
+    });
+    match ended {
+        Some(Ok((index, request))) => {
+            if let Some(bytes) = request {
+                let n = bytes.len().min(buffer.size as usize);
+                if !p.memory.write(buffer.addr, &bytes[..n]) {
+                    c.x[0] = RESULT_INVALID_POINTER;
+                    return;
+                }
+            }
+            c.x[0] = RESULT_SUCCESS;
+            c.x[1] = index as u64;
+        }
+        Some(Err((result, index))) => {
+            c.x[0] = result;
+            c.x[1] = index as u64;
+        }
+        None => c.x[0] = RESULT_TIMED_OUT,
+    }
+}
+
+/// `svcGetDebugFutureThreadInfo` (0x2E) returns the schedule context in x1-x4
+/// and the thread id in x5, which is the register block libnx and the SDK
+/// unpack. The runtime schedules no future thread, so the debug target is
+/// reported; `svcGetLastThreadInfo` (0x2F) keeps reporting the caller. This is
+/// the 6.0.0+ layout (X2 is a debug handle); the 5.0.0-5.1.0
+/// `GetFutureThreadInfo` form is not distinguished from it.
+fn get_debug_future_thread_info(c: &mut Cpu) {
+    let handle = c.x[2] as u32;
+    let Some(t) = threads::thread_of(c, handle) else {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    };
+    let (fp, sp, lr, pc) = (c.x[29], c.sp, c.x[30], c.pc);
+    ok1(c, fp);
+    c.x[2] = sp;
+    c.x[3] = lr;
+    c.x[4] = pc;
+    c.x[5] = t.id;
+}
+
 pub const RESULT_INVALID_HANDLE: u64 = 0xe401;
 pub const RESULT_CANCELLED: u64 = 0xec01;
 pub const RESULT_INVALID_PRIORITY: u64 = 0xe001;
@@ -174,14 +624,39 @@ pub const RESULT_INVALID_COMBINATION: u64 = 0xe801;
 pub const RESULT_INVALID_STATE: u64 = 0xfa01;
 
 fn event_signal(c: &mut Cpu, signaled: bool) {
-    c.x[0] = if c.process().set_event(c.x[0] as u32, signaled) { RESULT_SUCCESS } else { RESULT_INVALID_HANDLE };
+    c.x[0] = if c.process().set_event(c.x[0] as u32, signaled) {
+        RESULT_SUCCESS
+    } else {
+        RESULT_INVALID_HANDLE
+    };
 }
 
 fn close_handle(c: &mut Cpu) {
     let handle = c.x[0] as u32;
-    let closed = c.process().handles.lock().unwrap().close(handle);
+    let p = c.process();
+    let closed = {
+        let mut table = p.handles.lock().unwrap();
+        let object = table.get(handle);
+        let closed = table.close(handle);
+        drop(table);
+        // Closing one end of a guest session pair wakes the peer: a client
+        // waiting for a reply learns the server is gone and the other way
+        // round, so neither side can block on a dead peer. The pair does the
+        // wake itself, so a host service reaches a blocked guest too.
+        match object {
+            Some(KObject::Session(session)) if session.is_guest() => {
+                session.close_guest_end();
+            }
+            Some(KObject::Port(port)) => {
+                port.close();
+                crate::sched::wake(p);
+            }
+            _ => {}
+        }
+        closed
+    };
     if !closed && handle < 0xffff_8000 {
-        c.process().log_ipc(format!("CloseHandle({handle:#x}) of an unknown handle"));
+        p.log_ipc(format!("CloseHandle({handle:#x}) of an unknown handle"));
     }
     ok(c);
 }
@@ -195,9 +670,12 @@ fn set_heap_size(c: &mut Cpu) {
     let p = c.process();
     let mut heap = p.heap.lock().unwrap();
     if size > *heap {
-        if p.memory.map_as(HEAP_BASE + *heap, size - *heap, state::HEAP, perm::RW).is_err() {
+        if p.memory
+            .map_as(HEAP_BASE + *heap, size - *heap, state::HEAP, perm::RW)
+            .is_err()
+        {
             drop(heap);
-            fault(c, format!("could not map a {size:#x}-byte heap"));
+            fatal(c, format!("could not map a {size:#x}-byte heap"));
             return;
         }
         *heap = size;
@@ -208,24 +686,279 @@ fn set_heap_size(c: &mut Cpu) {
 
 pub const RESULT_INVALID_MEMORY_STATE: u64 = 0xd401;
 
+/// `svcMapMemory` (0x04): maps `src` at `dst`. Horizon borrows the source
+/// pages, so the source becomes read-only to the guest until `svcUnmapMemory`.
+/// The runtime keeps one host view of the pages and copies them at both ends
+/// (`mem::GuestMemory::map_mirror`); the destination is reported as the stack
+/// mapping the kernel makes (both states share the value) and the source is
+/// refused as a source twice.
 fn map_memory(c: &mut Cpu) {
     let (dst, src, size) = (c.x[0], c.x[1], c.x[2]);
-    let m = &c.process().memory;
-    if m.map_as(dst, size, state::STACK, perm::RW).is_err() || !m.copy(dst, src, size) {
-        c.x[0] = RESULT_INVALID_MEMORY_STATE;
-        return;
+    let result = match c.process().memory.map_mirror(dst, src, size) {
+        Ok(()) => RESULT_SUCCESS,
+        Err(MirrorError::Size) => RESULT_INVALID_SIZE,
+        Err(MirrorError::Address) => RESULT_INVALID_ADDRESS,
+        Err(MirrorError::State) => RESULT_INVALID_MEMORY_STATE,
+    };
+    if result != RESULT_SUCCESS {
+        let p = c.process();
+        let s = p.memory.query(src);
+        let d = p.memory.query(dst);
+        p.warn_once(format!(
+            "MapMemory({dst:#x}, {src:#x}, {size:#x}) failed {result:#x}:              src state {:#x} perm {:#x} in {:#x}..{:#x}, dst state {:#x} perm {:#x}",
+            s.state, s.perm, s.range.start, s.range.end, d.state, d.perm
+        ));
     }
-    ok(c);
+    c.x[0] = result;
 }
 
 fn unmap_memory(c: &mut Cpu) {
     let (dst, src, size) = (c.x[0], c.x[1], c.x[2]);
-    let m = &c.process().memory;
-    if !m.copy(src, dst, size) || m.unmap(dst, size).is_err() {
+    c.x[0] = match c.process().memory.unmap_mirror(dst, src, size) {
+        Ok(()) => RESULT_SUCCESS,
+        Err(MirrorError::Size) => RESULT_INVALID_SIZE,
+        Err(MirrorError::Address) => RESULT_INVALID_ADDRESS,
+        Err(MirrorError::State) => RESULT_INVALID_MEMORY_STATE,
+    };
+}
+
+/// The memory states a transfer memory may take its pages from, and that a
+/// mirror may borrow. Horizon gates these behind state bits
+/// (`MemState_TransferMemAllowed`, `MemState_MapAllowed`); the runtime keeps the
+/// equivalent list.
+const LENDABLE: [u32; 4] = [state::NORMAL, state::HEAP, state::STACK, state::SHARED];
+
+/// The permissions a transfer memory may have: no execute (the kernel refuses
+/// it) and no write-only.
+fn transfer_perm(perm: u32) -> bool {
+    matches!(perm, perm::NONE | perm::R | perm::RW)
+}
+
+/// `svcCreateTransferMemory` (0x15): reprotects `addr..addr+size` with `perm`
+/// and marks it as a transfer memory, then returns the object in X1. The kernel
+/// keeps the pages with the creator, so they stay mapped and only their state
+/// and permission change; `svcMapTransferMemory` aliases them elsewhere.
+fn create_transfer_memory(c: &mut Cpu) {
+    let (addr, size, perm) = (c.x[1], c.x[2], c.x[3] as u32);
+    if !addr.is_multiple_of(PAGE) {
+        c.x[0] = RESULT_INVALID_ADDRESS;
+        return;
+    }
+    if size == 0 || !size.is_multiple_of(PAGE) {
+        c.x[0] = RESULT_INVALID_SIZE;
+        return;
+    }
+    let Some(end) = addr.checked_add(size) else {
+        c.x[0] = RESULT_INVALID_MEMORY_REGION;
+        return;
+    };
+    if !transfer_perm(perm) {
+        c.x[0] = RESULT_INVALID_NEW_MEMORY_PERMISSION;
+        return;
+    }
+    let p = c.process();
+    if !p.memory.retag(addr, end, state::TRANSFER, perm, &LENDABLE) {
         c.x[0] = RESULT_INVALID_MEMORY_STATE;
         return;
     }
-    ok(c);
+    let tmem = TransferMemory::new(addr, size, perm);
+    let handle = p
+        .handles
+        .lock()
+        .unwrap()
+        .insert(KObject::TransferMemory(tmem));
+    ok1(c, handle as u64);
+}
+
+/// `svcMapTransferMemory` (0x51): maps the block at `addr`. The size and the
+/// permission must be the ones the block was created with, and only one mapping
+/// exists at a time.
+fn map_transfer_memory(c: &mut Cpu) {
+    let (handle, addr, size, perm) = (c.x[0] as u32, c.x[1], c.x[2], c.x[3] as u32);
+    let p = c.process();
+    let Some(tmem) = p.handles.lock().unwrap().transfer_memory(handle) else {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    };
+    c.x[0] = if size == 0 || size != tmem.size {
+        RESULT_INVALID_SIZE
+    } else if !addr.is_multiple_of(PAGE) {
+        RESULT_INVALID_ADDRESS
+    } else if addr.checked_add(size).is_none() {
+        RESULT_INVALID_MEMORY_REGION
+    } else if perm != tmem.perm {
+        RESULT_INVALID_NEW_MEMORY_PERMISSION
+    } else if tmem.mapped_at().is_some() {
+        RESULT_INVALID_STATE
+    } else if tmem.map(&p.memory, addr, perm) {
+        RESULT_SUCCESS
+    } else {
+        RESULT_INVALID_MEMORY_STATE
+    };
+}
+
+/// `svcUnmapTransferMemory` (0x52): writes the mapping back to the creator's
+/// pages and drops it.
+fn unmap_transfer_memory(c: &mut Cpu) {
+    let (handle, addr, size) = (c.x[0] as u32, c.x[1], c.x[2]);
+    let p = c.process();
+    let Some(tmem) = p.handles.lock().unwrap().transfer_memory(handle) else {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    };
+    c.x[0] = if size != tmem.size {
+        RESULT_INVALID_SIZE
+    } else if !addr.is_multiple_of(PAGE) {
+        RESULT_INVALID_ADDRESS
+    } else if tmem.unmap(&p.memory, addr) {
+        RESULT_SUCCESS
+    } else {
+        RESULT_INVALID_STATE
+    };
+}
+
+/// `svcCreateInterruptEvent` (0x53). The event object is real, but the runtime
+/// has no interrupt controller wired to guest IRQs, so nothing ever signals it;
+/// a guest that waits on it blocks like it would on an interrupt that never
+/// fires.
+fn create_interrupt_event(c: &mut Cpu) {
+    let (irq, flag) = (c.x[1], c.x[2] as u32);
+    if flag > 1 {
+        c.x[0] = RESULT_INVALID_ENUM;
+        return;
+    }
+    c.process()
+        .warn_once(format!(
+            "svcCreateInterruptEvent(irq {irq}): the runtime has no interrupt source, the event never signals"
+        ));
+    let event = Arc::new(Event {
+        signaled: std::sync::atomic::AtomicBool::new(false),
+    });
+    let handle = c
+        .process()
+        .handles
+        .lock()
+        .unwrap()
+        .insert(KObject::Event(event));
+    ok1(c, handle as u64);
+}
+
+/// `svcCreateCodeMemory` (0x4B): locks `src..src+size` into a code memory
+/// object, which leaves the process and starts `0xFF`-filled, as the kernel
+/// does.
+fn create_code_memory(c: &mut Cpu) {
+    let (src, size) = (c.x[1], c.x[2]);
+    let p = c.process();
+    if !src.is_multiple_of(PAGE) {
+        c.x[0] = RESULT_INVALID_ADDRESS;
+        return;
+    }
+    if size == 0 || !size.is_multiple_of(PAGE) {
+        c.x[0] = RESULT_INVALID_SIZE;
+        return;
+    }
+    let Some(end) = src.checked_add(size) else {
+        c.x[0] = RESULT_INVALID_MEMORY_REGION;
+        return;
+    };
+    let source = p.memory.query(src);
+    if source.range.start != src
+        || source.range.end < end
+        || !matches!(source.state, state::NORMAL | state::HEAP)
+    {
+        c.x[0] = RESULT_INVALID_MEMORY_STATE;
+        return;
+    }
+    if p.memory.unmap(src, size).is_err() {
+        c.x[0] = RESULT_INVALID_MEMORY_STATE;
+        return;
+    }
+    let memory = CodeMemory::new(size);
+    let handle = p
+        .handles
+        .lock()
+        .unwrap()
+        .insert(KObject::CodeMemory(memory));
+    ok1(c, handle as u64);
+}
+
+/// `svcControlCodeMemory` (0x4C). Only the owner mapping exists in the runtime:
+/// there is one process, so `CodeMemoryOperation_MapSlave` has no second address
+/// space to map into and, since 5.0.0, the kernel reports `0xe401` when the
+/// owner is the calling process. A JIT maps the range RW, fills it and maps it
+/// RX, which is why both are accepted for `MapOwner`; the documented `MapSlave`
+/// permissions (R or RX) are validated first so the guest sees the right error.
+fn control_code_memory(c: &mut Cpu) {
+    let (handle, op, dst, size, perm) = (c.x[0] as u32, c.x[1], c.x[2], c.x[3], c.x[4] as u32);
+    let p = c.process();
+    let Some(memory) = p.handles.lock().unwrap().code_memory(handle) else {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    };
+    if size != memory.size {
+        c.x[0] = RESULT_INVALID_SIZE;
+        return;
+    }
+    if !dst.is_multiple_of(PAGE) {
+        c.x[0] = RESULT_INVALID_ADDRESS;
+        return;
+    }
+    c.x[0] = match op {
+        0 => {
+            if !matches!(perm, perm::RW | perm::RX) {
+                RESULT_INVALID_NEW_MEMORY_PERMISSION
+            } else if memory.map_owner(&p.memory, dst, perm) {
+                RESULT_SUCCESS
+            } else {
+                RESULT_INVALID_MEMORY_STATE
+            }
+        }
+        1 => {
+            if !matches!(perm, perm::R | perm::RX) {
+                RESULT_INVALID_NEW_MEMORY_PERMISSION
+            } else {
+                p.warn_once(
+                    "svcControlCodeMemory(MapSlave): the runtime has one process, so the owner is the caller"
+                        .into(),
+                );
+                RESULT_INVALID_HANDLE
+            }
+        }
+        2 => {
+            if memory.unmap_owner(&p.memory, dst) {
+                RESULT_SUCCESS
+            } else {
+                RESULT_INVALID_STATE
+            }
+        }
+        3 => RESULT_INVALID_STATE,
+        _ => RESULT_INVALID_ENUM,
+    };
+}
+
+/// `svcInvalidateProcessDataCache`, `svcStoreProcessDataCache` and
+/// `svcFlushProcessDataCache` (0x5D-0x5F). The host caches are coherent with
+/// the guest, so only the process handle and the range are validated; the
+/// runtime has no handle for another process.
+fn process_data_cache(c: &mut Cpu, imm: u16) {
+    let (handle, addr, size) = (c.x[0] as u32, c.x[1], c.x[2]);
+    let p = c.process();
+    if handle != CURRENT_PROCESS as u32 {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    }
+    c.x[0] = if size == 0 {
+        RESULT_SUCCESS
+    } else if addr.checked_add(size).is_none_or(|end| end > ADDR_MASK + 1)
+        || !p.memory.is_mapped(addr, size)
+    {
+        p.warn_once(format!(
+            "svc {imm:#04x} on {addr:#x}+{size:#x} which is not mapped"
+        ));
+        RESULT_INVALID_MEMORY_STATE
+    } else {
+        RESULT_SUCCESS
+    };
 }
 
 fn set_memory_permission(c: &mut Cpu) {
@@ -238,7 +971,17 @@ fn set_memory_permission(c: &mut Cpu) {
         RESULT_INVALID_MEMORY_REGION
     } else if ![perm::NONE, perm::R, perm::RW].contains(&new) {
         RESULT_INVALID_NEW_MEMORY_PERMISSION
-    } else if c.process().memory.protect(addr, addr + size, new, &[state::HEAP, state::CODE_MUTABLE]) {
+    } else if c.process().memory.protect(
+        addr,
+        addr + size,
+        new,
+        &[
+            state::HEAP,
+            state::CODE_MUTABLE,
+            state::CODE_WRITABLE,
+            state::CODE_READONLY,
+        ],
+    ) {
         RESULT_SUCCESS
     } else {
         RESULT_INVALID_MEMORY_STATE
@@ -264,7 +1007,12 @@ fn physical_range(c: &mut Cpu) -> Option<(u64, u64)> {
     None
 }
 
-fn physical_result(c: &mut Cpu, name: &str, r: Result<u64, PhysicalError>, update: impl FnOnce(u64)) {
+fn physical_result(
+    c: &mut Cpu,
+    name: &str,
+    r: Result<u64, PhysicalError>,
+    update: impl FnOnce(u64),
+) {
     c.x[0] = match r {
         Ok(bytes) => {
             update(bytes);
@@ -272,26 +1020,34 @@ fn physical_result(c: &mut Cpu, name: &str, r: Result<u64, PhysicalError>, updat
         }
         Err(PhysicalError::State) => RESULT_INVALID_MEMORY_STATE,
         Err(PhysicalError::Limit) => RESULT_LIMIT_REACHED,
-        Err(PhysicalError::Host(e)) => return fault(c, format!("{name}: the host refused the mapping ({e})")),
+        Err(PhysicalError::Host(e)) => {
+            return fatal(c, format!("{name}: the host refused the mapping ({e})"));
+        }
     };
 }
 
 fn map_physical_memory(c: &mut Cpu) {
-    let Some((start, end)) = physical_range(c) else { return };
+    let Some((start, end)) = physical_range(c) else {
+        return;
+    };
     let p = c.process();
     let budget = TOTAL_MEMORY.saturating_sub(p.used_memory());
     let r = p.memory.map_physical(start, end, budget);
     physical_result(c, "svcMapPhysicalMemory", r, |n| {
-        p.physical.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+        p.physical
+            .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
     });
 }
 
 fn unmap_physical_memory(c: &mut Cpu) {
-    let Some((start, end)) = physical_range(c) else { return };
+    let Some((start, end)) = physical_range(c) else {
+        return;
+    };
     let p = c.process();
     let r = p.memory.unmap_physical(start, end);
     physical_result(c, "svcUnmapPhysicalMemory", r, |n| {
-        p.physical.fetch_sub(n, std::sync::atomic::Ordering::Relaxed);
+        p.physical
+            .fetch_sub(n, std::sync::atomic::Ordering::Relaxed);
     });
 }
 
@@ -304,7 +1060,9 @@ fn query_memory(c: &mut Cpu) {
     info[16..20].copy_from_slice(&r.state.to_le_bytes());
     info[24..28].copy_from_slice(&r.perm.to_le_bytes());
     if !c.process().memory.write(out, &info) {
-        fault(c, format!("svcQueryMemory output {out:#x} is not mapped"));
+        // A guest that hands the kernel an unmapped output pointer gets the
+        // documented result code; it is guest data, not a host failure.
+        c.x[0] = RESULT_INVALID_POINTER;
         return;
     }
     c.x[0] = RESULT_SUCCESS;
@@ -324,7 +1082,7 @@ fn get_info(c: &mut Cpu) {
         6 => TOTAL_MEMORY,
         7 => p.used_memory(),
         8 => 0,
-        9 => 0,
+        9 => resource_limit_handle(p),
         10 => 0,
         11 => p.entropy(subid),
         12 => ASLR_BASE,
@@ -332,9 +1090,13 @@ fn get_info(c: &mut Cpu) {
         14 => STACK_REGION_BASE,
         15 => STACK_REGION_SIZE,
         16 => p.system_resource_size,
-        17 => (p.physical.load(std::sync::atomic::Ordering::Relaxed) / 512).next_multiple_of(PAGE).min(p.system_resource_size),
+        17 => (p.physical.load(std::sync::atomic::Ordering::Relaxed) / 512)
+            .next_multiple_of(PAGE)
+            .min(p.system_resource_size),
         18 => p.title_id,
-        20 => *p.exception_context.get_or_init(|| p.alloc_tls()),
+        // InfoType_UserExceptionContextAddress: the exception frame lives at
+        // the start of the thread's TLS region, which is TPIDRRO_EL0.
+        20 => c.tpidrro_el0,
         21 => TOTAL_MEMORY - p.system_resource_size,
         22 => p.used_memory() - p.system_resource_size,
         23 => 1,
@@ -342,13 +1104,184 @@ fn get_info(c: &mut Cpu) {
         26 => 1,
         28 => 0,
         _ => {
-            p.warn_once(format!("svcGetInfo id {id} (subid {subid}) is not implemented"));
+            p.warn_once(format!(
+                "svcGetInfo id {id} (subid {subid}) is not implemented"
+            ));
             c.x[0] = RESULT_INVALID_ENUM;
             return;
         }
     };
     c.x[0] = RESULT_SUCCESS;
     c.x[1] = value;
+}
+
+/// Resource-limit handle reported by `svcGetInfo(9)`.
+fn resource_limit_handle(p: &'static Process) -> u64 {
+    p.handles
+        .lock()
+        .unwrap()
+        .resource_limit(|| KObject::ResourceLimit(Arc::new(ResourceLimit::new(TOTAL_MEMORY))))
+        as u64
+}
+
+fn get_resource_limit_value(c: &mut Cpu, current: bool) {
+    let (handle, which) = (c.x[1] as u32, c.x[2]);
+    let p = c.process();
+    let handles = p.handles.lock().unwrap();
+    let Some(KObject::ResourceLimit(limit)) = handles.get(handle) else {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    };
+    // Only the process resource limit accounts the live handle table; a limit
+    // made with svcCreateResourceLimit has no usage attributed to it.
+    let process_limit = handles.process_resource_limit() == Some(handle);
+    drop(handles);
+    let value = if current {
+        if process_limit {
+            current_resource_value(p, which)
+        } else {
+            limit.limit(which).map(|_| 0)
+        }
+    } else {
+        limit.limit(which)
+    };
+    match value {
+        Some(value) => ok1(c, value),
+        None => c.x[0] = RESULT_INVALID_ENUM,
+    }
+}
+
+fn get_resource_limit_peak_value(c: &mut Cpu) {
+    let (handle, which) = (c.x[1] as u32, c.x[2]);
+    let p = c.process();
+    let handles = p.handles.lock().unwrap();
+    let Some(KObject::ResourceLimit(limit)) = handles.get(handle) else {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    };
+    let process_limit = handles.process_resource_limit() == Some(handle);
+    drop(handles);
+    let Some(_) = limit.limit(which) else {
+        c.x[0] = RESULT_INVALID_ENUM;
+        return;
+    };
+    let current = if process_limit {
+        current_resource_value(p, which).unwrap_or(0)
+    } else {
+        0
+    };
+    match limit.record_peak(which, current) {
+        Some(peak) => ok1(c, peak),
+        None => c.x[0] = RESULT_INVALID_ENUM,
+    }
+}
+
+fn create_resource_limit(c: &mut Cpu) {
+    let limit = Arc::new(ResourceLimit::empty());
+    let handle = c
+        .process()
+        .handles
+        .lock()
+        .unwrap()
+        .insert(KObject::ResourceLimit(limit));
+    ok1(c, handle as u64);
+}
+
+fn set_resource_limit_limit_value(c: &mut Cpu) {
+    let (handle, which, value) = (c.x[0] as u32, c.x[1], c.x[2] as i64);
+    let p = c.process();
+    let handles = p.handles.lock().unwrap();
+    let Some(KObject::ResourceLimit(limit)) = handles.get(handle) else {
+        c.x[0] = RESULT_INVALID_HANDLE;
+        return;
+    };
+    let process_limit = handles.process_resource_limit() == Some(handle);
+    drop(handles);
+    let Some(_) = limit.limit(which) else {
+        c.x[0] = RESULT_INVALID_ENUM;
+        return;
+    };
+    let current = if process_limit {
+        current_resource_value(p, which).unwrap_or(0)
+    } else {
+        0
+    };
+    c.x[0] = match limit.set_limit(which, value, current) {
+        Some(true) => RESULT_SUCCESS,
+        Some(false) => RESULT_INVALID_STATE,
+        None => RESULT_INVALID_ENUM,
+    };
+}
+
+fn current_resource_value(p: &'static Process, which: u64) -> Option<u64> {
+    if which == 0 {
+        return Some(p.used_memory());
+    }
+    let handles = p.handles.lock().unwrap();
+    match which {
+        1 => Some(handles.threads().len() as u64),
+        // svcCreateEvent publishes a read and a write handle for one event.
+        2 => {
+            let mut seen = std::collections::HashSet::new();
+            Some(
+                handles
+                    .objects()
+                    .filter_map(|o| match o {
+                        KObject::Event(e) => Some(Arc::as_ptr(e) as usize),
+                        _ => None,
+                    })
+                    .filter(|id| seen.insert(*id))
+                    .count() as u64,
+            )
+        }
+        3 => Some(
+            handles
+                .objects()
+                .filter(|o| matches!(o, KObject::TransferMemory(_)))
+                .count() as u64,
+        ),
+        // Both ends of a session pair, as `LimitableResource_Sessions` counts
+        // them, including a server end still queued on its port.
+        4 => Some(handles.sessions_in_use()),
+        _ => None,
+    }
+}
+
+fn get_last_thread_info(c: &mut Cpu) {
+    // The kernel reports the thread that ran before the caller; the runtime
+    // keeps no previous-thread context, so the caller's own registers are
+    // reported (LastThreadContext: fp, sp, lr, pc, then TLS and flags).
+    c.x[0] = RESULT_SUCCESS;
+    c.x[1] = c.x[29];
+    c.x[2] = c.sp;
+    c.x[3] = c.x[30];
+    c.x[4] = c.pc;
+    c.x[5] = c.thread.tls;
+    c.x[6] = 0;
+}
+
+fn flush_entire_data_cache(c: &mut Cpu) {
+    // The host caches are coherent with the guest, so there is nothing to
+    // flush. The SVC returns nothing; success is left in x0.
+    c.x[0] = RESULT_SUCCESS;
+}
+
+fn flush_data_cache(c: &mut Cpu) {
+    let (addr, size) = (c.x[0], c.x[1]);
+    c.x[0] = if size == 0 {
+        RESULT_SUCCESS
+    } else if addr.checked_add(size).is_none_or(|end| end > ADDR_MASK + 1) {
+        RESULT_INVALID_MEMORY_STATE
+    } else {
+        RESULT_SUCCESS
+    };
+}
+
+fn synchronize_preemption_state(c: &mut Cpu) {
+    // Threads are never pinned across a system call in the runtime, so the
+    // preemption state is always synchronized. The SVC returns nothing;
+    // success is left in x0.
+    c.x[0] = RESULT_SUCCESS;
 }
 
 fn break_(c: &mut Cpu) {
@@ -366,14 +1299,58 @@ fn break_(c: &mut Cpu) {
         c.x[2],
         p.describe(c.pc - 4)
     );
+    // The SDK passes a pointer to the assert/abort information in x1. Print the
+    // readable strings it contains: that is the guest's own message, which is
+    // usually the only way to know which assertion fired.
+    // The info pointer can sit at the top of the stack, so a fixed forward read can
+    // cross the mapping end. Read a window centred on it instead and print both the
+    // strings and the raw bytes: the guest's abort record is a small struct.
+    let info = c.x[1];
+    let window = info.saturating_sub(0x80);
+    if let Some(bytes) = p.memory.read(window, 0x180) {
+        let _ = writeln!(
+            std::io::stderr(),
+            "kirikae:   info at {info:#x}: {}",
+            bytes
+                .chunks(16)
+                .map(|c| c.iter().map(|b| format!("{b:02x}")).collect::<String>())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let mut start = None;
+        for (i, &b) in bytes.iter().enumerate() {
+            let printable = (0x20..0x7f).contains(&b) || b == b'\n' || b == b'\t';
+            match (printable, start) {
+                (true, None) => start = Some(i),
+                (false, Some(s)) => {
+                    if i - s >= 4 {
+                        let text = String::from_utf8_lossy(&bytes[s..i]);
+                        let _ =
+                            writeln!(std::io::stderr(), "kirikae:   message: {}", text.trim_end());
+                    }
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+    }
     let mut fp = c.x[29];
     for _ in 0..16 {
-        let (Some(next), Some(lr)) = (p.memory.read(fp, 8), p.memory.read(fp + 8, 8)) else { break };
-        let (next, lr) = (u64::from_le_bytes(next.try_into().unwrap()), u64::from_le_bytes(lr.try_into().unwrap()));
+        let (Some(next), Some(lr)) = (p.memory.read(fp, 8), p.memory.read(fp + 8, 8)) else {
+            break;
+        };
+        let (next, lr) = (
+            u64::from_le_bytes(next.try_into().unwrap()),
+            u64::from_le_bytes(lr.try_into().unwrap()),
+        );
         if lr < 4 || next <= fp {
             break;
         }
-        let _ = writeln!(std::io::stderr(), "kirikae:   called from {}", p.describe(lr - 4));
+        let _ = writeln!(
+            std::io::stderr(),
+            "kirikae:   called from {}",
+            p.describe(lr - 4)
+        );
         fp = next;
     }
     c.halt();
@@ -386,19 +1363,1839 @@ fn output_debug_string(c: &mut Cpu) {
             c.process().output(&bytes);
             c.x[0] = RESULT_SUCCESS;
         }
-        None => fault(c, format!("svcOutputDebugString read unmapped memory at {addr:#x}+{len:#x}")),
+        None => fatal(
+            c,
+            format!("svcOutputDebugString read unmapped memory at {addr:#x}+{len:#x}"),
+        ),
     }
 }
 
-pub fn undefined(c: &mut Cpu, addr: u64, word: u32) {
-    let at = c.process().describe(addr);
-    fault(c, format!("instruction {word:#010x} at {at} is not implemented"));
+/// Layout of the user exception context at TPIDRRO_EL0, from the Horizon
+/// exception path: a 0x148-byte exception stack followed by the A64 frame.
+pub const EXCEPTION_FRAME_OFFSET: u64 = 0x148;
+const EXCEPTION_FRAME_SIZE: u64 = 0x78;
+
+/// Description codes the kernel passes to the process entry point in X0.
+pub const EXCEPTION_INSTRUCTION_ABORT: u64 = 0x100;
+pub const EXCEPTION_UNCATEGORIZED: u64 = 0x104;
+
+thread_local! {
+    /// Set while the thread is handling a guest exception. A fault raised
+    /// before `svcReturnFromException` replays the exception to the debugger,
+    /// which the runtime does not have, so it terminates instead of looping.
+    static EXCEPTION_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-pub fn fault(c: &mut Cpu, message: String) {
+/// The process entry point (the crt0 the kernel re-enters on an exception).
+fn process_entry(p: &'static Process) -> Option<u64> {
+    p.handles
+        .lock()
+        .unwrap()
+        .threads()
+        .into_iter()
+        .find(|t| t.id == MAIN_THREAD_ID)
+        .map(|t| t.entry)
+        .filter(|entry| *entry != 0)
+}
+
+/// Stores the interrupted context at the thread's TLS and returns to the
+/// process entry point with X0 = description and X1 = SP = the frame, which is
+/// what the Horizon userland reporting path does.
+///
+/// A host access violation cannot take this path: the host signal/VEH handler
+/// only receives the faulting host address and unwinding back into the guest
+/// thread would need a non-local jump, so `fault::report` still exits. See the
+/// note there.
+fn deliver_exception(c: &mut Cpu, desc: u64, fault_pc: u64) -> bool {
+    if EXCEPTION_ACTIVE.with(|a| a.get()) {
+        return false;
+    }
     let p = c.process();
+    let Some(entry) = process_entry(p) else {
+        return false;
+    };
+    let frame_at = c.tpidrro_el0 + EXCEPTION_FRAME_OFFSET;
+    if !p.memory.is_mapped(frame_at, EXCEPTION_FRAME_SIZE) {
+        return false;
+    }
+    let mut frame = [0u8; EXCEPTION_FRAME_SIZE as usize];
+    for (i, reg) in c.x[..9].iter().enumerate() {
+        frame[i * 8..i * 8 + 8].copy_from_slice(&reg.to_le_bytes());
+    }
+    frame[0x48..0x50].copy_from_slice(&c.x[30].to_le_bytes());
+    frame[0x50..0x58].copy_from_slice(&c.sp.to_le_bytes());
+    frame[0x58..0x60].copy_from_slice(&fault_pc.to_le_bytes());
+    // The runtime keeps no syndrome registers; PSTATE is the flag word.
+    frame[0x60..0x64].copy_from_slice(&(c.nzcv as u32).to_le_bytes());
+    if !p.memory.write(frame_at, &frame) {
+        return false;
+    }
+    EXCEPTION_ACTIVE.with(|a| a.set(true));
+    c.x[0] = desc;
+    c.x[1] = frame_at;
+    c.sp = frame_at;
+    c.pc = entry;
+    true
+}
+
+/// `svcReturnFromException` (0x28). With a zero result the frame the guest
+/// updated at the TLS is restored, which is how crt0 pivots into the user
+/// handler. A non-zero result replays the exception to KDebug; without a
+/// debugger that is fatal. The kernel also writes 1 to TPIDR_EL0 on this path,
+/// which the runtime leaves alone: guests use it as a thread pointer.
+fn return_from_exception(c: &mut Cpu) {
+    if !EXCEPTION_ACTIVE.with(|a| a.replace(false)) {
+        fatal(
+            c,
+            "svcReturnFromException ran on a thread that is not handling an exception".into(),
+        );
+        return;
+    }
+    if c.x[0] != 0 {
+        c.process().terminate(3);
+        c.halt();
+        return;
+    }
+    let frame_at = c.tpidrro_el0 + EXCEPTION_FRAME_OFFSET;
+    let Some(frame) = c.process().memory.read(frame_at, EXCEPTION_FRAME_SIZE) else {
+        fatal(
+            c,
+            format!("svcReturnFromException cannot read the frame at {frame_at:#x}"),
+        );
+        return;
+    };
+    let word = |at: usize| u64::from_le_bytes(frame[at..at + 8].try_into().unwrap_or_default());
+    for (i, reg) in c.x[..9].iter_mut().enumerate() {
+        *reg = word(i * 8);
+    }
+    c.x[30] = word(0x48);
+    c.sp = word(0x50);
+    c.pc = word(0x58);
+    c.nzcv = u32::from_le_bytes(frame[0x60..0x64].try_into().unwrap_or_default()) as u64;
+}
+
+/// A guest exception the interpreter or a lifted instruction could not
+/// execute. It is reported to the process entry point when that is possible.
+pub fn undefined(c: &mut Cpu, addr: u64, word: u32) {
+    let at = c.process().describe(addr);
+    let _ = writeln!(
+        std::io::stderr(),
+        "kirikae: instruction {word:#010x} at {at} is not implemented"
+    );
+    if !deliver_exception(c, EXCEPTION_UNCATEGORIZED, addr) {
+        terminate(c);
+    }
+}
+
+/// A guest fault that is not an instruction trap in an SVC (a jump outside
+/// executable memory, for example). Routed to the process entry point when the
+/// guest can handle it.
+pub fn fault(c: &mut Cpu, message: String) {
     let _ = writeln!(std::io::stderr(), "kirikae: {message}");
-    let _ = writeln!(std::io::stderr(), "kirikae: thread {} lr={} sp={:#x}", c.thread.id, p.describe(c.x[30]), c.sp);
+    if !deliver_exception(c, EXCEPTION_INSTRUCTION_ABORT, c.pc) {
+        terminate(c);
+    }
+}
+
+/// A host or runtime failure with no guest exception equivalent (a refused
+/// mapping, a host thread that cannot start). Always fatal.
+pub fn fatal(c: &mut Cpu, message: String) {
+    let _ = writeln!(std::io::stderr(), "kirikae: {message}");
+    terminate(c);
+}
+
+fn terminate(c: &mut Cpu) {
+    let p = c.process();
+    let _ = writeln!(
+        std::io::stderr(),
+        "kirikae: thread {} lr={} sp={:#x}",
+        c.thread.id,
+        p.describe(c.x[30]),
+        c.sp
+    );
     p.terminate(2);
     c.halt();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::abi::{Entry, GuestFn};
+    use crate::kernel::{KThread, ThreadContext};
+    use crate::process::{RunOptions, run_executable};
+    use crate::services::{Reply, Request, Service};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+
+    const GUEST_ENTRY: u64 = 0x1000_0000;
+
+    static OBSERVED: Mutex<Vec<(&'static str, Vec<u64>)>> = Mutex::new(Vec::new());
+
+    struct Echo;
+
+    impl Service for Echo {
+        fn name(&self) -> String {
+            "echo".into()
+        }
+
+        fn call(&self, _c: &mut Cpu, req: &Request) -> Reply {
+            Reply::ok().u32(req.cmd)
+        }
+    }
+
+    fn record(name: &'static str, values: &[u64]) {
+        OBSERVED.lock().unwrap().push((name, values.to_vec()));
+    }
+
+    fn observed(name: &'static str) -> Vec<u64> {
+        let mut all = OBSERVED.lock().unwrap();
+        let i = all
+            .iter()
+            .position(|(n, _)| *n == name)
+            .expect("the fake guest recorded nothing");
+        all.remove(i).1
+    }
+
+    /// Runs an entry point that drives `dispatch` on a real `Cpu` with a
+    /// process whose guest memory and handle table are live, then halts.
+    fn run_entries(entries: Vec<Entry>, expected_exit: i32) -> crate::process::RunResult {
+        let entries: &'static [Entry] = Box::leak(entries.into_boxed_slice());
+        let exe = kirikae_loader::Executable {
+            modules: Vec::new(),
+            entry: entries[0].addr,
+            title_id: None,
+            main_stack_size: None,
+            system_resource_size: 0,
+            romfs: None,
+        };
+        let result = run_executable(
+            &exe,
+            entries,
+            RunOptions {
+                capture_output: true,
+            },
+        )
+        .expect("the fake guest runs");
+        assert_eq!(result.exit_code, expected_exit);
+        result
+    }
+
+    fn run_guest(f: GuestFn) {
+        run_entries(
+            vec![Entry {
+                addr: GUEST_ENTRY,
+                func: f,
+            }],
+            0,
+        );
+    }
+
+    fn parked_thread(id: u64) -> Arc<KThread> {
+        Arc::new(KThread {
+            id,
+            handle: id as u32,
+            priority: AtomicI32::new(44),
+            core: AtomicI32::new(0),
+            ideal_core: AtomicI32::new(0),
+            affinity: AtomicU64::new(1),
+            inherited: AtomicI32::new(i32::MAX),
+            entry: 0,
+            arg: 0,
+            stack_top: 0x9000,
+            tls: 0xa000,
+            started: AtomicBool::new(true),
+            exited: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
+            last_pc: AtomicU64::new(0),
+            last_lr: AtomicU64::new(0),
+            paused: AtomicBool::new(false),
+            context: Default::default(),
+        })
+    }
+
+    extern "C" fn light_request(c: &mut Cpu) {
+        let session = Session::new(Arc::new(Echo));
+        let handle = c
+            .process()
+            .handles
+            .lock()
+            .unwrap()
+            .insert(KObject::Session(session));
+        let tls = c.tpidrro_el0;
+        let mut out = Vec::new();
+        for imm in [0x20u16, 0x21] {
+            let request =
+                crate::ipc::client::cmif(crate::ipc::TYPE_REQUEST, 7, &[], None, false, &[]);
+            out.push(c.process().memory.write(tls, &request) as u64);
+            c.x[0] = handle as u64;
+            dispatch(c, imm);
+            if trace() {
+                eprintln!("svc {imm:#04x} -> x0={:#x} x1={:#x}", c.x[0], c.x[1]);
+            }
+            out.push(c.x[0]);
+            let response = c
+                .process()
+                .memory
+                .read(tls, IPC_BUFFER_SIZE)
+                .unwrap_or_default();
+            let (result, data, _) = crate::ipc::client::cmif_response(&response, false);
+            out.push(result as u64);
+            out.push(
+                data.get(..4)
+                    .map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()))
+                    as u64,
+            );
+        }
+        c.x[0] = 0xdead;
+        dispatch(c, 0x20);
+        out.push(c.x[0]);
+        record("light", &out);
+        c.halt();
+    }
+
+    #[test]
+    fn send_sync_request_light_uses_the_ipc_path() {
+        run_guest(light_request);
+        assert_eq!(
+            observed("light"),
+            vec![1, 0, 0, 7, 1, 0, 0, 7, RESULT_INVALID_HANDLE]
+        );
+    }
+
+    extern "C" fn whole_cache(c: &mut Cpu) {
+        c.x[0] = 0xdead_beef;
+        dispatch(c, 0x2a);
+        record("whole_cache", &[c.x[0]]);
+        c.halt();
+    }
+
+    #[test]
+    fn flush_entire_data_cache_succeeds() {
+        run_guest(whole_cache);
+        assert_eq!(observed("whole_cache"), vec![RESULT_SUCCESS]);
+    }
+
+    extern "C" fn range_cache(c: &mut Cpu) {
+        let probes = [(0x1000, 0x4000), (ADDR_MASK, 2), (0x1234, 0)];
+        let mut out = Vec::new();
+        for (addr, size) in probes {
+            c.x[0] = addr;
+            c.x[1] = size;
+            dispatch(c, 0x2b);
+            out.push(c.x[0]);
+        }
+        record("range_cache", &out);
+        c.halt();
+    }
+
+    #[test]
+    fn flush_data_cache_validates_the_range() {
+        run_guest(range_cache);
+        assert_eq!(
+            observed("range_cache"),
+            vec![RESULT_SUCCESS, RESULT_INVALID_MEMORY_STATE, RESULT_SUCCESS]
+        );
+    }
+
+    extern "C" fn last_thread(c: &mut Cpu) {
+        c.pc = 0x1111_2222_3333_4444;
+        c.sp = 0x5555_6666_7777_8888;
+        c.x[29] = 0x9999_aaaa_bbbb_cccc;
+        c.x[30] = 0xdddd_eeee_ffff_0000;
+        dispatch(c, 0x2f);
+        record("last_thread", &c.x[..7]);
+        record("last_thread_tls", &[c.tpidrro_el0, c.thread.tls]);
+        c.halt();
+    }
+
+    #[test]
+    fn get_last_thread_info_reports_the_calling_thread() {
+        run_guest(last_thread);
+        let tls = observed("last_thread_tls");
+        assert_eq!(tls[0], tls[1], "the TLS base is TPIDRRO_EL0");
+        assert_eq!(
+            observed("last_thread"),
+            vec![
+                RESULT_SUCCESS,
+                0x9999_aaaa_bbbb_cccc,
+                0x5555_6666_7777_8888,
+                0xdddd_eeee_ffff_0000,
+                0x1111_2222_3333_4444,
+                tls[0],
+                0,
+            ]
+        );
+    }
+
+    extern "C" fn limits(c: &mut Cpu) {
+        c.x[1] = 9;
+        c.x[3] = 0;
+        dispatch(c, 0x29);
+        let handle = c.x[1];
+        let mut out = vec![c.x[0], handle];
+        c.x[1] = 9;
+        c.x[3] = 0;
+        dispatch(c, 0x29);
+        out.push(c.x[1]);
+        for which in 0..=4 {
+            for imm in [0x30u16, 0x31] {
+                c.x[1] = handle;
+                c.x[2] = which;
+                dispatch(c, imm);
+                if trace() {
+                    eprintln!("svc {imm:#04x} -> x0={:#x} x1={:#x}", c.x[0], c.x[1]);
+                }
+                out.push(c.x[0]);
+                out.push(c.x[1]);
+            }
+        }
+        c.x[1] = handle;
+        c.x[2] = 5;
+        dispatch(c, 0x30);
+        out.push(c.x[0]);
+        c.x[1] = 0xdead;
+        c.x[2] = 0;
+        dispatch(c, 0x31);
+        out.push(c.x[0]);
+        out.push(c.process().used_memory());
+        record("limits", &out);
+        c.halt();
+    }
+
+    #[test]
+    fn resource_limits_report_memory_and_threads() {
+        run_guest(limits);
+        let got = observed("limits");
+        let (handle, used) = (got[1], got[25]);
+        assert_eq!(got[0], RESULT_SUCCESS);
+        assert_ne!(handle, 0);
+        assert_eq!(got[2], handle, "svcGetInfo(9) caches the handle");
+        let pair = |which: usize| {
+            let i = 3 + which * 4;
+            (got[i], got[i + 1], got[i + 2], got[i + 3])
+        };
+        assert_eq!(
+            pair(0),
+            (RESULT_SUCCESS, TOTAL_MEMORY, RESULT_SUCCESS, used)
+        );
+        assert_eq!(pair(1), (RESULT_SUCCESS, 0x40, RESULT_SUCCESS, 1));
+        assert_eq!(pair(2), (RESULT_SUCCESS, 0x100, RESULT_SUCCESS, 0));
+        assert_eq!(pair(3), (RESULT_SUCCESS, 0x100, RESULT_SUCCESS, 0));
+        assert_eq!(pair(4), (RESULT_SUCCESS, 0x200, RESULT_SUCCESS, 0));
+        assert_eq!(got[23], RESULT_INVALID_ENUM);
+        assert_eq!(got[24], RESULT_INVALID_HANDLE);
+    }
+
+    extern "C" fn preemption(c: &mut Cpu) {
+        c.x[0] = 0xdead_beef;
+        dispatch(c, 0x36);
+        record("preemption", &[c.x[0]]);
+        c.halt();
+    }
+
+    #[test]
+    fn synchronize_preemption_state_is_a_no_op() {
+        run_guest(preemption);
+        assert_eq!(observed("preemption"), vec![RESULT_SUCCESS]);
+    }
+
+    extern "C" fn thread_activity(c: &mut Cpu) {
+        let t = parked_thread(0x99);
+        let handle = c
+            .process()
+            .handles
+            .lock()
+            .unwrap()
+            .insert(KObject::Thread(t.clone()));
+        let mut out = Vec::new();
+        for activity in [2u64, 1, 1, 0] {
+            c.x[0] = handle as u64;
+            c.x[1] = activity;
+            dispatch(c, 0x32);
+            out.push(c.x[0]);
+        }
+        out.push(t.paused.load(Ordering::Relaxed) as u64);
+        record("thread_activity", &out);
+        c.halt();
+    }
+
+    #[test]
+    fn set_thread_activity_pauses_and_resumes() {
+        run_guest(thread_activity);
+        assert_eq!(
+            observed("thread_activity"),
+            vec![
+                RESULT_INVALID_ENUM,
+                RESULT_SUCCESS,
+                RESULT_INVALID_STATE,
+                RESULT_SUCCESS,
+                0,
+            ]
+        );
+    }
+
+    extern "C" fn thread_context(c: &mut Cpu) {
+        let mut expected = ThreadContext {
+            sp: 0x1111,
+            pc: 0x2222,
+            psr: 0x6000_0000,
+            tpidr: 0x3333,
+            ..Default::default()
+        };
+        expected.x[29] = 0x4444;
+        expected.x[30] = 0x5555;
+        let bytes = expected.to_bytes();
+        let runnable = parked_thread(0x9a);
+        let paused = parked_thread(0x9b);
+        paused.paused.store(true, Ordering::Relaxed);
+        *paused.context.lock().unwrap() = expected;
+        let (a, b) = {
+            let mut handles = c.process().handles.lock().unwrap();
+            (
+                handles.insert(KObject::Thread(runnable)),
+                handles.insert(KObject::Thread(paused)),
+            )
+        };
+        let out = c.sp - 0x400;
+        let mut results = Vec::new();
+        for handle in [a, b] {
+            c.x[0] = out;
+            c.x[1] = handle as u64;
+            dispatch(c, 0x33);
+            results.push(c.x[0]);
+        }
+        record("thread_context_results", &results);
+        let got = c
+            .process()
+            .memory
+            .read(out, ThreadContext::SIZE as u64)
+            .unwrap_or_default();
+        record("thread_context", &words(&got));
+        record("thread_context_expected", &words(&bytes));
+        c.halt();
+    }
+
+    fn words(bytes: &[u8]) -> Vec<u64> {
+        bytes
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|w| u64::from_le_bytes(*w))
+            .collect()
+    }
+
+    #[test]
+    fn get_thread_context3_reports_a_paused_thread() {
+        run_guest(thread_context);
+        assert_eq!(
+            observed("thread_context_results"),
+            vec![RESULT_INVALID_STATE, RESULT_SUCCESS]
+        );
+        assert_eq!(
+            observed("thread_context"),
+            observed("thread_context_expected"),
+            "the whole ThreadContext is written"
+        );
+    }
+
+    extern "C" fn unknown(c: &mut Cpu) {
+        c.x[0] = 0;
+        dispatch(c, 0x3e);
+        record("unknown", &[c.x[0]]);
+        c.halt();
+    }
+
+    #[test]
+    fn unknown_svcs_still_report_not_implemented() {
+        run_guest(unknown);
+        assert_eq!(observed("unknown"), vec![RESULT_NOT_IMPLEMENTED]);
+    }
+
+    const IPC_PAGE: u64 = 0x1000_0000;
+
+    extern "C" fn async_ipc(c: &mut Cpu) {
+        c.process()
+            .memory
+            .map_as(IPC_PAGE, PAGE, state::HEAP, perm::RW)
+            .expect("the IPC buffer page maps");
+        let session = Session::new(Arc::new(Echo));
+        let handle = c
+            .process()
+            .handles
+            .lock()
+            .unwrap()
+            .insert(KObject::Session(session));
+        let request = crate::ipc::client::cmif(crate::ipc::TYPE_REQUEST, 7, &[], None, false, &[]);
+        c.process().memory.write(IPC_PAGE, &request);
+
+        // svcSendAsyncRequestWithUserBuffer(out_event, buffer, size, session):
+        // the kernel returns the event in X1, the SDK wrapper stores it.
+        c.x[0] = 0;
+        c.x[1] = IPC_PAGE;
+        c.x[2] = PAGE;
+        c.x[3] = handle as u64;
+        dispatch(c, 0x23);
+        let event = c.x[1];
+        record("async", &[c.x[0], event]);
+        let response = c
+            .process()
+            .memory
+            .read(IPC_PAGE, IPC_BUFFER_SIZE)
+            .unwrap_or_default();
+        let (result, data, _) = crate::ipc::client::cmif_response(&response, false);
+        record(
+            "async_response",
+            &[
+                result as u64,
+                data.get(..4)
+                    .map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()) as u64),
+            ],
+        );
+        let signaled = matches!(
+            c.process().handles.lock().unwrap().get(event as u32),
+            Some(KObject::Event(e)) if e.signaled.load(Ordering::Relaxed)
+        );
+        record("async_event", &[signaled as u64]);
+
+        let probes = [
+            (IPC_PAGE + 0x800, PAGE, handle as u64),
+            (IPC_PAGE, 0x800, handle as u64),
+            (IPC_PAGE, PAGE, 0xdead),
+            (0x2000_0000, PAGE, handle as u64),
+        ];
+        let mut errors = Vec::new();
+        for (addr, size, session) in probes {
+            c.x[0] = 0;
+            c.x[1] = addr;
+            c.x[2] = size;
+            c.x[3] = session;
+            dispatch(c, 0x23);
+            errors.push(c.x[0]);
+        }
+        record("async_errors", &errors);
+
+        let list = c.sp - 0x40;
+        c.process().memory.write(list, &handle.to_le_bytes());
+        let mut replies = Vec::new();
+        // No guest server object exists, so a valid list can only time out.
+        for (count, addr, target) in [
+            (1u64, list, 0u64),
+            (0x41, list, 0),
+            (1, 0x2000_0000, 0),
+            (1, list, 0xdead),
+        ] {
+            c.x[0] = 0;
+            c.x[1] = addr;
+            c.x[2] = count;
+            c.x[3] = target;
+            c.x[4] = 0;
+            dispatch(c, 0x43);
+            replies.push(c.x[0]);
+        }
+        // svcReplyAndReceiveWithUserBuffer validates its buffer first.
+        for (addr, size) in [
+            (IPC_PAGE + 0x800, PAGE),
+            (IPC_PAGE, 0x800),
+            (IPC_PAGE, PAGE),
+        ] {
+            c.x[1] = addr;
+            c.x[2] = size;
+            c.x[3] = list;
+            c.x[4] = 1;
+            c.x[5] = 0;
+            c.x[6] = 0;
+            dispatch(c, 0x44);
+            replies.push(c.x[0]);
+        }
+        record("async_replies", &replies);
+        c.halt();
+    }
+
+    #[test]
+    fn async_request_is_served_into_the_user_buffer() {
+        run_guest(async_ipc);
+        let got = observed("async");
+        assert_eq!(got[0], RESULT_SUCCESS);
+        assert_ne!(got[1], 0, "a readable event handle is returned in X1");
+        assert_eq!(
+            observed("async_response"),
+            vec![RESULT_SUCCESS, 7],
+            "the reply is in the user buffer"
+        );
+        assert_eq!(observed("async_event"), vec![1], "the event is signaled");
+        assert_eq!(
+            observed("async_errors"),
+            vec![
+                RESULT_INVALID_ADDRESS,
+                RESULT_INVALID_SIZE,
+                RESULT_INVALID_HANDLE,
+                RESULT_INVALID_POINTER,
+            ]
+        );
+        assert_eq!(
+            observed("async_replies"),
+            vec![
+                RESULT_TIMED_OUT,
+                RESULT_TOO_MANY_HANDLES,
+                RESULT_INVALID_POINTER,
+                RESULT_INVALID_HANDLE,
+                RESULT_INVALID_ADDRESS,
+                RESULT_INVALID_SIZE,
+                RESULT_TIMED_OUT,
+            ]
+        );
+    }
+
+    /// The guest-visible pieces a two-thread session test shares: the client
+    /// leaves the port handle here and the server reads it.
+    const SESSION_MAILBOX: u64 = 0x0F00_0000;
+    const SESSION_LIST: u64 = 0x0F00_1000;
+    const SERVER_STACK: u64 = 0x0F01_0000;
+    const SERVER_ENTRY: u64 = GUEST_ENTRY + 0x100;
+
+    /// The result and first data word of a CMIF response, or `u32::MAX` twice
+    /// when the buffer does not hold one. Parsing here keeps a wrong reply from
+    /// panicking inside a guest entry point, which aborts the test binary.
+    fn reply_summary(msg: &[u8]) -> (u32, u32) {
+        let Ok(m) = crate::ipc::parse_hipc(msg) else {
+            return (u32::MAX, u32::MAX);
+        };
+        let pad = m.data_offset.next_multiple_of(16) - m.data_offset;
+        let Some(p) = m.data.get(pad..) else {
+            return (u32::MAX, u32::MAX);
+        };
+        if p.get(..4) != Some(crate::ipc::SFCO.to_le_bytes().as_slice()) {
+            return (u32::MAX, u32::MAX);
+        }
+        let word = |at: usize| {
+            p.get(at..at + 4)
+                .map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap_or_default()))
+        };
+        (word(8), word(16))
+    }
+
+    /// The client of a guest session pair: create it, start the server thread,
+    /// send a request and block until the reply lands in its own TLS.
+    extern "C" fn session_client(c: &mut Cpu) {
+        let p = c.process();
+        p.memory
+            .map_as(SESSION_MAILBOX, PAGE, state::HEAP, perm::RW)
+            .expect("the mailbox page maps");
+        p.memory
+            .map_as(SESSION_LIST, PAGE, state::HEAP, perm::RW)
+            .expect("the handle list page maps");
+        p.memory
+            .map_as(SERVER_STACK, PAGE, state::STACK, perm::RW)
+            .expect("the server stack maps");
+
+        c.x[2] = 0;
+        c.x[3] = 0x3a6d73;
+        dispatch(c, 0x40);
+        let (port, client) = (c.x[1] as u32, c.x[2] as u32);
+        record("session_create", &[c.x[0], port as u64, client as u64]);
+        p.memory.write(SESSION_MAILBOX, &port.to_le_bytes());
+
+        c.x[1] = SERVER_ENTRY;
+        c.x[2] = 0;
+        c.x[3] = SERVER_STACK + PAGE;
+        c.x[4] = 44;
+        c.x[5] = 0;
+        dispatch(c, 0x08);
+        let thread = c.x[1] as u32;
+        c.x[0] = thread as u64;
+        dispatch(c, 0x09);
+        record("session_start", &[c.x[0]]);
+
+        let tls = c.tpidrro_el0;
+        let request = crate::ipc::client::cmif(crate::ipc::TYPE_REQUEST, 7, &[], None, false, &[]);
+        p.memory.write(tls, &request);
+        c.x[0] = client as u64;
+        dispatch(c, 0x21);
+        let result = c.x[0];
+        let response = p.memory.read(tls, IPC_BUFFER_SIZE).unwrap_or_default();
+        let mut words = Vec::new();
+        words.push(result);
+        words.extend(
+            response
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .take(4)
+                .map(|w| u32::from_le_bytes(*w) as u64),
+        );
+        record("session_client_raw", &words);
+        let (reply_result, value) = reply_summary(&response);
+        record(
+            "session_client",
+            &[result, reply_result as u64, value as u64],
+        );
+        c.x[0] = client as u64;
+        dispatch(c, 0x16);
+        c.halt();
+    }
+
+    /// The server: accept the queued client, take the request with
+    /// `ReplyAndReceiveLight`, reply through `ReplyAndReceive` and stop waiting
+    /// at once.
+    extern "C" fn session_server(c: &mut Cpu) {
+        let p = c.process();
+        let raw = p.memory.read(SESSION_MAILBOX, 4).unwrap_or_default();
+        let port = u32::from_le_bytes(raw.try_into().unwrap_or_default());
+        // A server can wait for a connection on the port before accepting it.
+        c.x[0] = port as u64;
+        dispatch(c, 0x42);
+        record("session_port_wait", &[c.x[0], c.x[1]]);
+        c.x[1] = port as u64;
+        dispatch(c, 0x41);
+        let server = c.x[1] as u32;
+        record("session_accept", &[c.x[0], server as u64]);
+
+        c.x[0] = server as u64;
+        dispatch(c, 0x42);
+        let result = c.x[0];
+        let tls = c.tpidrro_el0;
+        let request = p.memory.read(tls, IPC_BUFFER_SIZE).unwrap_or_default();
+        let cmd = crate::ipc::parse_hipc(&request)
+            .and_then(|m| crate::ipc::parse_cmif(&m, false))
+            .map_or(u32::MAX, |m| m.cmd);
+        record("session_server", &[result, cmd as u64]);
+
+        let response = crate::ipc::encode_cmif(0, &(cmd + 1).to_le_bytes(), &[], &[], None);
+        p.memory.write(tls, &response);
+        p.memory.write(SESSION_LIST, &server.to_le_bytes());
+        c.x[1] = SESSION_LIST;
+        c.x[2] = 1;
+        c.x[3] = server as u64;
+        c.x[4] = 0;
+        dispatch(c, 0x43);
+        record("session_reply", &[c.x[0]]);
+        c.x[0] = server as u64;
+        dispatch(c, 0x16);
+        c.halt();
+    }
+
+    #[test]
+    fn a_guest_session_pair_moves_a_request_and_a_reply() {
+        run_entries(
+            vec![
+                Entry {
+                    addr: GUEST_ENTRY,
+                    func: session_client,
+                },
+                Entry {
+                    addr: SERVER_ENTRY,
+                    func: session_server,
+                },
+            ],
+            0,
+        );
+        let create = observed("session_create");
+        assert_eq!(create[0], RESULT_SUCCESS);
+        assert_ne!(create[1], 0, "the server port handle is returned in W1");
+        assert_ne!(create[2], 0, "the client session handle is returned in W2");
+        assert_ne!(create[1], create[2]);
+        assert_eq!(observed("session_start"), vec![RESULT_SUCCESS]);
+        assert_eq!(
+            observed("session_port_wait"),
+            vec![RESULT_SUCCESS, 0],
+            "a waiting server port reports the connection with its index"
+        );
+        let accept = observed("session_accept");
+        assert_eq!(accept[0], RESULT_SUCCESS);
+        assert_ne!(accept[1], 0, "accepting makes a server session handle");
+        assert_ne!(accept[1], create[1]);
+        assert_ne!(accept[1], create[2]);
+        assert_eq!(
+            observed("session_server"),
+            vec![RESULT_SUCCESS, 7],
+            "the server receives the client's request"
+        );
+        assert_eq!(
+            observed("session_reply"),
+            vec![RESULT_TIMED_OUT],
+            "the reply is sent and no second request is waited for"
+        );
+        assert_eq!(
+            observed("session_client"),
+            vec![RESULT_SUCCESS, RESULT_SUCCESS, 8],
+            "the client blocks until the reply arrives (raw {:x?})",
+            observed("session_client_raw")
+        );
+    }
+
+    /// The server end of the pair is handed to a plain host thread, which is how
+    /// a host-implemented service is served through a guest port.
+    extern "C" fn host_served_client(c: &mut Cpu) {
+        let p = c.process();
+        c.x[2] = 0;
+        c.x[3] = 0x686f_7374;
+        dispatch(c, 0x40);
+        let port = c.x[1] as u32;
+        let client = c.x[2] as u32;
+        c.x[1] = port as u64;
+        dispatch(c, 0x41);
+        let server = c.x[1] as u32;
+        let link = p
+            .handles
+            .lock()
+            .unwrap()
+            .session(server)
+            .and_then(|s| s.guest_server_link())
+            .expect("the accepted session is a guest pair");
+
+        let host = std::thread::spawn(move || {
+            let request = link.take_request_blocking(std::time::Duration::from_secs(5));
+            let cmd = request
+                .as_deref()
+                .and_then(|b| crate::ipc::parse_hipc(b).ok())
+                .and_then(|m| crate::ipc::parse_cmif(&m, false).ok())
+                .map_or(u32::MAX, |m| m.cmd);
+            let reply = crate::ipc::encode_cmif(0, &(cmd + 100).to_le_bytes(), &[], &[], None);
+            let posted = link.post_reply(reply);
+            record("host_service", &[cmd as u64, posted as u64]);
+        });
+
+        let request = crate::ipc::client::cmif(crate::ipc::TYPE_REQUEST, 3, &[], None, false, &[]);
+        p.memory.write(c.tpidrro_el0, &request);
+        c.x[0] = client as u64;
+        dispatch(c, 0x21);
+        let response = p
+            .memory
+            .read(c.tpidrro_el0, IPC_BUFFER_SIZE)
+            .unwrap_or_default();
+        let (reply_result, value) = reply_summary(&response);
+        record("host_client", &[c.x[0], reply_result as u64, value as u64]);
+        host.join().expect("the host service thread joins");
+        c.halt();
+    }
+
+    #[test]
+    fn a_host_service_serves_a_guest_through_the_port() {
+        run_guest(host_served_client);
+        assert_eq!(
+            observed("host_service"),
+            vec![3, 1],
+            "the host thread takes the request and its reply is posted"
+        );
+        assert_eq!(
+            observed("host_client"),
+            vec![RESULT_SUCCESS, RESULT_SUCCESS, 103],
+            "the guest client wakes with the host service's reply"
+        );
+    }
+
+    /// A server that takes the request and then closes without replying.
+    extern "C" fn dying_server(c: &mut Cpu) {
+        let p = c.process();
+        let raw = p.memory.read(SESSION_MAILBOX, 4).unwrap_or_default();
+        let port = u32::from_le_bytes(raw.try_into().unwrap_or_default());
+        c.x[1] = port as u64;
+        dispatch(c, 0x41);
+        let server = c.x[1] as u32;
+        c.x[0] = server as u64;
+        dispatch(c, 0x42);
+        record("dying_server", &[c.x[0]]);
+        c.x[0] = server as u64;
+        dispatch(c, 0x16);
+        c.halt();
+    }
+
+    extern "C" fn waiting_client(c: &mut Cpu) {
+        let p = c.process();
+        p.memory
+            .map_as(SESSION_MAILBOX, PAGE, state::HEAP, perm::RW)
+            .expect("the mailbox page maps");
+        p.memory
+            .map_as(SERVER_STACK, PAGE, state::STACK, perm::RW)
+            .expect("the server stack maps");
+        c.x[2] = 0;
+        c.x[3] = 0;
+        dispatch(c, 0x40);
+        let (port, client) = (c.x[1] as u32, c.x[2] as u32);
+        p.memory.write(SESSION_MAILBOX, &port.to_le_bytes());
+        c.x[1] = SERVER_ENTRY;
+        c.x[2] = 0;
+        c.x[3] = SERVER_STACK + PAGE;
+        c.x[4] = 44;
+        c.x[5] = 0;
+        dispatch(c, 0x08);
+        let thread = c.x[1] as u32;
+        c.x[0] = thread as u64;
+        dispatch(c, 0x09);
+
+        let request = crate::ipc::client::cmif(crate::ipc::TYPE_REQUEST, 1, &[], None, false, &[]);
+        p.memory.write(c.tpidrro_el0, &request);
+        c.x[0] = client as u64;
+        dispatch(c, 0x21);
+        record("waiting_client", &[c.x[0]]);
+        // The server end is closed, so the pair refuses further requests
+        // without blocking, even though the request was left in service.
+        c.x[0] = client as u64;
+        dispatch(c, 0x21);
+        record("waiting_client_again", &[c.x[0]]);
+        c.halt();
+    }
+
+    #[test]
+    fn a_dead_server_wakes_its_client() {
+        run_entries(
+            vec![
+                Entry {
+                    addr: GUEST_ENTRY,
+                    func: waiting_client,
+                },
+                Entry {
+                    addr: SERVER_ENTRY,
+                    func: dying_server,
+                },
+            ],
+            0,
+        );
+        assert_eq!(
+            observed("dying_server"),
+            vec![RESULT_SUCCESS],
+            "the server took the request"
+        );
+        assert_eq!(
+            observed("waiting_client"),
+            vec![RESULT_REMOTE_DEAD],
+            "closing the server end wakes the waiting client with 0xf601"
+        );
+        assert_eq!(
+            observed("waiting_client_again"),
+            vec![RESULT_REMOTE_DEAD],
+            "a request to a dead peer is refused at once"
+        );
+    }
+
+    extern "C" fn session_errors(c: &mut Cpu) {
+        c.x[2] = 2;
+        c.x[3] = 0;
+        dispatch(c, 0x40);
+        let bad_light = c.x[0];
+
+        c.x[2] = 0;
+        c.x[3] = 0x1234;
+        dispatch(c, 0x40);
+        let create = c.x[0];
+        let (port, client) = (c.x[1] as u32, c.x[2] as u32);
+
+        c.x[1] = client as u64;
+        dispatch(c, 0x41);
+        let accept_on_client = c.x[0];
+        c.x[1] = 0xdead;
+        dispatch(c, 0x41);
+        let accept_unknown = c.x[0];
+        c.x[1] = port as u64;
+        dispatch(c, 0x41);
+        let accept = c.x[0];
+        let server = c.x[1] as u32;
+        c.x[1] = port as u64;
+        dispatch(c, 0x41);
+        let accept_empty = c.x[0];
+        c.x[0] = client as u64;
+        dispatch(c, 0x42);
+        let light_on_client = c.x[0];
+
+        // Closing the client end is what the server sees as a dead peer.
+        c.x[0] = client as u64;
+        dispatch(c, 0x16);
+        c.x[0] = server as u64;
+        dispatch(c, 0x42);
+        let dead = c.x[0];
+        let dead_index = c.x[1];
+
+        // LimitableResource_Sessions: a pair needs two session objects.
+        c.x[1] = 9;
+        c.x[3] = 0;
+        dispatch(c, 0x29);
+        let limit = c.x[1];
+        record("session_limit_handle", &[c.x[0], limit]);
+        c.x[0] = limit;
+        c.x[1] = 4;
+        c.x[2] = 1;
+        dispatch(c, 0x7e);
+        let lowered = c.x[0];
+        c.x[2] = 0;
+        c.x[3] = 0;
+        dispatch(c, 0x40);
+        let limited = c.x[0];
+        c.x[0] = limit;
+        c.x[1] = 4;
+        c.x[2] = 0x200;
+        dispatch(c, 0x7e);
+        let raised = c.x[0];
+        c.x[2] = 0;
+        c.x[3] = 0;
+        dispatch(c, 0x40);
+        let created = c.x[0];
+
+        record(
+            "session_errors",
+            &[
+                bad_light,
+                create,
+                accept_on_client,
+                accept_unknown,
+                accept,
+                accept_empty,
+                light_on_client,
+                dead,
+                dead_index,
+            ],
+        );
+        record("session_limits", &[lowered, limited, raised, created]);
+        c.halt();
+    }
+
+    #[test]
+    fn session_handles_and_limits_report_the_documented_errors() {
+        run_guest(session_errors);
+        let errors = observed("session_errors");
+        assert_eq!(errors[0], RESULT_INVALID_ENUM, "is_light is a bool");
+        assert_eq!(errors[1], RESULT_SUCCESS);
+        assert_eq!(
+            errors[2], RESULT_INVALID_HANDLE,
+            "AcceptSession needs a port, not a session"
+        );
+        assert_eq!(errors[3], RESULT_INVALID_HANDLE);
+        assert_eq!(errors[4], RESULT_SUCCESS);
+        assert_eq!(
+            errors[5], RESULT_NOT_FOUND,
+            "no connection is waiting to be accepted"
+        );
+        assert_eq!(
+            errors[6], RESULT_INVALID_HANDLE,
+            "ReplyAndReceiveLight needs a port or a server session"
+        );
+        assert_eq!(
+            errors[7], RESULT_REMOTE_DEAD,
+            "a closed client makes the server session dead"
+        );
+        assert_eq!(errors[8], 0, "the index of the dead entry is returned");
+        assert_eq!(
+            observed("session_limits"),
+            vec![
+                RESULT_SUCCESS,
+                RESULT_LIMIT_REACHED,
+                RESULT_SUCCESS,
+                RESULT_SUCCESS
+            ],
+            "a ceiling below the two ends of a pair refuses CreateSession"
+        );
+    }
+
+    const TMEM_PAGE: u64 = 0x0F02_0000;
+    const TMEM_MAP: u64 = 0x0F02_1000;
+    const CODE_SRC: u64 = 0x0F03_0000;
+    const CODE_MAP: u64 = 0x0F03_1000;
+
+    /// The first eight bytes of a recorded buffer as one word.
+    fn eight(bytes: &[u8]) -> u64 {
+        let mut word = [0u8; 8];
+        let n = bytes.len().min(8);
+        word[..n].copy_from_slice(&bytes[..n]);
+        u64::from_le_bytes(word)
+    }
+
+    extern "C" fn memory_family(c: &mut Cpu) {
+        let p = c.process();
+        p.memory
+            .map_as(TMEM_PAGE, PAGE, state::HEAP, perm::RW)
+            .expect("the transfer memory page maps");
+        p.memory.write(TMEM_PAGE, b"transfer");
+        p.memory
+            .map_as(CODE_SRC, PAGE, state::HEAP, perm::RW)
+            .expect("the code memory page maps");
+        p.memory.write(CODE_SRC, b"source");
+
+        c.x[1] = TMEM_PAGE;
+        c.x[2] = PAGE;
+        c.x[3] = perm::NONE as u64;
+        dispatch(c, 0x15);
+        let created = c.x[0];
+        let tmem = c.x[1] as u32;
+        let retagged = p.memory.query(TMEM_PAGE).state;
+        record("tmem_create", &[created, tmem as u64, retagged as u64]);
+
+        c.x[1] = TMEM_PAGE;
+        c.x[2] = PAGE;
+        c.x[3] = perm::RX as u64;
+        dispatch(c, 0x15);
+        let create_exec = c.x[0];
+        c.x[1] = TMEM_PAGE + 1;
+        c.x[2] = PAGE;
+        c.x[3] = perm::NONE as u64;
+        dispatch(c, 0x15);
+        let create_unaligned = c.x[0];
+        c.x[1] = TMEM_PAGE;
+        c.x[2] = 0;
+        dispatch(c, 0x15);
+        let create_empty = c.x[0];
+        record(
+            "tmem_create_errors",
+            &[create_exec, create_unaligned, create_empty],
+        );
+
+        // MapTransferMemory wants the creation's size and permission.
+        let mut map_errors = Vec::new();
+        for (addr, size, map_perm) in [
+            (TMEM_MAP, PAGE, perm::RW as u64),
+            (TMEM_MAP, PAGE * 2, perm::NONE as u64),
+            (TMEM_MAP + 1, PAGE, perm::NONE as u64),
+        ] {
+            c.x[0] = tmem as u64;
+            c.x[1] = addr;
+            c.x[2] = size;
+            c.x[3] = map_perm;
+            dispatch(c, 0x51);
+            map_errors.push(c.x[0]);
+        }
+        record("tmem_map_errors", &map_errors);
+
+        c.x[0] = tmem as u64;
+        c.x[1] = TMEM_MAP;
+        c.x[2] = PAGE;
+        c.x[3] = perm::NONE as u64;
+        dispatch(c, 0x51);
+        let mapped = c.x[0];
+        let contents = p.memory.read(TMEM_MAP, 8).unwrap_or_default();
+        p.memory.write(TMEM_MAP, b"CHANGED");
+        c.x[0] = tmem as u64;
+        c.x[1] = TMEM_MAP + PAGE;
+        c.x[2] = PAGE;
+        c.x[3] = perm::NONE as u64;
+        dispatch(c, 0x51);
+        let twice = c.x[0];
+        c.x[0] = tmem as u64;
+        c.x[1] = TMEM_MAP;
+        c.x[2] = PAGE * 2;
+        dispatch(c, 0x52);
+        let bad_unmap = c.x[0];
+        c.x[0] = tmem as u64;
+        c.x[1] = TMEM_MAP;
+        c.x[2] = PAGE;
+        dispatch(c, 0x52);
+        let unmapped = c.x[0];
+        let written_back = p.memory.read(TMEM_PAGE, 7).unwrap_or_default();
+        record(
+            "tmem_map",
+            &[
+                mapped,
+                twice,
+                bad_unmap,
+                unmapped,
+                eight(&contents),
+                eight(&written_back),
+            ],
+        );
+
+        c.x[1] = CODE_SRC;
+        c.x[2] = PAGE;
+        dispatch(c, 0x4b);
+        let code_created = c.x[0];
+        let code = c.x[1] as u32;
+        let source_gone = !p.memory.is_mapped(CODE_SRC, 1);
+        record(
+            "code_create",
+            &[code_created, code as u64, source_gone as u64],
+        );
+
+        let mut ops = Vec::new();
+        for (op, addr, size, op_perm) in [
+            (1u64, CODE_MAP, PAGE, perm::R as u64),
+            (1, CODE_MAP, PAGE, perm::RW as u64),
+            (0, CODE_MAP, PAGE, perm::R as u64),
+            (0, CODE_MAP, PAGE * 2, perm::RW as u64),
+            (0, CODE_MAP + 1, PAGE, perm::RW as u64),
+            (9, CODE_MAP, PAGE, perm::RW as u64),
+        ] {
+            c.x[0] = code as u64;
+            c.x[1] = op;
+            c.x[2] = addr;
+            c.x[3] = size;
+            c.x[4] = op_perm;
+            dispatch(c, 0x4c);
+            ops.push(c.x[0]);
+        }
+        record("code_op_errors", &ops);
+
+        c.x[0] = code as u64;
+        c.x[1] = 0;
+        c.x[2] = CODE_MAP;
+        c.x[3] = PAGE;
+        c.x[4] = perm::RW as u64;
+        dispatch(c, 0x4c);
+        let owner = c.x[0];
+        let initial = p.memory.read(CODE_MAP, 4).unwrap_or_default();
+        p.memory.write(CODE_MAP, b"code!");
+        c.x[0] = code as u64;
+        c.x[1] = 0;
+        c.x[2] = CODE_MAP;
+        c.x[3] = PAGE;
+        c.x[4] = perm::RX as u64;
+        dispatch(c, 0x4c);
+        let executable = c.x[0];
+        let code_perm = p.memory.query(CODE_MAP).perm;
+        c.x[0] = code as u64;
+        c.x[1] = 2;
+        c.x[2] = CODE_MAP;
+        c.x[3] = PAGE;
+        dispatch(c, 0x4c);
+        let unmapped_code = c.x[0];
+        c.x[0] = code as u64;
+        c.x[1] = 0;
+        c.x[2] = CODE_MAP;
+        c.x[3] = PAGE;
+        c.x[4] = perm::RX as u64;
+        dispatch(c, 0x4c);
+        let remapped = c.x[0];
+        let kept = p.memory.read(CODE_MAP, 5).unwrap_or_default();
+        record(
+            "code_map",
+            &[
+                owner,
+                executable,
+                code_perm as u64,
+                unmapped_code,
+                remapped,
+                eight(&initial),
+                eight(&kept),
+            ],
+        );
+        c.halt();
+    }
+
+    #[test]
+    fn transfer_and_code_memory_validate_size_and_permission() {
+        run_guest(memory_family);
+        let create = observed("tmem_create");
+        assert_eq!(create[0], RESULT_SUCCESS);
+        assert_ne!(create[1], 0, "the object handle is returned in X1");
+        assert_eq!(
+            create[2],
+            state::TRANSFER as u64,
+            "the creator's pages become transfer memory"
+        );
+        assert_eq!(
+            observed("tmem_create_errors"),
+            vec![
+                RESULT_INVALID_NEW_MEMORY_PERMISSION,
+                RESULT_INVALID_ADDRESS,
+                RESULT_INVALID_SIZE,
+            ]
+        );
+        assert_eq!(
+            observed("tmem_map_errors"),
+            vec![
+                RESULT_INVALID_NEW_MEMORY_PERMISSION,
+                RESULT_INVALID_SIZE,
+                RESULT_INVALID_ADDRESS,
+            ]
+        );
+        let map = observed("tmem_map");
+        assert_eq!(map[0], RESULT_SUCCESS);
+        assert_eq!(map[1], RESULT_INVALID_STATE, "one mapping at a time");
+        assert_eq!(map[2], RESULT_INVALID_SIZE);
+        assert_eq!(map[3], RESULT_SUCCESS);
+        assert_eq!(map[4], eight(b"transfer"), "the block maps");
+        assert_eq!(
+            map[5],
+            eight(b"CHANGED"),
+            "the mapping writes back to the creator's pages"
+        );
+
+        let code = observed("code_create");
+        assert_eq!(code[0], RESULT_SUCCESS);
+        assert_ne!(code[1], 0);
+        assert_eq!(code[2], 1, "the locked pages leave the address space");
+        assert_eq!(
+            observed("code_op_errors"),
+            vec![
+                RESULT_INVALID_HANDLE,
+                RESULT_INVALID_NEW_MEMORY_PERMISSION,
+                RESULT_INVALID_NEW_MEMORY_PERMISSION,
+                RESULT_INVALID_SIZE,
+                RESULT_INVALID_ADDRESS,
+                RESULT_INVALID_ENUM,
+            ]
+        );
+        let mapped = observed("code_map");
+        assert_eq!(mapped[0], RESULT_SUCCESS);
+        assert_eq!(mapped[1], RESULT_SUCCESS, "the owner can go from RW to RX");
+        assert_eq!(mapped[2], perm::RX as u64);
+        assert_eq!(mapped[3], RESULT_SUCCESS);
+        assert_eq!(mapped[4], RESULT_SUCCESS);
+        assert_eq!(
+            mapped[5],
+            eight(&[0xff; 4]),
+            "code memory starts 0xFF-filled"
+        );
+        assert_eq!(mapped[6], eight(b"code!"), "the contents survive the unmap");
+    }
+
+    const MIRROR_SRC: u64 = 0x0F04_0000;
+    const MIRROR_DST: u64 = 0x0F04_2000;
+    const MIRROR_BAD: u64 = 0x0F04_3000;
+
+    extern "C" fn mirrored_memory(c: &mut Cpu) {
+        let p = c.process();
+        p.memory
+            .map_as(MIRROR_SRC, PAGE * 2, state::HEAP, perm::RW)
+            .expect("the mirror source maps");
+        p.memory.write(MIRROR_SRC, b"guard");
+
+        c.x[0] = MIRROR_DST;
+        c.x[1] = MIRROR_SRC;
+        c.x[2] = PAGE;
+        dispatch(c, 0x04);
+        let map = c.x[0];
+        let borrowed = p.memory.query(MIRROR_SRC).perm;
+        let dst_state = p.memory.query(MIRROR_DST).state;
+        let copied = p.memory.read(MIRROR_DST, 5).unwrap_or_default();
+
+        c.x[0] = MIRROR_DST;
+        c.x[1] = MIRROR_SRC;
+        c.x[2] = PAGE;
+        dispatch(c, 0x04);
+        let twice = c.x[0];
+        c.x[0] = MIRROR_BAD;
+        c.x[1] = MIRROR_SRC;
+        c.x[2] = 0;
+        dispatch(c, 0x04);
+        let empty = c.x[0];
+        c.x[0] = MIRROR_BAD + 1;
+        c.x[1] = MIRROR_SRC;
+        c.x[2] = PAGE;
+        dispatch(c, 0x04);
+        let unaligned = c.x[0];
+
+        p.memory.write(MIRROR_DST, b"GUARD");
+        c.x[0] = MIRROR_DST;
+        c.x[1] = MIRROR_SRC;
+        c.x[2] = PAGE;
+        dispatch(c, 0x05);
+        let unmap = c.x[0];
+        let restored = p.memory.query(MIRROR_SRC).perm;
+        let written_back = p.memory.read(MIRROR_SRC, 5).unwrap_or_default();
+        let gone = !p.memory.is_mapped(MIRROR_DST, 1);
+        c.x[0] = MIRROR_DST;
+        c.x[1] = MIRROR_SRC;
+        c.x[2] = PAGE;
+        dispatch(c, 0x05);
+        let twice_unmap = c.x[0];
+
+        record(
+            "mirror",
+            &[
+                map,
+                borrowed as u64,
+                dst_state as u64,
+                twice,
+                empty,
+                unaligned,
+                unmap,
+                restored as u64,
+                gone as u64,
+                twice_unmap,
+            ],
+        );
+        record("mirror_contents", &[eight(&copied), eight(&written_back)]);
+        c.halt();
+    }
+
+    #[test]
+    fn map_memory_borrows_the_source_and_unmap_restores_it() {
+        run_guest(mirrored_memory);
+        let got = observed("mirror");
+        assert_eq!(got[0], RESULT_SUCCESS);
+        assert_eq!(got[1], perm::RW as u64, "the source keeps its permission");
+        assert_eq!(got[2], state::STACK as u64, "the view is a stack mapping");
+        assert_eq!(
+            got[3], RESULT_INVALID_MEMORY_STATE,
+            "the destination is already mapped"
+        );
+        assert_eq!(got[4], RESULT_INVALID_SIZE);
+        assert_eq!(got[5], RESULT_INVALID_ADDRESS);
+        assert_eq!(got[6], RESULT_SUCCESS);
+        assert_eq!(
+            got[7],
+            perm::RW as u64,
+            "the source gets its permission back"
+        );
+        assert_eq!(got[8], 1, "the view is gone");
+        assert_eq!(got[9], RESULT_INVALID_MEMORY_STATE);
+        let contents = observed("mirror_contents");
+        assert_eq!(contents[0], eight(b"guard"));
+        assert_eq!(contents[1], eight(b"GUARD"), "writes come back");
+    }
+
+    const CACHE_PAGE: u64 = 0x0F05_0000;
+
+    extern "C" fn data_cache(c: &mut Cpu) {
+        let p = c.process();
+        p.memory
+            .map_as(CACHE_PAGE, PAGE, state::HEAP, perm::RW)
+            .expect("the cache range maps");
+        let mut out = Vec::new();
+        for imm in [0x5du16, 0x5e, 0x5f] {
+            for (handle, addr, size) in [
+                (CURRENT_PROCESS, CACHE_PAGE, PAGE),
+                (CURRENT_PROCESS, CACHE_PAGE, 0),
+                (CURRENT_PROCESS + 1, CACHE_PAGE, PAGE),
+                (CURRENT_PROCESS, 0x2000_0000, PAGE),
+            ] {
+                c.x[0] = handle;
+                c.x[1] = addr;
+                c.x[2] = size;
+                dispatch(c, imm);
+                if trace() {
+                    eprintln!("svc {imm:#04x} -> x0={:#x} x1={:#x}", c.x[0], c.x[1]);
+                }
+                out.push(c.x[0]);
+            }
+        }
+        record("data_cache", &out);
+        c.halt();
+    }
+
+    #[test]
+    fn process_data_cache_validates_the_process_and_the_range() {
+        run_guest(data_cache);
+        assert_eq!(
+            observed("data_cache"),
+            vec![
+                RESULT_SUCCESS,
+                RESULT_SUCCESS,
+                RESULT_INVALID_HANDLE,
+                RESULT_INVALID_MEMORY_STATE,
+                RESULT_SUCCESS,
+                RESULT_SUCCESS,
+                RESULT_INVALID_HANDLE,
+                RESULT_INVALID_MEMORY_STATE,
+                RESULT_SUCCESS,
+                RESULT_SUCCESS,
+                RESULT_INVALID_HANDLE,
+                RESULT_INVALID_MEMORY_STATE,
+            ]
+        );
+    }
+
+    const FAULT_PC: u64 = 0x1000_2000;
+    const HANDLER_ENTRY: u64 = GUEST_ENTRY + 0x100;
+
+    extern "C" fn exception_handler(c: &mut Cpu) {
+        record("handler", &[c.x[0], c.x[1], c.sp, c.pc]);
+        c.halt();
+    }
+
+    extern "C" fn exception_guest(c: &mut Cpu) {
+        if c.x[0] == 0 {
+            record("exception_tls", &[c.tpidrro_el0]);
+            c.pc = FAULT_PC;
+            c.sp = 0x3333;
+            c.x[1] = 0x11;
+            c.x[7] = 0x77;
+            c.x[8] = 0x88;
+            c.x[29] = 0x1111;
+            c.x[30] = 0x2222;
+            undefined(c, FAULT_PC, 0xdead_beef);
+            record("delivered", &[c.x[0], c.x[1], c.sp, c.pc]);
+            return;
+        }
+        // The kernel re-entered the entry point with X0 = description and
+        // X1 = the frame; patch ELR at the user handler and return.
+        let frame_at = c.x[1];
+        record(
+            "frame_at",
+            &[frame_at, c.tpidrro_el0 + EXCEPTION_FRAME_OFFSET],
+        );
+        let frame = c
+            .process()
+            .memory
+            .read(frame_at, EXCEPTION_FRAME_SIZE)
+            .unwrap_or_default();
+        record("frame", &words(&frame));
+        let mut patched = frame;
+        patched[0x0..0x8].copy_from_slice(&0x77u64.to_le_bytes());
+        patched[0x58..0x60].copy_from_slice(&HANDLER_ENTRY.to_le_bytes());
+        c.process().memory.write(frame_at, &patched);
+        c.x[0] = 0;
+        dispatch(c, 0x28);
+    }
+
+    #[test]
+    fn guest_faults_reach_the_process_entry_and_return_from_exception() {
+        run_entries(
+            vec![
+                Entry {
+                    addr: GUEST_ENTRY,
+                    func: exception_guest,
+                },
+                Entry {
+                    addr: HANDLER_ENTRY,
+                    func: exception_handler,
+                },
+            ],
+            0,
+        );
+        let tls = observed("exception_tls")[0];
+        assert_eq!(
+            observed("delivered"),
+            vec![
+                EXCEPTION_UNCATEGORIZED,
+                tls + EXCEPTION_FRAME_OFFSET,
+                tls + EXCEPTION_FRAME_OFFSET,
+                GUEST_ENTRY,
+            ],
+            "X0 = description, X1 = SP = frame, PC = entry"
+        );
+        assert_eq!(
+            observed("frame_at"),
+            vec![tls + EXCEPTION_FRAME_OFFSET, tls + EXCEPTION_FRAME_OFFSET]
+        );
+        let frame = observed("frame");
+        assert_eq!(
+            &frame[..12],
+            &[
+                0, 0x11, 0, 0, 0, 0, 0, 0x77, 0x88, 0x2222, // lr
+                0x3333, // sp
+                FAULT_PC,
+            ],
+            "ExceptionFrameA64 holds x0-x8, lr, sp and pc"
+        );
+        assert_eq!(&frame[12..], &[0, 0, 0], "PSTATE and syndrome are zero");
+        assert_eq!(
+            observed("handler"),
+            vec![0x77, 0x11, 0x3333, HANDLER_ENTRY],
+            "ReturnFromException restores the frame and jumps to the handler"
+        );
+    }
+
+    extern "C" fn exception_abort(c: &mut Cpu) {
+        if c.x[0] == 0 {
+            undefined(c, FAULT_PC, 0xdead_beef);
+            return;
+        }
+        // A non-zero result replays the exception to KDebug; there is no
+        // debugger, so the runtime stops the process.
+        c.x[0] = 0x10001;
+        dispatch(c, 0x28);
+    }
+
+    #[test]
+    fn return_from_exception_with_a_result_terminates() {
+        run_entries(
+            vec![Entry {
+                addr: GUEST_ENTRY,
+                func: exception_abort,
+            }],
+            3,
+        );
+    }
+
+    extern "C" fn exception_replays(c: &mut Cpu) {
+        if c.x[0] == 0 {
+            undefined(c, FAULT_PC, 0xdead_beef);
+            return;
+        }
+        // A second fault before ReturnFromException replays the exception.
+        undefined(c, FAULT_PC + 0x1000, 0xdead_beef);
+        c.halt();
+    }
+
+    #[test]
+    fn a_second_fault_while_handling_terminates() {
+        run_entries(
+            vec![Entry {
+                addr: GUEST_ENTRY,
+                func: exception_replays,
+            }],
+            2,
+        );
+    }
+
+    extern "C" fn stray_return(c: &mut Cpu) {
+        c.x[0] = 0;
+        dispatch(c, 0x28);
+        c.halt();
+    }
+
+    #[test]
+    fn return_from_exception_without_a_fault_terminates() {
+        run_entries(
+            vec![Entry {
+                addr: GUEST_ENTRY,
+                func: stray_return,
+            }],
+            2,
+        );
+    }
+
+    extern "C" fn future_thread(c: &mut Cpu) {
+        c.pc = 0x4444;
+        c.sp = 0x3333;
+        c.x[29] = 0x1111;
+        c.x[30] = 0x2222;
+        c.x[2] = crate::kernel::PSEUDO_CURRENT_THREAD as u64;
+        dispatch(c, 0x2e);
+        record("future", &c.x[..6]);
+        c.x[2] = 0xdead;
+        dispatch(c, 0x2e);
+        record("future_bad", &[c.x[0]]);
+        c.x[1] = 20;
+        c.x[3] = 0;
+        dispatch(c, 0x29);
+        record("future_context", &[c.x[0], c.x[1], c.tpidrro_el0]);
+        c.halt();
+    }
+
+    #[test]
+    fn get_debug_future_thread_info_reports_the_target_thread() {
+        run_guest(future_thread);
+        assert_eq!(
+            observed("future"),
+            vec![
+                RESULT_SUCCESS,
+                0x1111,
+                0x3333,
+                0x2222,
+                0x4444,
+                MAIN_THREAD_ID,
+            ]
+        );
+        assert_eq!(observed("future_bad"), vec![RESULT_INVALID_HANDLE]);
+        let context = observed("future_context");
+        assert_eq!(context[0], RESULT_SUCCESS);
+        assert_eq!(
+            context[1], context[2],
+            "svcGetInfo(20) reports the TLS base the exception frame uses"
+        );
+    }
+
+    extern "C" fn limits_created(c: &mut Cpu) {
+        c.x[1] = 9;
+        c.x[3] = 0;
+        dispatch(c, 0x29);
+        let process_limit = c.x[1];
+        record("limit_process", &[c.x[0], process_limit]);
+
+        c.x[0] = 0;
+        dispatch(c, 0x7d);
+        let limit = c.x[1];
+        record("limit_created", &[c.x[0], limit]);
+
+        // A fresh limit starts at zero for every LimitableResource.
+        let mut limits = Vec::new();
+        for which in 0..=4 {
+            c.x[0] = 0;
+            c.x[1] = limit;
+            c.x[2] = which;
+            dispatch(c, 0x30);
+            limits.push(c.x[0]);
+            limits.push(c.x[1]);
+        }
+        record("limit_zeros", &limits);
+
+        // Raise the thread ceiling; nothing is attributed to a fresh limit.
+        c.x[0] = limit;
+        c.x[1] = 1;
+        c.x[2] = 8;
+        dispatch(c, 0x7e);
+        record("limit_set", &[c.x[0]]);
+        let mut after = Vec::new();
+        for imm in [0x30u16, 0x31, 0x37] {
+            c.x[1] = limit;
+            c.x[2] = 1;
+            dispatch(c, imm);
+            if trace() {
+                eprintln!("svc {imm:#04x} -> x0={:#x} x1={:#x}", c.x[0], c.x[1]);
+            }
+            after.push(c.x[0]);
+            after.push(c.x[1]);
+        }
+        record("limit_after", &after);
+
+        // The process limit accounts the live handle table and refuses a
+        // ceiling below the current usage.
+        c.x[0] = process_limit;
+        c.x[1] = 1;
+        c.x[2] = 0;
+        dispatch(c, 0x7e);
+        record("limit_low", &[c.x[0]]);
+        c.x[0] = process_limit;
+        c.x[1] = 1;
+        c.x[2] = 4;
+        dispatch(c, 0x7e);
+        record("limit_raised", &[c.x[0]]);
+
+        let mut peaks = Vec::new();
+        for (handle, which) in [
+            (process_limit, 1u64),
+            (process_limit, 0),
+            (limit, 5),
+            (0xdead, 0),
+        ] {
+            c.x[1] = handle;
+            c.x[2] = which;
+            dispatch(c, 0x37);
+            peaks.push(c.x[0]);
+            peaks.push(c.x[1]);
+        }
+        record("limit_peaks", &peaks);
+
+        c.x[0] = limit;
+        c.x[1] = 5;
+        c.x[2] = 1;
+        dispatch(c, 0x7e);
+        record("limit_bad_which", &[c.x[0]]);
+        c.x[0] = 0xdead;
+        c.x[1] = 0;
+        c.x[2] = 1;
+        dispatch(c, 0x7e);
+        record("limit_bad_handle", &[c.x[0]]);
+        c.halt();
+    }
+
+    #[test]
+    fn resource_limits_create_set_and_peak() {
+        run_guest(limits_created);
+        let process = observed("limit_process");
+        assert_eq!(process[0], RESULT_SUCCESS);
+        let created = observed("limit_created");
+        assert_eq!(created[0], RESULT_SUCCESS);
+        assert_ne!(created[1], 0);
+        assert_ne!(created[1], process[1], "a separate limit object");
+        assert_eq!(
+            observed("limit_zeros"),
+            vec![
+                RESULT_SUCCESS,
+                0,
+                RESULT_SUCCESS,
+                0,
+                RESULT_SUCCESS,
+                0,
+                RESULT_SUCCESS,
+                0,
+                RESULT_SUCCESS,
+                0,
+            ]
+        );
+        assert_eq!(observed("limit_set"), vec![RESULT_SUCCESS]);
+        assert_eq!(
+            observed("limit_after"),
+            vec![RESULT_SUCCESS, 8, RESULT_SUCCESS, 0, RESULT_SUCCESS, 0]
+        );
+        assert_eq!(observed("limit_low"), vec![RESULT_INVALID_STATE]);
+        assert_eq!(observed("limit_raised"), vec![RESULT_SUCCESS]);
+        let peaks = observed("limit_peaks");
+        assert_eq!(peaks[0], RESULT_SUCCESS);
+        assert_eq!(peaks[1], 1, "the main thread is the peak thread count");
+        assert_eq!(peaks[2], RESULT_SUCCESS);
+        assert_ne!(peaks[3], 0, "peak memory is the used memory");
+        assert_eq!(peaks[4], RESULT_INVALID_ENUM);
+        assert_eq!(peaks[6], RESULT_INVALID_HANDLE);
+        assert_eq!(observed("limit_bad_which"), vec![RESULT_INVALID_ENUM]);
+        assert_eq!(observed("limit_bad_handle"), vec![RESULT_INVALID_HANDLE]);
+    }
 }

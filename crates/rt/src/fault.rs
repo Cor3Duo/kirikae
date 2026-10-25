@@ -21,6 +21,13 @@ pub fn current_cpu() -> Option<*const Cpu> {
     (!c.is_null()).then_some(c as *const Cpu)
 }
 
+// A host access violation inside the guest reservation is reported and exits
+// with code 4. These cannot go through the Horizon user exception path: the
+// handler only receives the faulting host address, the guest instruction
+// cannot be resumed, and returning to the interrupted Cpu would need a
+// non-local jump out of the host signal frame. Guest faults the runtime can see
+// at instruction level (unmapped or misaligned jumps, undefined instructions)
+// do take that path instead.
 fn report(host_addr: usize) {
     let base = BASE.load(Ordering::Relaxed);
     if base == 0 || host_addr < base || host_addr as u64 - base as u64 > ADDR_MASK + 0x10000 {
@@ -41,7 +48,9 @@ fn report(host_addr: usize) {
             );
             let mut fp = c.x[29];
             for _ in 0..16 {
-                let Some(rec) = p.memory.read(fp, 16) else { break };
+                let Some(rec) = p.memory.read(fp, 16) else {
+                    break;
+                };
                 let next = u64::from_le_bytes(rec[..8].try_into().unwrap());
                 let lr = u64::from_le_bytes(rec[8..].try_into().unwrap());
                 if lr == 0 {
@@ -86,7 +95,10 @@ mod sys {
     const CONTINUE_SEARCH: i32 = 0;
 
     unsafe extern "system" {
-        fn AddVectoredExceptionHandler(first: u32, handler: unsafe extern "system" fn(*mut ExceptionPointers) -> i32) -> *mut c_void;
+        fn AddVectoredExceptionHandler(
+            first: u32,
+            handler: unsafe extern "system" fn(*mut ExceptionPointers) -> i32,
+        ) -> *mut c_void;
     }
 
     unsafe extern "system" fn handler(info: *mut ExceptionPointers) -> i32 {

@@ -21,7 +21,20 @@ pub enum Cat {
 }
 
 pub const CATS: usize = 12;
-pub const NAMES: [&str; CATS] = ["native", "interp", "svc", "ipc", "gpu", "present", "video", "unlocked", "lock wait", "kernel wait", "blocked", "sleep"];
+pub const NAMES: [&str; CATS] = [
+    "native",
+    "interp",
+    "svc",
+    "ipc",
+    "gpu",
+    "present",
+    "video",
+    "unlocked",
+    "lock wait",
+    "kernel wait",
+    "blocked",
+    "sleep",
+];
 pub const HELD: [Cat; 4] = [Cat::Native, Cat::Interp, Cat::Svc, Cat::Ipc];
 
 pub struct Slots {
@@ -150,14 +163,23 @@ pub fn count_simd(word: u32) {
 }
 
 pub fn write_simd_hist() {
-    let Some(path) = std::env::var_os("KIRIKAE_SIMD_HIST") else { return };
+    let Some(path) = std::env::var_os("KIRIKAE_SIMD_HIST") else {
+        return;
+    };
     let mut rows: Vec<(u32, u64)> = match &*SIMD_HIST.lock().unwrap() {
         Some(h) => h.iter().map(|(w, n)| (*w, *n)).collect(),
         None => return,
     };
     rows.sort_by_key(|r| std::cmp::Reverse(r.1));
-    let text: String = rows.iter().map(|(w, n)| format!("{w:08x} {n}
-")).collect();
+    let text: String = rows
+        .iter()
+        .map(|(w, n)| {
+            format!(
+                "{w:08x} {n}
+"
+            )
+        })
+        .collect();
     let _ = std::fs::write(path, text);
 }
 
@@ -176,7 +198,12 @@ pub fn count_op(op: u32) {
 static SIMD_HIST_ON: AtomicBool = AtomicBool::new(false);
 
 pub fn op_hist() -> Vec<(usize, u64)> {
-    let mut rows: Vec<(usize, u64)> = OP_HIST.iter().enumerate().map(|(i, n)| (i, n.load(Ordering::Relaxed))).filter(|r| r.1 > 0).collect();
+    let mut rows: Vec<(usize, u64)> = OP_HIST
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (i, n.load(Ordering::Relaxed)))
+        .filter(|r| r.1 > 0)
+        .collect();
     rows.sort_by_key(|r| std::cmp::Reverse(r.1));
     rows
 }
@@ -186,6 +213,13 @@ pub fn snapshot() -> Vec<(String, [u64; CATS], u64, u64)> {
         .lock()
         .unwrap()
         .iter()
-        .map(|s| (s.name.clone(), std::array::from_fn(|i| s.ns[i].load(Ordering::Relaxed)), s.simd.load(Ordering::Relaxed), s.ops.load(Ordering::Relaxed)))
+        .map(|s| {
+            (
+                s.name.clone(),
+                std::array::from_fn(|i| s.ns[i].load(Ordering::Relaxed)),
+                s.simd.load(Ordering::Relaxed),
+                s.ops.load(Ordering::Relaxed),
+            )
+        })
         .collect()
 }

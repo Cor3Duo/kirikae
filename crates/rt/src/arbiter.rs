@@ -1,9 +1,9 @@
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use crate::cpu::Cpu;
-use crate::horizon::{ok, RESULT_INVALID_STATE, RESULT_TIMED_OUT};
+use crate::horizon::{RESULT_INVALID_STATE, RESULT_TIMED_OUT, ok};
 use crate::kernel::{KObject, KThread};
 use crate::sched::{self, SyncState, WaitKind};
 
@@ -38,14 +38,23 @@ fn inherit(c: &Cpu, st: &mut SyncState) {
         .filter_map(|w| Some((thread(w.tag)?, thread(c.ld32(w.key) as u32 & !HAS_WAITERS)?)))
         .collect();
     drop(handles);
-    let before: Vec<(u64, i32)> = st.boosted.iter().map(|t| (t.id, t.inherited.load(Ordering::Relaxed))).collect();
+    let before: Vec<(u64, i32)> = st
+        .boosted
+        .iter()
+        .map(|t| (t.id, t.inherited.load(Ordering::Relaxed)))
+        .collect();
     let mut lent: HashMap<u64, i32> = HashMap::new();
     let mut changed = true;
     while changed {
         changed = false;
         for (waiter, owner) in &edges {
-            let p = waiter.priority.load(Ordering::Relaxed).min(lent.get(&waiter.id).copied().unwrap_or(i32::MAX));
-            if p < owner.priority.load(Ordering::Relaxed) && p < lent.get(&owner.id).copied().unwrap_or(i32::MAX) {
+            let p = waiter
+                .priority
+                .load(Ordering::Relaxed)
+                .min(lent.get(&waiter.id).copied().unwrap_or(i32::MAX));
+            if p < owner.priority.load(Ordering::Relaxed)
+                && p < lent.get(&owner.id).copied().unwrap_or(i32::MAX)
+            {
                 lent.insert(owner.id, p);
                 changed = true;
             }
@@ -61,7 +70,11 @@ fn inherit(c: &Cpu, st: &mut SyncState) {
             st.boosted.push(owner);
         }
     }
-    let after: Vec<(u64, i32)> = st.boosted.iter().map(|t| (t.id, t.inherited.load(Ordering::Relaxed))).collect();
+    let after: Vec<(u64, i32)> = st
+        .boosted
+        .iter()
+        .map(|t| (t.id, t.inherited.load(Ordering::Relaxed)))
+        .collect();
     if before != after {
         c.process().sched.gil.changed();
     }
@@ -81,7 +94,12 @@ pub fn arbitrate_lock(c: &mut Cpu) {
         inherit(c, &mut st);
         id
     };
-    let what = || format!("ArbitrateLock({addr:#x}, owner {owner:#x}) from {}", p.describe(c.x[30]));
+    let what = || {
+        format!(
+            "ArbitrateLock({addr:#x}, owner {owner:#x}) from {}",
+            p.describe(c.x[30])
+        )
+    };
     match sched::block(c, -1, what, |st| st.woken.remove(&id)) {
         Some(r) => c.x[0] = r,
         None => {
@@ -117,7 +135,12 @@ pub fn wait_process_wide_key(c: &mut Cpu) {
         p.sched.touch();
         st.add_waiter(WaitKind::CondVar, key, mutex, tag, priority(c))
     };
-    let what = || format!("WaitProcessWideKeyAtomic(cv {key:#x}, mutex {mutex:#x}) from {}", p.describe(c.x[30]));
+    let what = || {
+        format!(
+            "WaitProcessWideKeyAtomic(cv {key:#x}, mutex {mutex:#x}) from {}",
+            p.describe(c.x[30])
+        )
+    };
     if let Some(r) = sched::block(c, timeout, what, |st| st.woken.remove(&id)) {
         c.x[0] = r;
         return;
@@ -156,9 +179,15 @@ pub fn signal_process_wide_key(c: &mut Cpu) {
     let p = c.process();
     let mut st = p.sched.lock();
     let queue = st.queue(WaitKind::CondVar, key);
-    let n = if count <= 0 { queue.len() } else { (count as usize).min(queue.len()) };
+    let n = if count <= 0 {
+        queue.len()
+    } else {
+        (count as usize).min(queue.len())
+    };
     for w in &queue[..n] {
-        let old = c.update32(w.mutex, |word| Some(if word == 0 { w.tag } else { word | HAS_WAITERS }));
+        let old = c.update32(w.mutex, |word| {
+            Some(if word == 0 { w.tag } else { word | HAS_WAITERS })
+        });
         if old == 0 {
             st.wake(w.id, 0);
         } else {
@@ -186,7 +215,9 @@ pub fn wait_for_address(c: &mut Cpu) {
         let wait = match kind {
             0 => cur < value,
             1 => {
-                let old = c.update32(addr, |cur| ((cur as i32) < value).then(|| (cur as i32).wrapping_sub(1) as u32));
+                let old = c.update32(addr, |cur| {
+                    ((cur as i32) < value).then(|| (cur as i32).wrapping_sub(1) as u32)
+                });
                 (old as i32) < value
             }
             2 => cur == value,
@@ -216,7 +247,11 @@ pub fn signal_to_address(c: &mut Cpu) {
     let p = c.process();
     let mut st = p.sched.lock();
     let queue = st.queue(WaitKind::Address, addr);
-    let n = if count <= 0 { queue.len() } else { (count as usize).min(queue.len()) };
+    let n = if count <= 0 {
+        queue.len()
+    } else {
+        (count as usize).min(queue.len())
+    };
     if kind != 0 {
         let new = match kind {
             1 => value.wrapping_add(1),

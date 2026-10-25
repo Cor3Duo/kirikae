@@ -11,7 +11,9 @@ const CLOCK_SOURCE: [u8; 16] = *b"kirikae-steady\0\0";
 const LOCATION: &str = "UTC";
 
 fn now_unix() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 fn steady_seconds(c: &Cpu) -> i64 {
@@ -33,22 +35,20 @@ fn system_context(c: &Cpu) -> Vec<u8> {
 
 fn shared(c: &Cpu) -> (Arc<SharedMemory>, u32) {
     let s = c.process().service_state("time.shared", || {
-        {
-            let p = c.process();
-            let (mem, handle) = p.create_shared_memory(SHARED_SIZE);
-            let put = |offset: u64, padding: u64, value: &[u8]| {
-                mem.write(&p.memory, offset, &1u32.to_le_bytes());
-                mem.write(&p.memory, offset + 4 + padding + value.len() as u64, value);
-            };
-            let mut steady = 0u64.to_le_bytes().to_vec();
-            steady.extend_from_slice(&CLOCK_SOURCE);
-            put(0x00, 4, &steady);
-            let ctx = system_context(c);
-            put(0x38, 4, &ctx);
-            put(0x80, 4, &ctx);
-            put(0xc8, 0, &[0]);
-            (mem, handle)
-        }
+        let p = c.process();
+        let (mem, handle) = p.create_shared_memory(SHARED_SIZE);
+        let put = |offset: u64, padding: u64, value: &[u8]| {
+            mem.write(&p.memory, offset, &1u32.to_le_bytes());
+            mem.write(&p.memory, offset + 4 + padding + value.len() as u64, value);
+        };
+        let mut steady = 0u64.to_le_bytes().to_vec();
+        steady.extend_from_slice(&CLOCK_SOURCE);
+        put(0x00, 4, &steady);
+        let ctx = system_context(c);
+        put(0x38, 4, &ctx);
+        put(0x80, 4, &ctx);
+        put(0xc8, 0, &[0]);
+        (mem, handle)
     });
     (s.0.clone(), s.1)
 }
@@ -57,12 +57,28 @@ pub struct Time {
     pub name: &'static str,
 }
 
+impl Time {
+    /// Commands whose reply does not need the process, kept apart from `call` so they
+    /// can be tested without a guest CPU.
+    fn stateless_command(&self, req: &Request) -> Option<Reply> {
+        match req.cmd {
+            // IsStandardNetworkSystemClockAccuracySufficient: no network clock is
+            // provided, so its accuracy is never sufficient. Output bool.
+            200 => Some(Reply::ok().u8(0)),
+            _ => None,
+        }
+    }
+}
+
 impl Service for Time {
     fn name(&self) -> String {
         self.name.into()
     }
 
     fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
+        if let Some(r) = self.stateless_command(req) {
+            return r;
+        }
         match req.cmd {
             0 | 1 | 4 | 5 => Reply::ok().object(Arc::new(SystemClock)),
             2 => Reply::ok().object(Arc::new(SteadyClock)),
@@ -143,7 +159,14 @@ fn calendar(posix: i64) -> Vec<u8> {
     let (y, m, d) = civil_from_days(days);
     let mut v = Vec::with_capacity(0x20);
     v.extend_from_slice(&(y as i16).to_le_bytes());
-    v.extend_from_slice(&[m as u8, d as u8, (secs / 3600) as u8, (secs / 60 % 60) as u8, (secs % 60) as u8, 0]);
+    v.extend_from_slice(&[
+        m as u8,
+        d as u8,
+        (secs / 3600) as u8,
+        (secs / 60 % 60) as u8,
+        (secs % 60) as u8,
+        0,
+    ]);
     let weekday = (days + 4).rem_euclid(7) as u32;
     let yday = (days - days_from_civil(y, 1, 1)) as u32;
     v.extend_from_slice(&weekday.to_le_bytes());
@@ -190,8 +213,15 @@ impl Service for TimeZone {
             201 | 202 => {
                 let d = &req.data;
                 let year = i16::from_le_bytes([d[0], d[1]]) as i64;
-                let (mon, day, h, mi, s) = (d[2] as u32, d[3] as u32, d[4] as i64, d[5] as i64, d[6] as i64);
-                let posix = days_from_civil(year, mon.max(1), day.max(1)) * 86_400 + h * 3600 + mi * 60 + s;
+                let (mon, day, h, mi, s) = (
+                    d[2] as u32,
+                    d[3] as u32,
+                    d[4] as i64,
+                    d[5] as i64,
+                    d[6] as i64,
+                );
+                let posix =
+                    days_from_civil(year, mon.max(1), day.max(1)) * 86_400 + h * 3600 + mi * 60 + s;
                 if let Some(out) = req.c.first().or(req.b.first()) {
                     p.memory.write(out.addr, &posix.to_le_bytes());
                 }
@@ -218,5 +248,27 @@ mod tests {
 
     fn civil_days(y: i64, m: u32, d: u32) -> i64 {
         (0..).find(|&n| civil_from_days(n) == (y, m, d)).unwrap()
+    }
+
+    #[test]
+    fn time_u_200_reports_network_accuracy_as_one_false_byte() {
+        let time = Time { name: "time:u" };
+        let r = time
+            .stateless_command(&Request {
+                cmd: 200,
+                ..Request::default()
+            })
+            .expect("IsStandardNetworkSystemClockAccuracySufficient");
+        assert_eq!(r.result, 0);
+        assert_eq!(r.data, vec![0]);
+        assert!(r.objects.is_empty() && r.copy_handles.is_empty() && r.move_handles.is_empty());
+
+        assert!(
+            time.stateless_command(&Request {
+                cmd: 201,
+                ..Request::default()
+            })
+            .is_none()
+        );
     }
 }

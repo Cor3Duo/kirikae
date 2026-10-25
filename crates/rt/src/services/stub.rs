@@ -1,5 +1,5 @@
 use crate::cpu::Cpu;
-use crate::services::{result, Reply, Request, Service};
+use crate::services::{Reply, Request, Service, result};
 
 const STUB_OUTPUT: usize = 0x20;
 
@@ -38,7 +38,9 @@ pub struct Stub {
 
 impl Stub {
     pub fn new(name: &str) -> Stub {
-        Stub { name: name.to_string() }
+        Stub {
+            name: name.to_string(),
+        }
     }
 }
 

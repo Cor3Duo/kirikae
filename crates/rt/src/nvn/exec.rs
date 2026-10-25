@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use super::resources::Surface;
 use super::shadow::{Clear, Cmd, Draw, stage_group};
@@ -17,7 +17,11 @@ struct EndCheck {
     regs: BTreeMap<usize, (u64, u32, u32)>,
 }
 
-static DIFFER: Mutex<EndCheck> = Mutex::new(EndCheck { segments: 0, bindings: 0, regs: BTreeMap::new() });
+static DIFFER: Mutex<EndCheck> = Mutex::new(EndCheck {
+    segments: 0,
+    bindings: 0,
+    regs: BTreeMap::new(),
+});
 
 static REASONS: Mutex<BTreeMap<String, u64>> = Mutex::new(BTreeMap::new());
 
@@ -63,7 +67,12 @@ pub fn writes_checked(words: usize, differ: usize) {
 }
 
 pub fn expect_draw(regs: Vec<u32>, cbs: Bindings, draw: crate::gpu::threed::Draw) {
-    DRAWS.lock().unwrap().get_or_insert_with(DrawCheck::default).expected.push_back((regs, cbs, draw));
+    DRAWS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(DrawCheck::default)
+        .expected
+        .push_back((regs, cbs, draw));
 }
 
 pub fn cp_draw(regs: &[u32], cbs: &Bindings, draw: &crate::gpu::threed::Draw) {
@@ -77,7 +86,9 @@ pub fn cp_draw(regs: &[u32], cbs: &Bindings, draw: &crate::gpu::threed::Draw) {
     if format!("{sim_draw:?}") != format!("{draw:?}") {
         c.params += 1;
         if c.params <= 8 {
-            eprintln!("kirikae: nvn exec draw check: host {sim_draw:?}, command processor {draw:?}");
+            eprintln!(
+                "kirikae: nvn exec draw check: host {sim_draw:?}, command processor {draw:?}"
+            );
         }
     }
     let tag = if draw.topology == CLEAR { 0x10000 } else { 0 };
@@ -89,7 +100,10 @@ pub fn cp_draw(regs: &[u32], cbs: &Bindings, draw: &crate::gpu::threed::Draw) {
     for gr in 0..5 {
         for s in 0..crate::gpu::threed::CB_SLOTS {
             if sim_cbs[gr][s] != cbs[gr][s] {
-                c.bindings.entry((gr, s)).or_insert_with(|| (0, format!("{:x?} vs {:x?}", sim_cbs[gr][s], cbs[gr][s]))).0 += 1;
+                c.bindings
+                    .entry((gr, s))
+                    .or_insert_with(|| (0, format!("{:x?} vs {:x?}", sim_cbs[gr][s], cbs[gr][s])))
+                    .0 += 1;
             }
         }
     }
@@ -112,7 +126,9 @@ pub fn checked(simulated: &[u32], actual: &[u32], sim: &Bindings, cp: &Bindings)
         for g in 0..5 {
             for s in 0..crate::gpu::threed::CB_SLOTS {
                 if sim[g][s] != cp[g][s] {
-                    let e = b.entry((g, s)).or_insert_with(|| (0, format!("{:x?} vs {:x?}", sim[g][s], cp[g][s])));
+                    let e = b
+                        .entry((g, s))
+                        .or_insert_with(|| (0, format!("{:x?} vs {:x?}", sim[g][s], cp[g][s])));
                     e.0 += 1;
                 }
             }
@@ -131,8 +147,15 @@ pub static FALLBACK: AtomicU64 = AtomicU64::new(0);
 
 pub enum Step {
     Regs(Arc<super::encode::Prediction>),
-    Bind { group: usize, slot: usize, binding: Option<(u64, u32)> },
-    Write { at: u64, words: Vec<u32> },
+    Bind {
+        group: usize,
+        slot: usize,
+        binding: Option<(u64, u32)>,
+    },
+    Write {
+        at: u64,
+        words: Vec<u32>,
+    },
     Draw(crate::gpu::threed::Draw),
     Clear(u32),
 }
@@ -159,8 +182,11 @@ impl Tracker {
     pub(super) fn apply(&mut self, cmd: &Cmd) {
         match cmd {
             Cmd::Program(object, id, p) => {
-                if (self.program_object, self.program_id) != (*object, *id) || !Arc::ptr_eq(&self.program, p) {
-                    (self.program_object, self.program_id, self.program) = (*object, *id, p.clone());
+                if (self.program_object, self.program_id) != (*object, *id)
+                    || !Arc::ptr_eq(&self.program, p)
+                {
+                    (self.program_object, self.program_id, self.program) =
+                        (*object, *id, p.clone());
                     self.generation += 1;
                 }
             }
@@ -171,19 +197,34 @@ impl Tracker {
                     }
                 }
             }
-            Cmd::Uniform { stage, index, range } => {
+            Cmd::Uniform {
+                stage,
+                index,
+                range,
+            } => {
                 if let Some(g) = stage_group(*stage) {
-                    self.uniforms.insert((g, index + 3), (range.0, range.1.next_multiple_of(0x100).min(0x10000)));
+                    self.uniforms.insert(
+                        (g, index + 3),
+                        (range.0, range.1.next_multiple_of(0x100).min(0x10000)),
+                    );
                 }
             }
-            Cmd::Vertex { index, address, size } => {
+            Cmd::Vertex {
+                index,
+                address,
+                size,
+            } => {
                 let moved = self.vertex.insert(*index, *address) != Some(*address);
                 let resized = self.vertex_sizes.insert(*index, *size) != Some(*size);
                 if moved || resized {
                     self.generation += 1;
                 }
             }
-            Cmd::Texture { stage, index, handle } => {
+            Cmd::Texture {
+                stage,
+                index,
+                handle,
+            } => {
                 if let Some(g) = stage_group(*stage) {
                     self.textures.insert((g, *index), *handle);
                 }
@@ -200,7 +241,12 @@ impl Tracker {
                     self.generation += 1;
                 }
             }
-            Cmd::Storage { stage, index, address, size } => {
+            Cmd::Storage {
+                stage,
+                index,
+                address,
+                size,
+            } => {
                 if let Some(g) = stage_group(*stage) {
                     self.storage.insert((g, *index), (*address, *size));
                 }
@@ -219,7 +265,12 @@ impl Tracker {
             vertex_sizes: self.vertex_sizes.iter().map(|(k, v)| (*k, *v)).collect(),
             textures: self.textures.iter().map(|(k, v)| (*k, *v)).collect(),
             state: self.target_state(),
-            surfaces: self.surfaces.iter().enumerate().filter_map(|(k, s)| s.map(|s| (k as u8, s))).collect(),
+            surfaces: self
+                .surfaces
+                .iter()
+                .enumerate()
+                .filter_map(|(k, s)| s.map(|s| (k as u8, s)))
+                .collect(),
             all_targets: self.targets,
             pools: self.pools,
             program: self.program_object,
@@ -229,21 +280,36 @@ impl Tracker {
     }
 
     pub(super) fn layers(&self, cl: &Clear) -> u32 {
-        let index = if cl.what & 0x3c != 0 { (cl.what >> 6 & 7) as usize } else { 8 };
+        let index = if cl.what & 0x3c != 0 {
+            (cl.what >> 6 & 7) as usize
+        } else {
+            8
+        };
         self.surfaces[index].map_or(1, |s| s.layers.max(1))
     }
 
     pub(super) fn clear(&self, cl: &Clear) -> Clear {
         let index = (cl.what >> 6 & 7) as usize;
-        let target = if cl.what & 0x3c != 0 { self.targets[index] } else { self.targets[8] };
-        Clear { target, ..cl.clone() }
+        let target = if cl.what & 0x3c != 0 {
+            self.targets[index]
+        } else {
+            self.targets[8]
+        };
+        Clear {
+            target,
+            ..cl.clone()
+        }
     }
 
     fn target_state(&self) -> Vec<(Field, u64)> {
         let mut state: Vec<(Field, u64)> = self.state.iter().map(|(k, v)| (*k, *v)).collect();
         for (k, s) in self.surfaces.iter().enumerate() {
             if let Some(s) = s {
-                state.push(if k < 8 { (Field(Kind::TargetFormat, k as u8), s.format as u64) } else { (Field(Kind::DepthFormat, 0), s.format as u64) });
+                state.push(if k < 8 {
+                    (Field(Kind::TargetFormat, k as u8), s.format as u64)
+                } else {
+                    (Field(Kind::DepthFormat, 0), s.format as u64)
+                });
             }
         }
         state
@@ -259,21 +325,42 @@ pub fn report() {
     if d.segments > 0 {
         let mut regs: Vec<_> = d.regs.iter().collect();
         regs.sort_by_key(|r| std::cmp::Reverse(r.1.0));
-        let regs: Vec<String> = regs.iter().take(40).map(|(r, (n, s, a))| format!("{r:#x} {n} ({s:#x} vs {a:#x})")).collect();
-        eprintln!("kirikae:         nvn exec check: {} segments, {} with other constant buffer bindings; registers left different: {}", d.segments, d.bindings, regs.join(", "));
+        let regs: Vec<String> = regs
+            .iter()
+            .take(40)
+            .map(|(r, (n, s, a))| format!("{r:#x} {n} ({s:#x} vs {a:#x})"))
+            .collect();
+        eprintln!(
+            "kirikae:         nvn exec check: {} segments, {} with other constant buffer bindings; registers left different: {}",
+            d.segments,
+            d.bindings,
+            regs.join(", ")
+        );
         let b = BINDINGS.lock().unwrap();
         let mut b: Vec<_> = b.iter().collect();
         b.sort_by_key(|x| std::cmp::Reverse(x.1.0));
-        let b: Vec<String> = b.iter().take(16).map(|((g, s), (n, ex))| format!("group {g} slot {s}: {n} ({ex})")).collect();
+        let b: Vec<String> = b
+            .iter()
+            .take(16)
+            .map(|((g, s), (n, ex))| format!("group {g} slot {s}: {n} ({ex})"))
+            .collect();
         eprintln!("kirikae:         nvn exec check bindings: {}", b.join("; "));
     }
     if let Some(c) = DRAWS.lock().unwrap().as_ref() {
         let mut regs: Vec<_> = c.regs.iter().collect();
         regs.sort_by_key(|r| std::cmp::Reverse(r.1.0));
-        let regs: Vec<String> = regs.iter().take(40).map(|(r, (n, s, a))| format!("{r:#x} {n} ({s:#x} vs {a:#x})")).collect();
+        let regs: Vec<String> = regs
+            .iter()
+            .take(40)
+            .map(|(r, (n, s, a))| format!("{r:#x} {n} ({s:#x} vs {a:#x})"))
+            .collect();
         let mut b: Vec<_> = c.bindings.iter().collect();
         b.sort_by_key(|x| std::cmp::Reverse(x.1.0));
-        let b: Vec<String> = b.iter().take(12).map(|((g, s), (n, ex))| format!("group {g} slot {s}: {n} ({ex})")).collect();
+        let b: Vec<String> = b
+            .iter()
+            .take(12)
+            .map(|((g, s), (n, ex))| format!("group {g} slot {s}: {n} ({ex})"))
+            .collect();
         eprintln!(
             "kirikae:         nvn exec draw check: {} draws, {} with other parameters, {} not simulated, {} simulated but not drawn; registers: {}; bindings: {}",
             c.draws,
@@ -285,12 +372,18 @@ pub fn report() {
         );
     }
     let w = *WRITES.lock().unwrap();
-    eprintln!("kirikae:         nvn exec writes: {} segments, {} words, {} differ from the command processor", w.0, w.1, w.2);
+    eprintln!(
+        "kirikae:         nvn exec writes: {} segments, {} words, {} differ from the command processor",
+        w.0, w.1, w.2
+    );
     let r = REASONS.lock().unwrap();
     let mut r: Vec<_> = r.iter().collect();
     r.sort_by_key(|x| std::cmp::Reverse(*x.1));
     let r: Vec<String> = r.iter().take(16).map(|(k, n)| format!("{k} {n}")).collect();
-    eprintln!("kirikae:         nvn exec fallback reasons: {}", r.join(", "));
+    eprintln!(
+        "kirikae:         nvn exec fallback reasons: {}",
+        r.join(", ")
+    );
     eprintln!(
         "kirikae:         nvn exec: {} pushbuffer segments run on the host{}, {} left to the command processor",
         EXECUTED.load(Ordering::Relaxed),

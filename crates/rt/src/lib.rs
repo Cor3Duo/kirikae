@@ -32,6 +32,9 @@ pub mod threads;
 pub mod usage;
 
 pub use cpu::{Cpu, HALT_PC};
-pub use kirikae_a64::{ops, SysReg};
 pub use horizon::{svc, undefined};
-pub use process::{call_indirect, program_main, run, run_executable, run_until, Entry, GuestFn, RunOptions, RunResult};
+pub use kirikae_a64::{SysReg, ops};
+pub use process::{
+    Entry, GuestFn, RunOptions, RunResult, call_indirect, program_main, run, run_executable,
+    run_until,
+};

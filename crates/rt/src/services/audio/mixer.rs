@@ -1,4 +1,5 @@
 use super::dsp::{self, AdpcmContext, HISTORY};
+use super::effect::{self, Descriptor, Processor, Specific};
 
 pub const WAVE_BUFFERS: usize = 4;
 pub const VOICE_IN: usize = 0x170;
@@ -12,6 +13,7 @@ const MIX_BUFFERS_MAX: usize = 24;
 const FINAL_MIX: usize = 0;
 const UNUSED_MIX: i32 = i32::MAX;
 const UNUSED_SPLITTER: u32 = u32::MAX;
+pub use super::output::{DEFAULT_DOWNMIX, Frame, MAX_CHANNELS as MAX_OUTPUT_CHANNELS};
 
 const PCM_INT16: u8 = 2;
 const PCM_FLOAT: u8 = 5;
@@ -25,29 +27,37 @@ const SPLITTER_HEADER_MAGIC: u32 = u32::from_le_bytes(*b"SNDH");
 const SPLITTER_MAGIC: u32 = u32::from_le_bytes(*b"SNDI");
 const DESTINATION_MAGIC: u32 = u32::from_le_bytes(*b"SNDD");
 
-const DOWNMIX: [f32; 4] = [1.0, 0.707, 0.251, 0.707];
-
+/// Standard 5.1 to stereo fold-down (Ryujinx `DefaultSurroundToStereoCoefficients`):
+/// front, centre, LFE, back.
 pub trait Mem {
     fn read(&self, addr: u64, len: u64) -> Option<Vec<u8>>;
+    fn write(&self, addr: u64, bytes: &[u8]) -> bool;
 }
 
 impl Mem for crate::mem::GuestMemory {
     fn read(&self, addr: u64, len: u64) -> Option<Vec<u8>> {
         crate::mem::GuestMemory::read(self, addr, len)
     }
+
+    fn write(&self, addr: u64, bytes: &[u8]) -> bool {
+        crate::mem::GuestMemory::write(self, addr, bytes)
+    }
 }
 
 fn u16_at(d: &[u8], o: usize) -> u16 {
-    d.get(o..o + 2).map_or(0, |b| u16::from_le_bytes([b[0], b[1]]))
+    d.get(o..o + 2)
+        .map_or(0, |b| u16::from_le_bytes([b[0], b[1]]))
 }
 fn u32_at(d: &[u8], o: usize) -> u32 {
-    d.get(o..o + 4).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()))
+    d.get(o..o + 4)
+        .map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()))
 }
 fn i32_at(d: &[u8], o: usize) -> i32 {
     u32_at(d, o) as i32
 }
 fn u64_at(d: &[u8], o: usize) -> u64 {
-    d.get(o..o + 8).map_or(0, |b| u64::from_le_bytes(b.try_into().unwrap()))
+    d.get(o..o + 8)
+        .map_or(0, |b| u64::from_le_bytes(b.try_into().unwrap()))
 }
 fn f32_at(d: &[u8], o: usize) -> f32 {
     f32::from_bits(u32_at(d, o))
@@ -229,11 +239,26 @@ impl Voice {
             {
                 self.adpcm = AdpcmContext::parse(&d);
             }
-            let in_loop = buffers_v2 && self.loops > 0 && wb.loop_start != 0 && wb.loop_end != 0 && wb.loop_start <= wb.loop_end;
-            let (start, end) = if in_loop { (wb.loop_start, wb.loop_end) } else { (wb.start, wb.end) };
+            let in_loop = buffers_v2
+                && self.loops > 0
+                && wb.loop_start != 0
+                && wb.loop_end != 0
+                && wb.loop_start <= wb.loop_end;
+            let (start, end) = if in_loop {
+                (wb.loop_start, wb.loop_end)
+            } else {
+                (wb.start, wb.end)
+            };
             let total = end.saturating_sub(start);
             let want = (count - done).min(total.saturating_sub(self.offset) as usize);
-            let Some(got) = self.decode(mem, &wb, u64::from(start + self.offset), want, &coefficients, src) else {
+            let Some(got) = self.decode(
+                mem,
+                &wb,
+                u64::from(start + self.offset),
+                want,
+                &coefficients,
+                src,
+            ) else {
                 self.offset = 0;
                 self.end_buffer();
                 continue;
@@ -265,7 +290,15 @@ impl Voice {
         }
     }
 
-    fn decode(&mut self, mem: &dyn Mem, wb: &WaveBuffer, pos: u64, want: usize, coefficients: &[i16; 16], src: &mut [Vec<f32>]) -> Option<usize> {
+    fn decode(
+        &mut self,
+        mem: &dyn Mem,
+        wb: &WaveBuffer,
+        pos: u64,
+        want: usize,
+        coefficients: &[i16; 16],
+        src: &mut [Vec<f32>],
+    ) -> Option<usize> {
         if want == 0 {
             return Some(0);
         }
@@ -283,9 +316,17 @@ impl Voice {
                     let w = width as usize;
                     let stride = frame as usize;
                     if width == 2 {
-                        s.extend(bytes.chunks_exact(stride).map(|f| i16::from_le_bytes([f[c * w], f[c * w + 1]]) as f32));
+                        s.extend(
+                            bytes
+                                .chunks_exact(stride)
+                                .map(|f| i16::from_le_bytes([f[c * w], f[c * w + 1]]) as f32),
+                        );
                     } else {
-                        s.extend(bytes.chunks_exact(stride).map(|f| f32_at(f, c * w) * 32768.0));
+                        s.extend(
+                            bytes
+                                .chunks_exact(stride)
+                                .map(|f| f32_at(f, c * w) * 32768.0),
+                        );
                     }
                 }
                 Some(n)
@@ -297,7 +338,14 @@ impl Voice {
                     return None;
                 }
                 let bytes = mem.read(wb.addr + first, last - first)?;
-                let n = dsp::decode_adpcm(&bytes, pos, want, coefficients, &mut self.adpcm, &mut src[0]);
+                let n = dsp::decode_adpcm(
+                    &bytes,
+                    pos,
+                    want,
+                    coefficients,
+                    &mut self.adpcm,
+                    &mut src[0],
+                );
                 for s in src.iter_mut().take(channels).skip(1) {
                     s.resize(s.len() + n, 0.0);
                 }
@@ -367,7 +415,12 @@ struct Destination {
 
 impl Default for Destination {
     fn default() -> Destination {
-        Destination { used: false, mix: UNUSED_MIX, volumes: [0.0; MIX_BUFFERS_MAX], previous: [0.0; MIX_BUFFERS_MAX] }
+        Destination {
+            used: false,
+            mix: UNUSED_MIX,
+            volumes: [0.0; MIX_BUFFERS_MAX],
+            previous: [0.0; MIX_BUFFERS_MAX],
+        }
     }
 }
 
@@ -375,6 +428,33 @@ impl Destination {
     fn configured(&self) -> bool {
         self.used && self.mix != UNUSED_MIX && self.mix >= 0
     }
+}
+
+struct EffectSlot {
+    kind: u8,
+    enabled: bool,
+    mix: i32,
+    order: u32,
+    specific: Specific,
+    processor: Processor,
+}
+
+impl Default for EffectSlot {
+    fn default() -> EffectSlot {
+        EffectSlot {
+            kind: 0,
+            enabled: false,
+            mix: UNUSED_MIX,
+            order: 0,
+            specific: Specific::Invalid,
+            processor: Processor::None,
+        }
+    }
+}
+
+#[derive(Default)]
+struct Effects {
+    slots: Vec<EffectSlot>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -398,7 +478,11 @@ pub struct State {
     sinks: Vec<Sink>,
     splitters: Vec<Splitter>,
     destinations: Vec<Destination>,
+    effects: Effects,
     buffers: Vec<f32>,
+    effect_in: Vec<Vec<f32>>,
+    effect_out: Vec<Vec<f32>>,
+    mix_scratch: Vec<f32>,
     src: Vec<Vec<f32>>,
     voice_out: Vec<Vec<f32>>,
     pub elapsed_frames: u64,
@@ -416,7 +500,11 @@ impl State {
             sinks: vec![Sink::default(); sizes.sinks],
             splitters: vec![Splitter::default(); sizes.splitters],
             destinations: vec![Destination::default(); sizes.destinations],
+            effects: Effects::default(),
             buffers: Vec::new(),
+            effect_in: vec![vec![0.0; sizes.sample_count]; effect::MAX_CHANNELS],
+            effect_out: vec![vec![0.0; sizes.sample_count]; effect::MAX_CHANNELS],
+            mix_scratch: vec![0.0; sizes.sample_count],
             src: vec![Vec::new(); MAX_CHANNELS],
             voice_out: vec![vec![0.0; sizes.sample_count]; MAX_CHANNELS],
             elapsed_frames: 0,
@@ -430,7 +518,9 @@ impl State {
 
     pub fn update_channel_resources(&mut self, d: &[u8]) {
         for (i, c) in self.channels.iter_mut().enumerate() {
-            let Some(e) = d.get(i * CHANNEL_RESOURCE_IN..(i + 1) * CHANNEL_RESOURCE_IN) else { break };
+            let Some(e) = d.get(i * CHANNEL_RESOURCE_IN..(i + 1) * CHANNEL_RESOURCE_IN) else {
+                break;
+            };
             for (j, m) in c.mix.iter_mut().enumerate() {
                 *m = f32_at(e, 4 + j * 4);
             }
@@ -442,13 +532,18 @@ impl State {
         let channel_count = self.channels.len();
         for (i, voice) in self.voices.iter_mut().enumerate() {
             let was_in_use = std::mem::take(&mut voice.in_use);
-            let Some(p) = d.get(i * VOICE_IN..(i + 1) * VOICE_IN) else { continue };
+            let Some(p) = d.get(i * VOICE_IN..(i + 1) * VOICE_IN) else {
+                continue;
+            };
             if byte_at(p, 0x09) == 0 {
                 continue;
             }
             let is_new = byte_at(p, 0x08) != 0;
             if is_new {
-                *voice = Voice { fresh: true, ..Voice::default() };
+                *voice = Voice {
+                    fresh: true,
+                    ..Voice::default()
+                };
             }
             voice.in_use = true;
             voice.set_play(byte_at(p, 0x0a));
@@ -461,9 +556,14 @@ impl State {
             voice.base_index = u32_at(p, 0x40) as usize % WAVE_BUFFERS;
             voice.data_source = u64_at(p, 0x48);
             voice.mix_id = i32_at(p, 0x58);
-            voice.splitter_id = if revision >= 2 { u32_at(p, 0x5c) } else { UNUSED_SPLITTER };
+            voice.splitter_id = if revision >= 2 {
+                u32_at(p, 0x5c)
+            } else {
+                UNUSED_SPLITTER
+            };
             for (c, id) in voice.channel_ids.iter_mut().enumerate() {
-                *id = (i32_at(p, 0x140 + c * 4).max(0) as usize).min(channel_count.saturating_sub(1));
+                *id =
+                    (i32_at(p, 0x140 + c * 4).max(0) as usize).min(channel_count.saturating_sub(1));
             }
             if revision >= 5 {
                 voice.flush += u32::from(byte_at(p, 0x159));
@@ -492,7 +592,13 @@ impl State {
                     voice.queued
                 );
                 let buffers: Vec<String> = (0..WAVE_BUFFERS)
-                    .map(|b| format!("{:#x}/{}", u64_at(p, 0x60 + b * WAVE_BUFFER_IN), byte_at(p, 0x60 + b * WAVE_BUFFER_IN + 0x1a)))
+                    .map(|b| {
+                        format!(
+                            "{:#x}/{}",
+                            u64_at(p, 0x60 + b * WAVE_BUFFER_IN),
+                            byte_at(p, 0x60 + b * WAVE_BUFFER_IN + 0x1a)
+                        )
+                    })
                     .collect();
                 eprintln!(
                     "audio:     id {} node {:#x} channels {:?} base {} buffers {buffers:?}",
@@ -512,7 +618,10 @@ impl State {
     }
 
     pub fn update_splitters(&mut self, d: &[u8]) -> usize {
-        if self.splitters.is_empty() || self.destinations.is_empty() || u32_at(d, 0) != SPLITTER_HEADER_MAGIC {
+        if self.splitters.is_empty()
+            || self.destinations.is_empty()
+            || u32_at(d, 0) != SPLITTER_HEADER_MAGIC
+        {
             return 0;
         }
         let splitter_count = u32_at(d, 4) as usize;
@@ -524,11 +633,20 @@ impl State {
             }
             let id = i32_at(d, at + 4);
             let n = (u32_at(d, at + 0xc) as usize).min(self.destinations.len());
-            if let Some(s) = usize::try_from(id).ok().and_then(|id| self.splitters.get_mut(id)) {
-                s.destinations = (0..n).map(|k| i32_at(d, at + 0x10 + k * 4).max(0) as usize).collect();
+            if let Some(s) = usize::try_from(id)
+                .ok()
+                .and_then(|id| self.splitters.get_mut(id))
+            {
+                s.destinations = (0..n)
+                    .map(|k| i32_at(d, at + 0x10 + k * 4).max(0) as usize)
+                    .collect();
             }
             let next = at + 0x10 + n * 4;
-            at = if [SPLITTER_MAGIC, DESTINATION_MAGIC].contains(&u32_at(d, next)) { next } else { next + 0xc };
+            at = if [SPLITTER_MAGIC, DESTINATION_MAGIC].contains(&u32_at(d, next)) {
+                next
+            } else {
+                next + 0xc
+            };
         }
         let stride = (0x70..=0x100)
             .step_by(0x10)
@@ -539,7 +657,10 @@ impl State {
                 break;
             }
             let id = i32_at(d, at + 4);
-            if let Some(dst) = usize::try_from(id).ok().and_then(|id| self.destinations.get_mut(id)) {
+            if let Some(dst) = usize::try_from(id)
+                .ok()
+                .and_then(|id| self.destinations.get_mut(id))
+            {
                 let used = byte_at(d, at + 0x6c) != 0;
                 for (j, v) in dst.volumes.iter_mut().enumerate() {
                     *v = f32_at(d, at + 8 + j * 4);
@@ -557,11 +678,23 @@ impl State {
 
     pub fn update_mixes(&mut self, d: &[u8]) {
         let dirty_only = self.sizes.revision >= 7;
-        let (count, base) = if dirty_only { (u32_at(d, 4) as usize, 0x20) } else { (d.len() / MIX_IN, 0) };
+        let (count, base) = if dirty_only {
+            (u32_at(d, 4) as usize, 0x20)
+        } else {
+            (d.len() / MIX_IN, 0)
+        };
         for i in 0..count {
-            let Some(p) = d.get(base + i * MIX_IN..base + (i + 1) * MIX_IN) else { break };
-            let id = if dirty_only { i32_at(p, 0x10).max(0) as usize } else { i };
-            let Some(mix) = self.mixes.get_mut(id) else { continue };
+            let Some(p) = d.get(base + i * MIX_IN..base + (i + 1) * MIX_IN) else {
+                break;
+            };
+            let id = if dirty_only {
+                i32_at(p, 0x10).max(0) as usize
+            } else {
+                i
+            };
+            let Some(mix) = self.mixes.get_mut(id) else {
+                continue;
+            };
             mix.used = byte_at(p, 0x0c) != 0;
             if mix.used {
                 mix.volume = f32_at(p, 0x00);
@@ -601,38 +734,92 @@ impl State {
         }
     }
 
-    pub fn note_effects(&self, d: &[u8], count: usize) {
-        if !self.trace || count == 0 {
+    pub fn update_effects(&mut self, d: &[u8], count: usize) {
+        if count == 0 || d.is_empty() {
             return;
         }
-        let size = d.len() / count;
+        let stride = if d.len() >= count { d.len() / count } else { 0 };
+        if stride < 0x20 {
+            self.note(|| {
+                format!(
+                    "audio: effects section is {} bytes for {count} effects, needs at least {:#x} each",
+                    d.len(),
+                    effect::EFFECT_SIZE
+                )
+            });
+            return;
+        }
+        if self.effects.slots.len() != count {
+            self.effects.slots = (0..count).map(|_| EffectSlot::default()).collect();
+        }
+        let sample_rate = self.sizes.sample_rate;
         for i in 0..count {
-            let (kind, enabled) = (byte_at(d, i * size), byte_at(d, i * size + 2));
-            if kind != 0 {
-                trace_once(format!("audio: effect {i} type {kind} enabled {enabled} (passed through)"));
+            let Some(e) = d.get(i * stride..(i + 1) * stride) else {
+                break;
+            };
+            let (desc, specific) = effect::parse(e);
+            let slot = &mut self.effects.slots[i];
+            let rebuild =
+                slot.kind != desc.kind || desc.is_new || !slot.processor.matches(&specific);
+            slot.kind = desc.kind;
+            slot.enabled = desc.enabled;
+            slot.mix = desc.mix;
+            slot.order = desc.order;
+            slot.specific = specific;
+            if rebuild {
+                slot.processor = Processor::new(&desc, &specific, sample_rate);
+            } else {
+                slot.processor.reconfigure(&specific, sample_rate);
+            }
+            if self.trace && desc.kind != 0 {
+                let line = describe_effect(i, &desc, &specific);
+                trace_once(line);
             }
         }
     }
 
+    pub fn effect_status(&self) -> Vec<effect::OutStatus> {
+        self.effects
+            .slots
+            .iter()
+            .map(|s| s.processor.out_status(s.enabled, s.kind))
+            .collect()
+    }
+
     pub fn update_sinks(&mut self, d: &[u8]) {
         for (i, sink) in self.sinks.iter_mut().enumerate() {
-            let Some(p) = d.get(i * SINK_IN..(i + 1) * SINK_IN) else { break };
+            let Some(p) = d.get(i * SINK_IN..(i + 1) * SINK_IN) else {
+                break;
+            };
             sink.used = byte_at(p, 1) != 0;
             sink.device = byte_at(p, 0) == SINK_DEVICE;
             if sink.device {
                 let n = (u32_at(p, 0x120) as usize).min(MAX_CHANNELS);
-                sink.inputs = p[0x124..0x124 + n].iter().map(|&b| usize::from(b)).collect();
-                sink.downmix = (byte_at(p, 0x12b) != 0).then(|| std::array::from_fn(|k| f32_at(p, 0x12c + k * 4)));
+                sink.inputs = p[0x124..0x124 + n]
+                    .iter()
+                    .map(|&b| usize::from(b))
+                    .collect();
+                sink.downmix = (byte_at(p, 0x12b) != 0)
+                    .then(|| std::array::from_fn(|k| f32_at(p, 0x12c + k * 4)));
                 if self.trace {
-                    trace_once(format!("audio: sink {i} device inputs {:?} downmix {:?}", sink.inputs, sink.downmix));
+                    trace_once(format!(
+                        "audio: sink {i} device inputs {:?} downmix {:?}",
+                        sink.inputs, sink.downmix
+                    ));
                 }
             }
         }
     }
 
-    pub fn render(&mut self, mem: &dyn Mem, out: &mut Vec<[f32; 2]>) {
+    pub fn render(&mut self, mem: &dyn Mem, out: &mut Vec<Frame>) {
         let n = self.sizes.sample_count;
         self.elapsed_frames += 1;
+        crate::host1x::clock::audio_position(
+            self.elapsed_frames * n as u64,
+            self.sizes.sample_rate,
+            true,
+            crate::host1x::clock::AudioSource::AudRen,
+        );
         if self.trace && self.elapsed_frames.is_multiple_of(400) {
             self.trace_voices(mem);
         }
@@ -641,17 +828,45 @@ impl State {
         for v in 0..self.voices.len() {
             self.render_voice(v, mem);
         }
-        self.render_mixes();
+        self.render_mixes(mem);
         self.write_sink(out);
+    }
+
+    /// Channels and fold-down coefficients requested by the device sink.
+    pub fn output(&self) -> (usize, [f32; 4]) {
+        let sink = self.sinks.iter().find(|s| s.used && s.device);
+        let channels = sink
+            .map(|s| s.inputs.len().clamp(1, MAX_OUTPUT_CHANNELS))
+            .unwrap_or(2);
+        (
+            channels,
+            sink.and_then(|s| s.downmix).unwrap_or(DEFAULT_DOWNMIX),
+        )
     }
 
     fn trace_voices(&self, mem: &dyn Mem) {
         for (i, v) in self.voices.iter().enumerate().filter(|(_, v)| v.in_use) {
             let b = &v.buffers[v.index];
-            let coefficients = mem.read(v.data_source, 32).map(|d| (0..16).map(|k| u16_at(&d, k * 2) as i16).collect::<Vec<_>>());
+            let coefficients = mem.read(v.data_source, 32).map(|d| {
+                (0..16)
+                    .map(|k| u16_at(&d, k * 2) as i16)
+                    .collect::<Vec<_>>()
+            });
             eprintln!(
                 "audio: [{}] voice {i} {:?} volume {} queued {} valid {:?} consumed {} played {} buffer {:#x}+{:#x} {}..{} loop {} eos {}",
-                self.elapsed_frames, v.play, v.volume, v.queued, v.valid, v.consumed, v.played, b.addr, b.size, b.start, b.end, b.looping, b.end_of_stream
+                self.elapsed_frames,
+                v.play,
+                v.volume,
+                v.queued,
+                v.valid,
+                v.consumed,
+                v.played,
+                b.addr,
+                b.size,
+                b.start,
+                b.end,
+                b.looping,
+                b.end_of_stream
             );
             eprintln!(
                 "audio:     sends {:?} coefficients {coefficients:?} adpcm {:?}",
@@ -684,7 +899,11 @@ impl State {
         } else {
             voice.sample_rate as f32 / rate as f32 * voice.pitch
         };
-        let ratio = if ratio.is_finite() { ratio.clamp(0.0, 16.0) } else { 0.0 };
+        let ratio = if ratio.is_finite() {
+            ratio.clamp(0.0, 16.0)
+        } else {
+            0.0
+        };
         let needed = dsp::needed(voice.fraction, ratio, n);
         let channels = voice.channels;
         for (c, s) in self.src.iter_mut().enumerate().take(channels) {
@@ -711,25 +930,51 @@ impl State {
 
         let voice = &self.voices[v];
         if voice.mix_id != UNUSED_MIX {
-            let Some(mix) = usize::try_from(voice.mix_id).ok().and_then(|m| self.mixes.get(m)) else { return };
+            let Some(mix) = usize::try_from(voice.mix_id)
+                .ok()
+                .and_then(|m| self.mixes.get(m))
+            else {
+                return;
+            };
             let (offset, count) = (mix.offset, mix.buffer_count);
             for c in 0..channels {
                 let resource = &mut self.channels[voice.channel_ids[c]];
                 for j in 0..count {
-                    mix_into(&mut self.buffers, offset + j, n, &self.voice_out[c][..n], resource.previous[j], resource.mix[j]);
+                    mix_into(
+                        &mut self.buffers,
+                        offset + j,
+                        n,
+                        &self.voice_out[c][..n],
+                        resource.previous[j],
+                        resource.mix[j],
+                    );
                 }
                 resource.previous = resource.mix;
             }
         } else if let Some(splitter) = self.splitters.get(voice.splitter_id as usize) {
             for c in 0..channels {
                 for &d in splitter.destinations.iter().skip(c).step_by(channels) {
-                    let Some(dst) = self.destinations.get_mut(d) else { continue };
-                    let Some(mix) = usize::try_from(dst.mix).ok().and_then(|m| self.mixes.get(m)) else { continue };
+                    let Some(dst) = self.destinations.get_mut(d) else {
+                        continue;
+                    };
+                    let Some(mix) = usize::try_from(dst.mix)
+                        .ok()
+                        .and_then(|m| self.mixes.get(m))
+                    else {
+                        continue;
+                    };
                     if !dst.configured() {
                         continue;
                     }
                     for j in 0..mix.buffer_count {
-                        mix_into(&mut self.buffers, mix.offset + j, n, &self.voice_out[c][..n], dst.previous[j], dst.volumes[j]);
+                        mix_into(
+                            &mut self.buffers,
+                            mix.offset + j,
+                            n,
+                            &self.voice_out[c][..n],
+                            dst.previous[j],
+                            dst.volumes[j],
+                        );
                     }
                     dst.previous = dst.volumes;
                 }
@@ -748,14 +993,177 @@ impl State {
                 mix.destination
             } else {
                 let splitter = self.splitters.get(mix.splitter as usize)?;
-                splitter.destinations.iter().filter_map(|&d| self.destinations.get(d)).find(|d| d.configured())?.mix
+                splitter
+                    .destinations
+                    .iter()
+                    .filter_map(|&d| self.destinations.get(d))
+                    .find(|d| d.configured())?
+                    .mix
             };
-            at = usize::try_from(next).ok().filter(|&m| m < self.mixes.len())?;
+            at = usize::try_from(next)
+                .ok()
+                .filter(|&m| m < self.mixes.len())?;
         }
         None
     }
 
-    fn render_mixes(&mut self) {
+    fn apply_mix_effects(&mut self, index: usize, mem: &dyn Mem) {
+        let n = self.sizes.sample_count;
+        if n == 0 || self.effects.slots.is_empty() {
+            return;
+        }
+        let Some(mix) = self.mixes.get(index) else {
+            return;
+        };
+        let (offset, count) = (mix.offset, mix.buffer_count);
+        if count == 0 {
+            return;
+        }
+        let sink_rate = self.sizes.sample_rate;
+        let State {
+            effects,
+            buffers,
+            effect_in,
+            effect_out,
+            mix_scratch,
+            ..
+        } = self;
+        let slots = effects.slots.as_mut_slice();
+        let mix_id = index as i32;
+        for order in 0..slots.len() {
+            for slot in slots.iter_mut() {
+                if slot.kind == 0 || slot.mix != mix_id || slot.order as usize != order {
+                    continue;
+                }
+                match &slot.specific {
+                    Specific::BufferMix(p) => {
+                        if !slot.enabled || !p.routable() {
+                            continue;
+                        }
+                        for k in 0..p.mixes {
+                            let (source, target) = (p.input[k], p.output[k]);
+                            let volume = p.volumes[k];
+                            if volume == 0.0
+                                || usize::from(source) >= count
+                                || usize::from(target) >= count
+                            {
+                                continue;
+                            }
+                            let at = (offset + usize::from(source)) * n;
+                            let Some(src) = buffers.get(at..at + n) else {
+                                continue;
+                            };
+                            mix_scratch[..n].copy_from_slice(src);
+                            let at = (offset + usize::from(target)) * n;
+                            if let Some(dst) = buffers.get_mut(at..at + n) {
+                                for (d, s) in dst.iter_mut().zip(&mix_scratch[..n]) {
+                                    *d += *s * volume;
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    Specific::Aux(aux) | Specific::Capture(aux) => {
+                        let channels = aux.route.channels.min(effect::MAX_CHANNELS);
+                        if channels == 0 {
+                            continue;
+                        }
+                        let sources = aux.route.input;
+                        let sinks = aux.route.output;
+                        if (0..channels).any(|c| {
+                            usize::from(sources[c]) >= count || usize::from(sinks[c]) >= count
+                        }) {
+                            continue;
+                        }
+                        for c in 0..channels {
+                            let at = (offset + usize::from(sources[c])) * n;
+                            if let Some(src) = buffers.get(at..at + n) {
+                                effect_in[c][..n].copy_from_slice(src);
+                            }
+                        }
+                        effect::process_aux(
+                            aux,
+                            mem,
+                            &effect_in[..channels],
+                            &mut effect_out[..channels],
+                            n,
+                            slot.enabled,
+                            sink_rate,
+                        );
+                        for c in 0..channels {
+                            let at = (offset + usize::from(sinks[c])) * n;
+                            if let Some(dst) = buffers.get_mut(at..at + n) {
+                                dst.copy_from_slice(&effect_out[c][..n]);
+                            }
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+                let Some(route) = effect::route(&slot.specific) else {
+                    continue;
+                };
+                let channels = route.channels.min(effect::MAX_CHANNELS);
+                if channels == 0 {
+                    continue;
+                }
+                if (0..channels).any(|c| {
+                    usize::from(route.input[c]) >= count || usize::from(route.output[c]) >= count
+                }) {
+                    continue;
+                }
+                if !slot.enabled {
+                    // A disabled effect routes its input to its output changed by
+                    // nothing, as the DSP command generator does.
+                    copy_route(buffers, offset, count, n, &route);
+                    continue;
+                }
+                for (c, input) in effect_in.iter_mut().enumerate().take(channels) {
+                    let at = (offset + usize::from(route.input[c])) * n;
+                    if let Some(src) = buffers.get(at..at + n) {
+                        input[..n].copy_from_slice(src);
+                    }
+                }
+                match &mut slot.processor {
+                    Processor::Delay(delay) => {
+                        delay.process(&effect_in[..channels], &mut effect_out[..channels], n)
+                    }
+                    Processor::Reverb(reverb) => {
+                        reverb.process(&effect_in[..channels], &mut effect_out[..channels], n)
+                    }
+                    Processor::Reverb3d(reverb) => {
+                        reverb.process(&effect_in[..channels], &mut effect_out[..channels], n)
+                    }
+                    Processor::Biquad { state, .. } => {
+                        for c in 0..channels {
+                            effect_out[c][..n].copy_from_slice(&effect_in[c][..n]);
+                            state[c].process(&mut effect_out[c][..n]);
+                        }
+                    }
+                    Processor::Limiter(limiter) => {
+                        limiter.process(&effect_in[..channels], &mut effect_out[..channels], n)
+                    }
+                    Processor::Compressor(compressor) => {
+                        compressor.process(&effect_in[..channels], &mut effect_out[..channels], n)
+                    }
+                    Processor::None => {
+                        // No usable processor: keep the route dry instead of
+                        // muting the channel.
+                        copy_route(buffers, offset, count, n, &route);
+                        continue;
+                    }
+                }
+                for (c, output) in effect_out.iter().enumerate().take(channels) {
+                    let at = (offset + usize::from(route.output[c])) * n;
+                    if let Some(dst) = buffers.get_mut(at..at + n) {
+                        dst.copy_from_slice(&output[..n]);
+                    }
+                }
+            }
+        }
+    }
+
+    fn render_mixes(&mut self, mem: &dyn Mem) {
         let n = self.sizes.sample_count;
         let mut order: Vec<(usize, usize)> = (1..self.mixes.len())
             .filter(|&m| self.mixes[m].used)
@@ -764,12 +1172,17 @@ impl State {
         order.sort_by(|a, b| b.cmp(a));
         let mut src = vec![0.0; n];
         for (_, m) in order {
+            self.apply_mix_effects(m, mem);
             let mix = &self.mixes[m];
             if mix.destination != UNUSED_MIX {
-                let Some(dst) = self.mixes.get(mix.destination as usize) else { continue };
+                let Some(dst) = self.mixes.get(mix.destination as usize) else {
+                    continue;
+                };
                 for i in 0..mix.buffer_count {
                     let at = (mix.offset + i) * n;
-                    let Some(s) = self.buffers.get(at..at + n) else { continue };
+                    let Some(s) = self.buffers.get(at..at + n) else {
+                        continue;
+                    };
                     src.copy_from_slice(s);
                     for j in 0..dst.buffer_count {
                         let volume = mix.volume * mix.volumes[i * MIX_BUFFERS_MAX + j];
@@ -778,55 +1191,79 @@ impl State {
                 }
             } else if let Some(splitter) = self.splitters.get(mix.splitter as usize) {
                 for (k, &d) in splitter.destinations.iter().enumerate() {
-                    let Some(dst) = self.destinations.get(d).filter(|d| d.configured()) else { continue };
-                    let Some(target) = self.mixes.get(dst.mix as usize) else { continue };
+                    let Some(dst) = self.destinations.get(d).filter(|d| d.configured()) else {
+                        continue;
+                    };
+                    let Some(target) = self.mixes.get(dst.mix as usize) else {
+                        continue;
+                    };
                     let at = (mix.offset + k % mix.buffer_count.max(1)) * n;
-                    let Some(s) = self.buffers.get(at..at + n) else { continue };
+                    let Some(s) = self.buffers.get(at..at + n) else {
+                        continue;
+                    };
                     src.copy_from_slice(s);
                     for j in 0..target.buffer_count {
                         let volume = mix.volume * dst.volumes[j];
-                        mix_into(&mut self.buffers, target.offset + j, n, &src, volume, volume);
+                        mix_into(
+                            &mut self.buffers,
+                            target.offset + j,
+                            n,
+                            &src,
+                            volume,
+                            volume,
+                        );
                     }
                 }
             }
         }
+        self.apply_mix_effects(FINAL_MIX, mem);
         let fin = &self.mixes[FINAL_MIX];
         if fin.volume != 1.0 {
-            let range = fin.offset * n..((fin.offset + fin.buffer_count) * n).min(self.buffers.len());
+            let range =
+                fin.offset * n..((fin.offset + fin.buffer_count) * n).min(self.buffers.len());
             for s in &mut self.buffers[range] {
                 *s *= fin.volume;
             }
         }
     }
 
-    fn write_sink(&self, out: &mut Vec<[f32; 2]>) {
+    fn write_sink(&self, out: &mut Vec<Frame>) {
         let n = self.sizes.sample_count;
         out.clear();
         let fin = &self.mixes[FINAL_MIX];
         let Some(sink) = self.sinks.iter().find(|s| s.used && s.device) else {
-            out.resize(n, [0.0; 2]);
+            out.resize(n, [0.0; MAX_OUTPUT_CHANNELS]);
             return;
         };
+        let count = sink.inputs.len().min(MAX_OUTPUT_CHANNELS);
         let channel = |k: usize| -> Option<&[f32]> {
             let b = fin.offset + *sink.inputs.get(k)?;
             self.buffers.get(b * n..(b + 1) * n)
         };
         let silent = vec![0.0; n];
-        let ch: Vec<&[f32]> = (0..sink.inputs.len()).map(|k| channel(k).unwrap_or(&silent)).collect();
+        let ch: Vec<&[f32]> = (0..count).map(|k| channel(k).unwrap_or(&silent)).collect();
         let scale = 1.0 / 32768.0;
-        let clamp = |s: f32| (s * scale).clamp(-1.0, 1.0);
         for i in 0..n {
-            let [l, r] = match ch.len() {
-                0 => [0.0; 2],
-                1 => [ch[0][i]; 2],
-                2..=5 => [ch[0][i], ch[1][i]],
-                _ => {
-                    let k = sink.downmix.unwrap_or(DOWNMIX);
-                    let common = ch[2][i] * k[1] + ch[3][i] * k[2];
-                    [ch[0][i] * k[0] + common + ch[4][i] * k[3], ch[1][i] * k[0] + common + ch[5][i] * k[3]]
-                }
-            };
-            out.push([clamp(l), clamp(r)]);
+            let mut frame = [0.0f32; MAX_OUTPUT_CHANNELS];
+            for (k, source) in ch.iter().enumerate().take(count) {
+                frame[k] = (source[i] * scale).clamp(-1.0, 1.0);
+            }
+            out.push(frame);
+        }
+    }
+}
+
+fn copy_route(buffers: &mut [f32], offset: usize, count: usize, n: usize, route: &effect::Route) {
+    let channels = route.channels.min(effect::MAX_CHANNELS);
+    for c in 0..channels {
+        let from = usize::from(route.input[c]);
+        let to = usize::from(route.output[c]);
+        if from >= count || to >= count || from == to {
+            continue;
+        }
+        let src = (offset + from) * n..(offset + from + 1) * n;
+        if src.end <= buffers.len() {
+            buffers.copy_within(src, (offset + to) * n);
         }
     }
 }
@@ -847,7 +1284,9 @@ fn mix_into(buffers: &mut [f32], buffer: usize, n: usize, src: &[f32], from: f32
     if from == 0.0 && to == 0.0 {
         return;
     }
-    let Some(dst) = buffers.get_mut(buffer * n..(buffer + 1) * n) else { return };
+    let Some(dst) = buffers.get_mut(buffer * n..(buffer + 1) * n) else {
+        return;
+    };
     let step = (to - from) / n.max(1) as f32;
     let mut v = from;
     for (d, s) in dst.iter_mut().zip(src) {
@@ -857,17 +1296,112 @@ fn mix_into(buffers: &mut [f32], buffer: usize, n: usize, src: &[f32], from: f32
 }
 
 fn trace_once(line: String) {
-    static SEEN: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+    static SEEN: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+        std::sync::Mutex::new(None);
     let mut seen = SEEN.lock().unwrap();
-    if seen.get_or_insert_with(Default::default).insert(line.clone()) {
+    if seen
+        .get_or_insert_with(Default::default)
+        .insert(line.clone())
+    {
         eprintln!("{line}");
     }
+}
+
+fn describe_effect(index: usize, desc: &Descriptor, specific: &Specific) -> String {
+    let detail = match specific {
+        Specific::BufferMix(p) => {
+            format!("buffer mix, {} routes", p.mixes)
+        }
+        Specific::Aux(p) | Specific::Capture(p) => format!(
+            "{} {} channels {:.1} kHz storage {} send {:#x} return {:#x}",
+            specific.label(),
+            p.route.channels,
+            p.sample_rate as f32 / 1000.0,
+            p.storage,
+            p.send_info,
+            p.return_info
+        ),
+        Specific::Biquad(p) => format!(
+            "biquad {} channels b {:?} a {:?}",
+            p.route.channels, p.b, p.a
+        ),
+        Specific::Delay(p) => format!(
+            "delay {}..{}ms feedback {:.3} spread {:.3} lowpass {:.3} wet {:.3} dry {:.3} {} channels",
+            p.delay_time,
+            p.delay_time_max,
+            p.feedback_gain,
+            p.channel_spread,
+            p.low_pass,
+            p.out_gain,
+            p.dry_gain,
+            p.route.channels
+        ),
+        Specific::Reverb(p) => format!(
+            "reverb channels {} early {}/{} late {}/{} pre {:.2}ms decay {:.0}ms hf {:.3} colour {:.3} gains {:.2}/{:.2}/{:.2}",
+            p.channels,
+            p.early_mode,
+            p.early_gain,
+            p.late_mode,
+            p.late_gain,
+            p.pre_delay,
+            p.decay_time,
+            p.hf_decay_ratio,
+            p.coloration,
+            p.reverb_gain,
+            p.out_gain,
+            p.dry_gain
+        ),
+        Specific::Reverb3d(p) => format!(
+            "3d reverb {} channels {:.1} kHz decay {:.0}ms hf {:.2} room {:.0}mB reflect {:.0}mB reverb {:.0}mB diffusion {:.0}% density {:.0}% dry {:.2}",
+            p.route.channels,
+            p.sample_rate as f32 / 1000.0,
+            p.decay_time,
+            p.hf_decay_ratio,
+            p.room_gain,
+            p.reflections_gain,
+            p.reverb_gain,
+            p.diffusion,
+            p.density,
+            p.dry_gain
+        ),
+        Specific::Limiter(p) => format!(
+            "limiter {} channels {:.1} kHz threshold {:.3} attack {:.3} release {:.3} gains {:.2}/{:.2} delay {} samples statistics {}",
+            p.route.channels,
+            p.sample_rate as f32 / 1000.0,
+            p.threshold,
+            p.attack,
+            p.release,
+            p.input_gain,
+            p.output_gain,
+            p.delay,
+            p.statistics_enabled
+        ),
+        Specific::Compressor(p) => format!(
+            "compressor {} channels {:.1} kHz threshold {:.1} dB ratio {:.2} attack {}us release {}us gains {:.2} lin/{:.1} dB makeup {}",
+            p.route.channels,
+            p.sample_rate as f32 / 1000.0,
+            p.threshold,
+            p.ratio,
+            p.attack_us,
+            p.release_us,
+            p.input_gain,
+            p.output_gain,
+            p.makeup
+        ),
+        Specific::Unimplemented(_) => format!("{}, passed through", specific.label()),
+        Specific::Invalid => "invalid".to_string(),
+    };
+    format!(
+        "audio: effect {index} type {} enabled {} mix {} order {} ({detail})",
+        desc.kind, desc.enabled, desc.mix, desc.order
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::Mutex;
 
     struct Fake(HashMap<u64, Vec<u8>>);
 
@@ -878,12 +1412,52 @@ mod tests {
                 bytes.get(start..start + len as usize).map(<[u8]>::to_vec)
             })
         }
+
+        fn write(&self, _addr: u64, _bytes: &[u8]) -> bool {
+            false
+        }
+    }
+
+    /// A flat, writable guest memory used by the auxiliary bus test.
+    struct Ram(Mutex<Vec<u8>>);
+
+    impl Ram {
+        fn new(size: usize) -> Ram {
+            Ram(Mutex::new(vec![0u8; size]))
+        }
+    }
+
+    impl Mem for Ram {
+        fn read(&self, addr: u64, len: u64) -> Option<Vec<u8>> {
+            let memory = self.0.lock().unwrap();
+            let at = addr as usize;
+            memory.get(at..at + len as usize).map(<[u8]>::to_vec)
+        }
+
+        fn write(&self, addr: u64, bytes: &[u8]) -> bool {
+            let mut memory = self.0.lock().unwrap();
+            let at = addr as usize;
+            let Some(dst) = memory.get_mut(at..at + bytes.len()) else {
+                return false;
+            };
+            dst.copy_from_slice(bytes);
+            true
+        }
     }
 
     const BUFFER: u64 = 0x10_0000;
 
     fn sizes() -> Sizes {
-        Sizes { sample_rate: 48000, sample_count: 240, mix_buffers: 2, mixes: 1, voices: 1, sinks: 1, revision: 11, ..Sizes::default() }
+        Sizes {
+            sample_rate: 48000,
+            sample_count: 240,
+            mix_buffers: 2,
+            mixes: 1,
+            voices: 1,
+            sinks: 1,
+            revision: 11,
+            ..Sizes::default()
+        }
     }
 
     fn put_u32(d: &mut [u8], o: usize, v: u32) {
@@ -941,6 +1515,370 @@ mod tests {
         (u64_at(out, 0), u32_at(out, 8))
     }
 
+    fn effect_block(kind: u8, enabled: bool) -> Vec<u8> {
+        let mut e = vec![0u8; effect::EFFECT_SIZE];
+        e[0] = kind;
+        e[1] = 1;
+        e[2] = enabled as u8;
+        put_u32(&mut e, 4, FINAL_MIX as u32);
+        put_u32(&mut e, 0x18, 0);
+        e
+    }
+
+    fn reverb_effect(enabled: bool) -> Vec<u8> {
+        let mut e = effect_block(effect::KIND_REVERB, enabled);
+        e[0x20] = 0;
+        e[0x21] = 1;
+        e[0x26] = 0;
+        e[0x27] = 1;
+        e[0x2C..0x2E].copy_from_slice(&2u16.to_le_bytes());
+        e[0x2E..0x30].copy_from_slice(&2u16.to_le_bytes());
+        put_u32(&mut e, 0x30, 48_000 << 14);
+        for (k, v) in [
+            0,
+            (0.7 * 16384.0) as i32,
+            0,
+            0,
+            16384,
+            (500.0 * 16384.0) as i32,
+            (0.5 * 16384.0) as i32,
+            (0.1 * 16384.0) as i32,
+            16384,
+            16384,
+            16384,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            put_u32(&mut e, 0x34 + k * 4, v as u32);
+        }
+        e
+    }
+
+    fn buffer_mix_effect() -> Vec<u8> {
+        let mut e = effect_block(effect::KIND_BUFFER_MIX, true);
+        // Route buffer 0 into buffer 1 at half volume.
+        e[0x20] = 0;
+        e[0x20 + 24] = 1;
+        put_u32(&mut e, 0x20 + 48, 0.5f32.to_bits());
+        put_u32(&mut e, 0x20 + 48 + 24 * 4, 1);
+        e
+    }
+
+    fn aux_effect(send: u64, ret: u64) -> Vec<u8> {
+        let mut e = effect_block(effect::KIND_AUX_BUS, true);
+        e[0x20] = 0;
+        e[0x20 + 24] = 1;
+        put_u32(&mut e, 0x20 + 0x30, 1);
+        put_u32(&mut e, 0x20 + 0x34, 48_000);
+        put_u32(&mut e, 0x20 + 0x38, 1024);
+        e[0x20 + 0x40..0x20 + 0x48].copy_from_slice(&send.to_le_bytes());
+        e[0x20 + 0x50..0x20 + 0x58].copy_from_slice(&ret.to_le_bytes());
+        e
+    }
+
+    fn compressor_effect() -> Vec<u8> {
+        let mut e = effect_block(effect::KIND_COMPRESSOR, true);
+        e[0x20] = 0;
+        e[0x20 + 6] = 1;
+        e[0x20 + 0x0E..0x20 + 0x10].copy_from_slice(&1u16.to_le_bytes());
+        put_u32(&mut e, 0x20 + 0x10, 48_000);
+        e[0x20 + 0x14..0x20 + 0x18].copy_from_slice(&(-20.0f32).to_le_bytes());
+        e[0x20 + 0x18..0x20 + 0x1C].copy_from_slice(&4.0f32.to_le_bytes());
+        e[0x20 + 0x24..0x20 + 0x28].copy_from_slice(&1.0f32.to_le_bytes());
+        e[0x20 + 0x28..0x20 + 0x2C].copy_from_slice(&1.0f32.to_le_bytes());
+        e[0x20 + 0x2C..0x20 + 0x30].copy_from_slice(&1.0f32.to_le_bytes());
+        e
+    }
+
+    fn limiter_effect(statistics: bool) -> Vec<u8> {
+        let mut e = effect_block(effect::KIND_LIMITER, true);
+        e[0x20] = 0;
+        e[0x20 + 6] = 1;
+        e[0x20 + 0x0E..0x20 + 0x10].copy_from_slice(&1u16.to_le_bytes());
+        put_u32(&mut e, 0x20 + 0x10, 48_000);
+        e[0x20 + 0x24..0x20 + 0x28].copy_from_slice(&0.5f32.to_le_bytes());
+        e[0x20 + 0x28..0x20 + 0x2C].copy_from_slice(&0.01f32.to_le_bytes());
+        e[0x20 + 0x2C..0x20 + 0x30].copy_from_slice(&0.5f32.to_le_bytes());
+        e[0x20 + 0x30..0x20 + 0x34].copy_from_slice(&1.0f32.to_le_bytes());
+        e[0x20 + 0x34..0x20 + 0x38].copy_from_slice(&1.0f32.to_le_bytes());
+        put_u32(&mut e, 0x20 + 0x38, 1);
+        put_u32(&mut e, 0x20 + 0x3C, 1);
+        e[0x20 + 0x41] = statistics as u8;
+        e
+    }
+
+    #[test]
+    fn compressor_effect_compresses_the_final_mix() {
+        let mut s = State::new(sizes());
+        graph(&mut s);
+        let n = s.sizes.sample_count;
+        s.update_effects(&compressor_effect(), 1);
+        s.buffers = vec![0.5 * 32767.0; 2 * n];
+        let mem = Fake(HashMap::new());
+        s.apply_mix_effects(FINAL_MIX, &mem);
+        let expected = 0.5 * 0.2992 * 32767.0;
+        assert!(
+            (s.buffers[2 * n - 1] - expected).abs() < 200.0,
+            "compressed sample {} vs {expected}",
+            s.buffers[2 * n - 1]
+        );
+        let status = s.effect_status()[0];
+        assert_eq!(status.state, effect::status(true, effect::KIND_COMPRESSOR));
+        assert!(!status.result_valid, "the compressor has no result payload");
+    }
+
+    #[test]
+    fn limiter_effect_reports_statistics_in_the_effect_status() {
+        let mut s = State::new(sizes());
+        graph(&mut s);
+        let n = s.sizes.sample_count;
+        s.update_effects(&limiter_effect(true), 1);
+        s.buffers = vec![0.0; 2 * n];
+        s.buffers[..n].fill(28_000.0);
+        let mem = Fake(HashMap::new());
+        s.apply_mix_effects(FINAL_MIX, &mem);
+        let status = s.effect_status()[0];
+        assert_eq!(status.state, effect::status(true, effect::KIND_LIMITER));
+        assert!(status.result_valid);
+        let input_max = f32::from_le_bytes(status.result[0..4].try_into().unwrap());
+        let gain_min = f32::from_le_bytes(status.result[24..28].try_into().unwrap());
+        assert!(
+            (input_max - 28_000.0 / 32767.0).abs() < 1e-4,
+            "input max {input_max}"
+        );
+        assert!(gain_min < 1.0, "compression gain min {gain_min}");
+        assert_eq!(
+            f32::from_le_bytes(status.result[4..8].try_into().unwrap()),
+            0.0
+        );
+
+        // With statistics disabled the specific data is not advertised.
+        s.update_effects(&limiter_effect(false), 1);
+        assert!(!s.effect_status()[0].result_valid);
+    }
+
+    #[test]
+    fn disabled_effect_is_bit_identical_passthrough() {
+        let mut s = State::new(sizes());
+        graph(&mut s);
+        let n = s.sizes.sample_count;
+        s.buffers = (0..2 * n)
+            .map(|i| ((i as f32) * 0.37).sin() * 0.5)
+            .collect();
+        let before = s.buffers.clone();
+        s.update_effects(&reverb_effect(false), 1);
+        assert_eq!(
+            s.effect_status()
+                .iter()
+                .map(|s| s.state)
+                .collect::<Vec<_>>(),
+            vec![effect::status(false, effect::KIND_REVERB)]
+        );
+        let mem = Fake(HashMap::new());
+        s.apply_mix_effects(FINAL_MIX, &mem);
+        assert_eq!(s.buffers, before);
+    }
+
+    #[test]
+    fn enabled_reverb_effect_processes_the_final_mix() {
+        let mut s = State::new(sizes());
+        graph(&mut s);
+        let n = s.sizes.sample_count;
+        s.update_effects(&reverb_effect(true), 1);
+        assert_eq!(
+            s.effect_status()
+                .iter()
+                .map(|s| s.state)
+                .collect::<Vec<_>>(),
+            vec![effect::status(true, effect::KIND_REVERB)]
+        );
+        s.buffers = vec![0.0; 2 * n];
+        s.buffers[0] = 1.0;
+        s.buffers[n] = 1.0;
+        let mem = Fake(HashMap::new());
+        for _ in 0..4 {
+            s.apply_mix_effects(FINAL_MIX, &mem);
+            s.buffers[0] = 1.0;
+            s.buffers[n] = 1.0;
+        }
+        assert!(s.buffers.iter().all(|v| v.is_finite()));
+        assert!(
+            s.buffers[1..n].iter().any(|v| v.abs() > 1e-6),
+            "early reflections must reach samples that were silent"
+        );
+    }
+
+    #[test]
+    fn buffer_mix_effect_routes_with_volume() {
+        let mut s = State::new(sizes());
+        graph(&mut s);
+        let n = s.sizes.sample_count;
+        s.update_effects(&buffer_mix_effect(), 1);
+        s.buffers = vec![0.0; 2 * n];
+        s.buffers[..n].fill(2.0);
+        s.buffers[n..].fill(1.0);
+        let mem = Fake(HashMap::new());
+        s.apply_mix_effects(FINAL_MIX, &mem);
+        assert!(
+            s.buffers[..n].iter().all(|&v| v == 2.0),
+            "input is left alone"
+        );
+        assert!(
+            s.buffers[n..].iter().all(|&v| (v - 2.0).abs() < 1e-6),
+            "output must be the input times the route volume"
+        );
+    }
+
+    #[test]
+    fn aux_bus_exchanges_the_send_and_return_rings() {
+        const SEND: u64 = 0x1000;
+        const RETURN: u64 = 0x4000;
+        let mut s = State::new(sizes());
+        graph(&mut s);
+        let n = s.sizes.sample_count;
+        s.update_effects(&aux_effect(SEND, RETURN), 1);
+        s.buffers = vec![0.0; 2 * n];
+        for (i, v) in s.buffers[..n].iter_mut().enumerate() {
+            *v = (i % 97) as f32 - 48.0;
+        }
+        let mem = Ram::new(0x10_000);
+        // The application has already filled the return ring.
+        let mut returned = Vec::new();
+        for i in 0..n {
+            returned.extend_from_slice(&((i as i32 * 3 - 7).to_le_bytes()));
+        }
+        assert!(mem.write(RETURN + 0x80, &returned));
+
+        s.apply_mix_effects(FINAL_MIX, &mem);
+
+        let returned = mem.read(RETURN + 0x80, n as u64 * 4).unwrap();
+        for (i, sample) in returned.as_chunks::<4>().0.iter().enumerate() {
+            let value = i32::from_le_bytes(*sample) as f32;
+            assert!((s.buffers[n + i] - value).abs() < 1e-6);
+        }
+        let sent = mem.read(SEND + 0x80, n as u64 * 4).unwrap();
+        for (i, sample) in sent.as_chunks::<4>().0.iter().enumerate() {
+            let value = i32::from_le_bytes(*sample) as f32;
+            assert!((value - s.buffers[i]).abs() < 1e-6);
+        }
+        let write = u32::from_le_bytes(mem.read(SEND + 0x44, 4).unwrap().try_into().unwrap());
+        let read = u32::from_le_bytes(mem.read(RETURN + 0x44, 4).unwrap().try_into().unwrap());
+        assert_eq!(write as usize, n);
+        assert_eq!(read, 0, "the send ring owns its own DSP pointer");
+        let read = u32::from_le_bytes(mem.read(RETURN + 0x40, 4).unwrap().try_into().unwrap());
+        assert_eq!(read as usize, n);
+    }
+
+    #[test]
+    fn aux_bus_with_a_mismatched_rate_is_exchanged_without_a_transient() {
+        const SEND: u64 = 0x1000;
+        const RETURN: u64 = 0x4000;
+        const STORAGE: usize = 1024;
+        let mut s = State::new(sizes());
+        graph(&mut s);
+        let n = s.sizes.sample_count;
+        let mut e = aux_effect(SEND, RETURN);
+        put_u32(&mut e, 0x20 + 0x34, 44_100);
+        s.update_effects(&e, 1);
+        let mem = Ram::new(0x10_000);
+        let returned: Vec<u8> = (0..STORAGE)
+            .flat_map(|i| ((i as i32 % 100) - 50).to_le_bytes())
+            .collect();
+        assert!(mem.write(RETURN + 0x80, &returned));
+
+        for block in 0..5 {
+            s.buffers = vec![0.0; 2 * n];
+            for (i, v) in s.buffers[..n].iter_mut().enumerate() {
+                *v = (i % 97) as f32 - 48.0;
+            }
+            s.apply_mix_effects(FINAL_MIX, &mem);
+            for i in 0..n {
+                let index = (block * n + i) % STORAGE;
+                let want =
+                    i32::from_le_bytes(returned[index * 4..index * 4 + 4].try_into().unwrap())
+                        as f32;
+                let got = s.buffers[n + i];
+                assert!(got.is_finite());
+                assert!((got - want).abs() < 1e-6, "block {block} sample {i}");
+            }
+        }
+        let write = u32::from_le_bytes(mem.read(SEND + 0x44, 4).unwrap().try_into().unwrap());
+        let read = u32::from_le_bytes(mem.read(RETURN + 0x40, 4).unwrap().try_into().unwrap());
+        assert_eq!(write as usize, (5 * n) % STORAGE);
+        assert_eq!(read as usize, (5 * n) % STORAGE);
+    }
+
+    #[test]
+    fn disabled_effect_still_routes_its_input_to_its_output() {
+        let mut s = State::new(sizes());
+        graph(&mut s);
+        let n = s.sizes.sample_count;
+        let mut e = reverb_effect(false);
+        e[0x26] = 1;
+        e[0x27] = 0;
+        s.update_effects(&e, 1);
+        s.buffers = vec![0.0; 2 * n];
+        s.buffers[..n].fill(3.0);
+        let mem = Fake(HashMap::new());
+        s.apply_mix_effects(FINAL_MIX, &mem);
+        assert!(s.buffers[n..].iter().all(|&v| v == 3.0));
+    }
+
+    #[test]
+    fn disabling_a_biquad_keeps_the_mix_routed() {
+        let mut s = State::new(sizes());
+        graph(&mut s);
+        let n = s.sizes.sample_count;
+        let mut e = effect_block(effect::KIND_BIQUAD, false);
+        e[0x20] = 0;
+        e[0x26] = 1;
+        e[0x36] = 1;
+        s.update_effects(&e, 1);
+        s.buffers = vec![0.0; 2 * n];
+        s.buffers[..n].fill(-2.0);
+        let mem = Fake(HashMap::new());
+        s.apply_mix_effects(FINAL_MIX, &mem);
+        assert!(s.buffers[n..].iter().all(|&v| v == -2.0));
+    }
+
+    #[test]
+    fn six_channel_sink_keeps_every_channel() {
+        let mut s = State::new(Sizes {
+            mix_buffers: 6,
+            ..sizes()
+        });
+        let n = s.sizes.sample_count;
+        let mut mixes = vec![0u8; 0x20 + MIX_IN];
+        put_u32(&mut mixes, 4, 1);
+        let m = &mut mixes[0x20..];
+        put_u32(m, 0, 1.0f32.to_bits());
+        put_u32(m, 8, 6);
+        m[0x0c] = 1;
+        put_u32(m, 0x924, UNUSED_MIX as u32);
+        put_u32(m, 0x928, UNUSED_SPLITTER);
+        s.update_mixes(&mixes);
+        let mut sink = vec![0u8; SINK_IN];
+        sink[0] = SINK_DEVICE;
+        sink[1] = 1;
+        put_u32(&mut sink, 0x120, 6);
+        for c in 0..6 {
+            sink[0x124 + c] = c as u8;
+        }
+        s.update_sinks(&sink);
+        s.buffers = (0..6 * n)
+            .map(|i| ((i / n) as f32 + 1.0) * 1000.0)
+            .collect();
+        let mut out = Vec::new();
+        s.write_sink(&mut out);
+        assert_eq!(out.len(), n);
+        for (c, sample) in out[10].iter().enumerate().take(6) {
+            let want = ((c + 1) as f32 * 1000.0) / 32768.0;
+            assert!((sample - want).abs() < 1e-6, "channel {c}");
+        }
+        assert_eq!(s.output().0, 6);
+    }
+
     #[test]
     fn pcm_voice_plays_through_the_final_mix_and_reports_consumption() {
         let mut s = State::new(sizes());
@@ -955,15 +1893,15 @@ mod tests {
         let mut frame = Vec::new();
         s.render(&mem, &mut frame);
         assert_eq!(frame.len(), 240);
-        assert_eq!(frame[10], [0.25, 0.0]);
+        assert_eq!(frame[10][..2], [0.25, 0.0]);
         s.update_voices(&voice(false, true, samples, 0), &mut out);
         assert_eq!(status(&out), (240, 0));
 
         s.render(&mem, &mut frame);
         s.update_voices(&voice(false, true, samples, 0), &mut out);
         assert_eq!(status(&out), (400, 1));
-        assert_eq!(frame[100], [0.25, 0.0]);
-        assert_eq!(frame[200], [0.0, 0.0]);
+        assert_eq!(frame[100][..2], [0.25, 0.0]);
+        assert_eq!(frame[200], [0.0; MAX_OUTPUT_CHANNELS]);
     }
 
     #[test]
