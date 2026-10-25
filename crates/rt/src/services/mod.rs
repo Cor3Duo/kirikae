@@ -16,6 +16,7 @@ pub mod audio;
 pub mod lm;
 pub mod mii;
 pub mod mm;
+pub mod nfc;
 pub mod nfp;
 pub mod nvdrv;
 pub mod omm;
@@ -143,6 +144,9 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "irs" => Arc::new(irs::Irs),
         "csrng" => Arc::new(csrng::Csrng),
         "omm" => Arc::new(omm::Omm),
+        "nfc:user" => Arc::new(nfc::Nfc::user()),
+        "nfc:sys" => Arc::new(nfc::Nfc::system()),
+        "nfc:mf:u" => Arc::new(nfc::Nfc::mifare()),
         "pctl" => Arc::new(pctl::Pctl { name: "pctl" }),
         "pdm:qry" => Arc::new(pdm::PdmQry),
         "pctl:s" => Arc::new(pctl::Pctl { name: "pctl:s" }),
