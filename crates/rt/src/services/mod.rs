@@ -7,6 +7,7 @@ pub mod am;
 pub mod fs;
 pub mod hid;
 pub mod hwopus;
+pub mod irs;
 pub mod apm;
 pub mod audio;
 pub mod lm;
@@ -132,6 +133,7 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "lm" => Arc::new(lm::Lm),
         "apm" | "apm:am" => Arc::new(apm::Apm),
         "appletOE" => Arc::new(am::AppletOe),
+        "irs" => Arc::new(irs::Irs),
         "pctl" => Arc::new(pctl::Pctl { name: "pctl" }),
         "pctl:s" => Arc::new(pctl::Pctl { name: "pctl:s" }),
         "pctl:r" => Arc::new(pctl::Pctl { name: "pctl:r" }),
