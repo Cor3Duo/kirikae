@@ -1,29 +1,9 @@
-//! The ARMv8 cryptographic extension instructions that games reach through
-//! `nn::crypto` (AES block rounds, SHA-1/SHA-256 compression and message
-//! schedules) and the checksum helpers (CRC32/CRC32C).
-//!
-//! The AES instructions operate on the 16 bytes of a `Q` register in the order
-//! the register stores them: byte 0 of the vector is byte 0 of the AES state,
-//! which makes the state column-major exactly as FIPS-197 describes it.
-//!
-//! The SHA instructions are transcribed from the Arm pseudocode: a `Q`
-//! register holds four 32-bit lanes, lane 0 in bits 0..32. `SHA1C/P/M` read the
-//! rolling hash state `{A,B,C,D}` from `Vd`, only lane 0 of `Vn` as `E`, and
-//! four message words from `Vm`; `SHA256H`/`SHA256H2` read `{A,B,C,D}` and
-//! `{E,F,G,H}` from their two vector operands. The schedule instructions build
-//! the message expansion the same way the hardware does.
-
 use super::{Env, bits};
 
-/// Bits [31:10] of a three-register crypto word. `Rm` lives in bits 20..16, so
-/// it is masked out of the opcode comparison.
 const CRYPTO3_MASK: u32 = 0xffe0_fc00;
-/// Bits [31:10] of a two-register crypto word (no `Rm` field).
 const CRYPTO2_MASK: u32 = 0xffff_fc00;
 
-/// Reflected form of the CRC-32 polynomial `0x04C11DB7`.
 const CRC32_POLY: u32 = 0xedb8_8320;
-/// Reflected form of the CRC-32C polynomial `0x1EDC6F41`.
 const CRC32C_POLY: u32 = 0x82f6_3b78;
 
 const fn gf_mul(mut a: u8, mut b: u8) -> u8 {
@@ -102,7 +82,6 @@ fn from_bytes(b: [u8; 16]) -> u128 {
     v
 }
 
-/// `AESE`: `SubBytes(ShiftRows(state ^ key))`.
 fn aese(state: [u8; 16], key: [u8; 16]) -> [u8; 16] {
     let mut s = [0u8; 16];
     for i in 0..16 {
@@ -111,14 +90,12 @@ fn aese(state: [u8; 16], key: [u8; 16]) -> [u8; 16] {
     let mut out = [0u8; 16];
     for row in 0..4 {
         for col in 0..4 {
-            // ShiftRows moves row `row` left by `row` columns.
             out[row + 4 * col] = SBOX[s[row + 4 * ((col + row) & 3)] as usize];
         }
     }
     out
 }
 
-/// `AESD`: `InvSubBytes(InvShiftRows(state ^ key))`.
 fn aesd(state: [u8; 16], key: [u8; 16]) -> [u8; 16] {
     let mut s = [0u8; 16];
     for i in 0..16 {
@@ -167,12 +144,10 @@ fn inv_mix_columns(state: [u8; 16]) -> [u8; 16] {
     out
 }
 
-/// `AESMC`: `MixColumns(state)`.
 fn aesmc(state: [u8; 16]) -> [u8; 16] {
     mix_columns(state)
 }
 
-/// `AESIMC`: `InvMixColumns(state)`.
 fn aesimc(state: [u8; 16]) -> [u8; 16] {
     inv_mix_columns(state)
 }
@@ -201,9 +176,6 @@ fn sha1_majority(b: u32, c: u32, d: u32) -> u32 {
     (b & c) | (b & d) | (c & d)
 }
 
-/// `SHA1C`, `SHA1P` and `SHA1M`: four SHA-1 rounds on `x = {A,B,C,D}`, with the
-/// round function selected by the instruction. The round constants are added to
-/// the message words by the caller, as the Arm definitions specify.
 fn sha1_rounds(x: u128, e: u32, w: u128, f: fn(u32, u32, u32) -> u32) -> u128 {
     let mut x = x;
     let mut y = e;
@@ -217,23 +189,17 @@ fn sha1_rounds(x: u128, e: u32, w: u128, f: fn(u32, u32, u32) -> u32) -> u128 {
             .wrapping_add(f(b, c, d))
             .wrapping_add(y)
             .wrapping_add(lane32(w, i));
-        // The pseudocode rotates the 160-bit `y:x` left by 32 after updating
-        // lane 1, which makes the new state `{t, a, ROL(b,30), c}` and leaves
-        // `d` as the next round's `E`.
         x = v4([t, a, b.rotate_left(30), c]);
         y = d;
     }
     x
 }
 
-/// `SHA1SU0`: the first half of the SHA-1 message expansion, `Vd ^= Vm` plus
-/// the two-lane rotation of `Vn:Vd`.
 fn sha1_su0(d: u128, n: u128, m: u128) -> u128 {
     let rotated = v4([lane32(d, 2), lane32(d, 3), lane32(n, 0), lane32(n, 1)]);
     d ^ m ^ rotated
 }
 
-/// `SHA1SU1`: the closing rotate of the SHA-1 message expansion.
 fn sha1_su1(d: u128, n: u128) -> u128 {
     let t = v4([
         lane32(d, 0) ^ lane32(n, 1),
@@ -265,10 +231,6 @@ fn sha256_schedule1(x: u32) -> u32 {
     x.rotate_right(17) ^ x.rotate_right(19) ^ (x >> 10)
 }
 
-/// Four SHA-256 rounds. `x = {A,B,C,D}` and `y = {E,F,G,H}`, `w` holds four
-/// message words with their round constants already added. Returns the new
-/// `{A,B,C,D}` and `{E,F,G,H}`; `SHA256H` writes the first and `SHA256H2` the
-/// second.
 fn sha256_rounds(x_in: u128, y_in: u128, w: u128) -> (u128, u128) {
     let mut x = x_in;
     let mut y = y_in;
@@ -287,10 +249,8 @@ fn sha256_rounds(x_in: u128, y_in: u128, w: u128) -> (u128, u128) {
             .wrapping_add(sha256_sigma1(e))
             .wrapping_add(ch)
             .wrapping_add(lane32(w, i));
-        // `D` and `H` temporarily hold the new `E` and the new `A`.
         x = v4([a, b, c, d.wrapping_add(t)]);
         y = v4([e, f, g, t.wrapping_add(sha256_sigma0(a)).wrapping_add(maj)]);
-        // Rotate the 256-bit `y:x` left by 32.
         let (x3, y3) = (lane32(x, 3), lane32(y, 3));
         x = v4([y3, lane32(x, 0), lane32(x, 1), lane32(x, 2)]);
         y = v4([x3, lane32(y, 0), lane32(y, 1), lane32(y, 2)]);
@@ -298,7 +258,6 @@ fn sha256_rounds(x_in: u128, y_in: u128, w: u128) -> (u128, u128) {
     (x, y)
 }
 
-/// `SHA256SU0`: `Vd + sigma0(Vd shifted up one lane, with Vn lane 0 on top)`.
 fn sha256_su0(d: u128, n: u128) -> u128 {
     v4([
         sha256_schedule0(lane32(d, 1)).wrapping_add(lane32(d, 0)),
@@ -308,8 +267,6 @@ fn sha256_su0(d: u128, n: u128) -> u128 {
     ])
 }
 
-/// `SHA256SU1`: `Vd + sigma1(...) + Vn shifted up one lane, with Vm lane 0 on
-/// top`, in two phases because lanes 2 and 3 consume the words just produced.
 fn sha256_su1(d: u128, n: u128, m: u128) -> u128 {
     let t0 = [lane32(n, 1), lane32(n, 2), lane32(n, 3), lane32(m, 0)];
     let r0 = sha256_schedule1(lane32(m, 2))
@@ -327,9 +284,6 @@ fn sha256_su1(d: u128, n: u128, m: u128) -> u128 {
     v4([r0, r1, r2, r3])
 }
 
-/// One reflected CRC-32 update over the low `bytes * 8` bits of `data`, least
-/// significant byte first, as the Arm pseudocode's bit-reversed polynomial
-/// division defines it.
 fn crc_update(mut crc: u32, data: u64, bytes: u32, poly: u32) -> u32 {
     for i in 0..bytes {
         crc ^= (data >> (8 * i)) as u8 as u32;
@@ -340,7 +294,6 @@ fn crc_update(mut crc: u32, data: u64, bytes: u32, poly: u32) -> u32 {
     crc
 }
 
-/// The polynomial and operand width of a `CRC32*`/`CRC32C*` word.
 fn crc_kind(w: u32) -> Option<(u32, u32)> {
     let kind = match w & CRYPTO3_MASK {
         0x1ac0_4000 => (CRC32_POLY, 1),
@@ -475,9 +428,6 @@ mod tests {
 
     #[test]
     fn aes_round_matches_the_fips_197_intermediate_state() {
-        // FIPS-197 appendix C.1: key 000102..0f, plaintext 00112233..ff. The state
-        // after the first AddRoundKey, ShiftRows and SubBytes is printed in the
-        // standard, and the state after MixColumns follows it.
         let key = [
             0x00u8, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
             0x0e, 0x0f,
@@ -523,9 +473,6 @@ mod tests {
 
     #[test]
     fn aesd_and_aesimc_are_not_dropped_by_the_decoder() {
-        // ARM's AESD adds the round key before InvShiftRows/InvSubBytes, so the
-        // inverse round is checked structurally (the S-box inverse above) and here
-        // for the exact encoding: a known state, key and round trip through exec.
         let state = [
             0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
             0xee, 0xff,
@@ -585,9 +532,6 @@ mod tests {
     const CRC32CW: u32 = 0x1ac0_5800;
     const CRC32CX: u32 = 0x9ac0_5c00;
 
-    /// The encodings the Arm ARM documents, with free register fields set. The
-    /// three-register forms must ignore `Rm`; the two-register forms carry bit
-    /// 11 (SHA1H is `0x5E280800`, not `0x5E280000`).
     #[test]
     fn arm_arm_encodings() {
         for base in [SHA1C, SHA1P, SHA1M, SHA1SU0, SHA256H, SHA256H2, SHA256SU1] {
@@ -608,8 +552,6 @@ mod tests {
             assert!(supported(w), "{w:#010x} should be supported");
         }
 
-        // The opcode field is what selects the operation, so a word one bit
-        // off from a documented encoding must stay unsupported.
         assert!(!supported(0x5e00_7000));
         assert!(!supported(SHA1H - 0x800));
         assert!(!supported(SHA1SU1 - 0x800));
@@ -722,8 +664,6 @@ mod tests {
         w
     }
 
-    /// The SHA-1 schedule is built only with `SHA1SU0`/`SHA1SU1`, and the
-    /// compression only with `SHA1C`/`SHA1P`/`SHA1M`/`SHA1H`.
     fn sha1_compress(e: &mut TestEnv, block: &[u8], state: &[u32; 5]) -> [u32; 5] {
         let w = msg_words(block);
         let ring = [4u32, 5, 6, 7];
@@ -784,8 +724,6 @@ mod tests {
         state
     }
 
-    /// The SHA-256 schedule is built only with `SHA256SU0`/`SHA256SU1`, and the
-    /// compression only with `SHA256H`/`SHA256H2`.
     fn sha256_compress(e: &mut TestEnv, block: &[u8], state: &[u32; 8]) -> [u32; 8] {
         let w = msg_words(block);
         let ring = [4u32, 5, 6, 7];
@@ -903,7 +841,6 @@ mod tests {
 
     #[test]
     fn crc32_matches_the_known_check_value_across_widths() {
-        // "123456789" with the usual all-ones seed and final complement.
         for (op, tail, width) in [
             (CRC32B, CRC32B, 1),
             (CRC32H, CRC32B, 2),
