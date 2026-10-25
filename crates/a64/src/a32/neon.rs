@@ -1,24 +1,8 @@
-//! Advanced SIMD (NEON) decoding for the A32 slice.
-//!
-//! NEON lives in the unconditional space (`cond = 0b1111`): bits 27:25 = `001` is the
-//! data-processing space (`0xF2`/`0xF3`) and `010` is the load/store space (`0xF4`).
-//! The slice covers the structure transfers, the three-register arithmetic and logic
-//! groups, the two-register absolute/negate/reverse group, `vext` and the modified
-//! immediates. Everything else is rejected with a [`DecodeError`].
-//!
-//! # Register fields
-//!
-//! A `d` register is `D:Vd` and a `q` register is the pair that starts at that `d`; for
-//! the 128-bit forms the low bit of the register field is zero, so `q(n)` is named by
-//! `d(2n)`. `N` (bit 7) and `M` (bit 5) extend `Vn` and `Vm` the same way `D` extends
-//! `Vd`.
-
 use super::decode::{DecodeError, vinsn};
 use super::ir::{Cond, Insn, NeonMem, Operand, PostUpdate, Reg, VecShape};
 use super::opcode::Opcode;
 use super::vfp::d as double;
 
-/// Decodes the two Advanced SIMD spaces.
 pub(super) fn decode(pc: u32, word: u32) -> Result<Insn, DecodeError> {
     match (word >> 25) & 0b111 {
         0b001 => data_processing(pc, word),
@@ -31,31 +15,25 @@ fn reg(bits: u32) -> Reg {
     Reg::from_encoding(bits)
 }
 
-/// The three-register and two-register data-processing groups.
 fn data_processing(pc: u32, word: u32) -> Result<Insn, DecodeError> {
-    // `1111 001i 1D11 ...`: the two-register group.
     if word & 0x0fb0_0000 == 0x03b0_0000 {
         return two_register(pc, word);
     }
-    // `1111 0010 1D11 ...`: `vext`.
     if word & 0x0fb0_0000 == 0x02b0_0000 {
         if word & 0x10 != 0 {
             return Err(DecodeError::Unallocated);
         }
         return extract(pc, word);
     }
-    // `1111 001i 1D00 0imm3 ... 1 imm4`: modified immediate.
     if word & 0x0eb0_0010 == 0x0280_0010 {
         return modified_immediate(pc, word);
     }
-    // `1111 001U 0Dsize ...`: three registers of the same length.
     if word & 0x0080_0000 == 0 {
         return three_same(pc, word);
     }
     Err(DecodeError::Unsupported)
 }
 
-/// `vext`: bytes taken from the concatenation of `Vn` and `Vm`.
 fn extract(pc: u32, word: u32) -> Result<Insn, DecodeError> {
     let q = word & 0x40 != 0;
     let index = (word >> 8) & 0xf;
@@ -80,11 +58,6 @@ fn extract(pc: u32, word: u32) -> Result<Insn, DecodeError> {
     ))
 }
 
-/// `1111 001U 0Dsize Vn Vd opc1 N Q M x Vm`: the three-register groups.
-///
-/// Bit 4 splits the table in two halves; the operation is selected by `U`, the element
-/// size and `opc1`. The bitwise mnemonics use the size field as their own selector,
-/// which is why they carry no element suffix and a fixed element size here.
 fn three_same(pc: u32, word: u32) -> Result<Insn, DecodeError> {
     let u = word & 0x0100_0000 != 0;
     let size = (word >> 20) & 3;
@@ -99,20 +72,16 @@ fn three_same(pc: u32, word: u32) -> Result<Insn, DecodeError> {
     let esize = 8u8 << size;
 
     let (opcode, style) = match (bit4, u, size, opc1) {
-        // Logic: the size field selects the operation, not the element width.
         (true, false, 0, 0b0001) => (Opcode::Vand, 8),
         (true, false, 1, 0b0001) => (Opcode::Vbic, 8),
         (true, false, 2, 0b0001) => (Opcode::Vorr, 8),
         (true, false, 3, 0b0001) => (Opcode::Vorn, 8),
         (true, true, 0, 0b0001) => (Opcode::Veor, 8),
         (true, true, 1, 0b0001) => (Opcode::Vbsl, 8),
-        // Integer and float addition and subtraction.
         (false, false, _, 0b1000) => (Opcode::Vadd, esize),
         (false, true, _, 0b1000) => (Opcode::Vsub, esize),
         (false, false, 0, 0b1101) => (Opcode::VaddF, 32),
         (false, false, 2, 0b1101) => (Opcode::VsubF, 32),
-        // Integer multiply and multiply-accumulate, and the float multipliers, which
-        // share opc1; bit 4 and U select the form.
         (false, false, _, 0b1001) => (Opcode::VmlaI, esize),
         (false, true, _, 0b1001) => (Opcode::VmlsI, esize),
         (true, false, _, 0b1001) => (Opcode::Vmul, esize),
@@ -121,15 +90,12 @@ fn three_same(pc: u32, word: u32) -> Result<Insn, DecodeError> {
         (true, false, 2, 0b1100) => (Opcode::Vfms, 32),
         (true, false, 0, 0b1101) => (Opcode::VmlaF, 32),
         (true, false, 2, 0b1101) => (Opcode::VmlsF, 32),
-        // Maximum and minimum, signed and unsigned, plus the float forms. Bit 4
-        // selects between the two.
         (false, false, _, 0b0110) => (Opcode::Vmax, esize),
         (false, true, _, 0b0110) => (Opcode::VmaxU, esize),
         (true, false, _, 0b0110) => (Opcode::Vmin, esize),
         (true, true, _, 0b0110) => (Opcode::VminU, esize),
         (false, false, 0, 0b1111) => (Opcode::VmaxF, 32),
         (false, false, 2, 0b1111) => (Opcode::VminF, 32),
-        // Comparisons.
         (false, false, _, 0b0011) => (Opcode::Vcgt, esize),
         (false, true, _, 0b0011) => (Opcode::VcgtU, esize),
         (true, false, _, 0b0011) => (Opcode::Vcge, esize),
@@ -140,7 +106,6 @@ fn three_same(pc: u32, word: u32) -> Result<Insn, DecodeError> {
         (true, true, _, 0b1000) => (Opcode::Vceq, esize),
         _ => return Err(DecodeError::Unsupported),
     };
-    // A quadword names an even `d` register.
     let dest = double(vd, word & 0x0040_0000 != 0);
     let first = double(vn, nbit);
     let second = double(vm, mbit);
@@ -157,10 +122,6 @@ fn three_same(pc: u32, word: u32) -> Result<Insn, DecodeError> {
     ))
 }
 
-/// `1111 0011 1D11 size Vd opc(5) Q M 0 Vm`: the two-register group.
-///
-/// Only the absolute value, the negation, the reversed-element forms and `vmvn` are
-/// modelled; the table lookups and the `vdup` lane form are rejected.
 fn two_register(pc: u32, word: u32) -> Result<Insn, DecodeError> {
     let vd = (word >> 12) & 0xf;
     let vm = word & 0xf;
@@ -199,8 +160,6 @@ fn two_register(pc: u32, word: u32) -> Result<Insn, DecodeError> {
     ))
 }
 
-/// The modified immediate: `vmov`, `vorr`, `vmvn` and `vbic` with a value expanded from
-/// eight bits by `cmode`. The float and 64-bit encodings are not modelled.
 fn modified_immediate(pc: u32, word: u32) -> Result<Insn, DecodeError> {
     let vd = (word >> 12) & 0xf;
     let q = word & 0x40 != 0;
@@ -210,7 +169,6 @@ fn modified_immediate(pc: u32, word: u32) -> Result<Insn, DecodeError> {
         | (word & 0xf)
         | (if word & 0x0100_0000 != 0 { 0x80 } else { 0 });
     if cmode == 0b1111 || (cmode == 0b1110 && complement) {
-        // A float immediate, and the 64-bit form of `vmov`.
         return Err(DecodeError::Unsupported);
     }
     let (esize, value) = match cmode & 0b1110 {
@@ -229,7 +187,6 @@ fn modified_immediate(pc: u32, word: u32) -> Result<Insn, DecodeError> {
         (true, false) => Opcode::VorrImm,
         (true, true) => Opcode::VbicImm,
     };
-    // The encoded value fills the lane and repeats over the register.
     let mut expanded = 0u64;
     let mut shift = 0u32;
     while shift < 64 {
@@ -250,8 +207,6 @@ fn modified_immediate(pc: u32, word: u32) -> Result<Insn, DecodeError> {
     ))
 }
 
-/// Register count, register stride and interleaved stream count of a structure
-/// transfer, from the `type` field.
 struct Structure {
     count: u8,
     stride: u8,
@@ -289,12 +244,6 @@ fn structure_type(kind: u32) -> Option<Structure> {
     }
 }
 
-/// `1111 0100 0D10 Rn Vd type size align Rm` (load) and the same with bit 21 clear
-/// (store).
-///
-/// The block transfer (`0D00 … 1011`) and the single-lane forms are rejected: the
-/// first is the VFP `vldm`/`vstm` encoding, which `vfp.rs` already decodes, and the
-/// second names an element index in the register list.
 fn structure(pc: u32, word: u32) -> Result<Insn, DecodeError> {
     if word & 0x0080_0000 != 0 {
         return Err(DecodeError::Unsupported);
@@ -312,7 +261,6 @@ fn structure(pc: u32, word: u32) -> Result<Insn, DecodeError> {
         (0, _) => 8,
         (1, _) => 16,
         (2, _) => 32,
-        // 64-bit elements only exist for the non-interleaved forms.
         (_, 1) => 64,
         _ => return Err(DecodeError::Unallocated),
     };

@@ -1,24 +1,7 @@
-//! A32 (ARM mode) instruction IR.
-//!
-//! One [`Insn`] per 32-bit ARM word: condition field, mnemonic, flag side effect and a
-//! flat operand list. The operand layout is fixed per [`Opcode`] (see its table), so a
-//! later lowering pass can match on `(opcode, operands)` without reading the encoding
-//! again.
-//!
-//! The IR stays close to the encoding on purpose: shifts keep their kind and amount,
-//! memory operands keep base, offset and addressing mode, and block transfers keep the
-//! register list. That mirrors how `crate::ir` keeps A64 `Stmt`s close to the encoding
-//! and lets one lowering routine serve both the interpreter and a Cranelift backend.
-
 use std::fmt;
 
 use super::opcode::Opcode;
 
-/// One of the sixteen A32 registers.
-///
-/// Reading `PC` inside an instruction yields `address + 8`, as on the architecture; the
-/// IR stores the instruction address in [`Insn::pc`] and leaves that rule to the
-/// consumer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Reg(u8);
 
@@ -59,7 +42,6 @@ impl Reg {
         Reg::PC,
     ];
 
-    /// Returns `None` for `number > 15`.
     pub const fn new(number: u8) -> Option<Reg> {
         if number < 16 { Some(Reg(number)) } else { None }
     }
@@ -68,7 +50,6 @@ impl Reg {
         self.0
     }
 
-    /// Builds a register from the low four bits of an encoding field.
     pub(super) const fn from_encoding(bits: u32) -> Reg {
         Reg((bits & 0xf) as u8)
     }
@@ -88,8 +69,6 @@ impl fmt::Display for Reg {
     }
 }
 
-/// Condition field, bits 31:28. Field value `0b1111` is not a condition and is
-/// reported by [`Cond::from_field`] as `None`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Cond {
@@ -154,7 +133,6 @@ impl Cond {
         self as u32
     }
 
-    /// Suffix as written in assembly (`eq`, `ne`, …); empty for `al`.
     pub const fn suffix(self) -> &'static str {
         match self {
             Cond::Eq => "eq",
@@ -175,8 +153,6 @@ impl Cond {
         }
     }
 
-    /// The complementary condition. `Al` has no complement in the encoding spaces this
-    /// slice decodes, so it maps to itself.
     pub const fn invert(self) -> Cond {
         match self {
             Cond::Eq => Cond::Ne,
@@ -197,8 +173,6 @@ impl Cond {
         }
     }
 
-    /// Evaluates the condition against NZCV packed as the A64 IR packs it: N in bit 31,
-    /// Z in 30, C in 29, V in 28.
     pub const fn holds(self, nzcv: u32) -> bool {
         let n = nzcv >> 31 & 1 == 1;
         let z = nzcv >> 30 & 1 == 1;
@@ -224,7 +198,6 @@ impl Cond {
     }
 }
 
-/// Type pair of a `vcvt` instruction, printed as the mnemonic suffix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Convert {
     F64FromF32,
@@ -262,12 +235,10 @@ impl fmt::Display for Convert {
     }
 }
 
-/// One of the 32 64-bit VFP/Advanced SIMD registers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DReg(u8);
 
 impl DReg {
-    /// Returns `None` for `number > 31`.
     pub const fn new(number: u8) -> Option<DReg> {
         if number < 32 {
             Some(DReg(number))
@@ -276,8 +247,6 @@ impl DReg {
         }
     }
 
-    /// Builds the register named by a four-bit encoding field and its extension bit,
-    /// which is the high bit of the number.
     pub const fn from_parts(field: u8, high: bool) -> DReg {
         DReg((field & 0xf) | (high as u8) << 4)
     }
@@ -293,15 +262,10 @@ impl fmt::Display for DReg {
     }
 }
 
-/// One of the 32 32-bit single-precision registers.
-///
-/// `S(2n)` is the low word of `D(n)` and `S(2n + 1)` its high word, so writing a
-/// single register only touches half of the double register it aliases.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SReg(u8);
 
 impl SReg {
-    /// Returns `None` for `number > 31`.
     pub const fn new(number: u8) -> Option<SReg> {
         if number < 32 {
             Some(SReg(number))
@@ -310,8 +274,6 @@ impl SReg {
         }
     }
 
-    /// Builds the register named by a four-bit encoding field and its extension bit,
-    /// which is the low bit of the number.
     pub const fn from_parts(field: u8, high: bool) -> SReg {
         SReg(((field & 0xf) << 1) | high as u8)
     }
@@ -320,12 +282,10 @@ impl SReg {
         self.0
     }
 
-    /// The double register this one aliases.
     pub const fn d(self) -> DReg {
         DReg(self.0 / 2)
     }
 
-    /// Whether this is the high word of [`SReg::d`].
     pub const fn high(self) -> bool {
         self.0 & 1 == 1
     }
@@ -337,38 +297,27 @@ impl fmt::Display for SReg {
     }
 }
 
-/// Element size and register width of an Advanced SIMD data-processing instruction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct VecShape {
-    /// Element size in bits: 8, 16, 32 or 64.
     pub esize: u8,
-    /// The `Q` bit of the encoding: the operands are 128-bit registers (`q`), which
-    /// the IR names by the first of their two `d` halves.
     pub q: bool,
 }
 
 impl VecShape {
-    /// Lanes per register.
     pub const fn lanes(self) -> u8 {
         (if self.q { 128 } else { 64 }) / self.esize
     }
 
-    /// Bytes per register.
     pub const fn bytes(self) -> u8 {
         if self.q { 16 } else { 8 }
     }
 }
 
-/// System register of the `cp15` transfers the slice models.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum A32SysReg {
-    /// `TPIDRURW`: the thread pointer, user read/write.
     Tpidrurw,
-    /// `TPIDRURO`: the thread pointer, user read-only.
     Tpidruro,
-    /// `CNTPCT`: the 64-bit physical counter, `c14` with opcode 0.
     Cntpct,
-    /// `CNTVCT`: the 64-bit virtual counter, `c14` with opcode 1.
     Cntvct,
 }
 
@@ -389,14 +338,10 @@ impl fmt::Display for A32SysReg {
     }
 }
 
-/// System register named by `vmrs`/`vmsr`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum VfpSys {
-    /// `fpsid`: read-only identification register.
     Fpsid,
-    /// `fpscr`: the status and control register modelled by the interpreter.
     Fpscr,
-    /// `fpexc`: the exception-control register.
     Fpexc,
     Mvfr0,
     Mvfr1,
@@ -404,7 +349,6 @@ pub enum VfpSys {
 }
 
 impl VfpSys {
-    /// Returns `None` for the media registers and the reserved encodings.
     pub const fn from_field(field: u32) -> Option<VfpSys> {
         match field & 0xf {
             0 => Some(VfpSys::Fpsid),
@@ -435,11 +379,9 @@ impl fmt::Display for VfpSys {
     }
 }
 
-/// Destination of `vmrs`: a core register, or the condition flags.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum VfpDest {
     Core(Reg),
-    /// `APSR_nzcv`: the four flags are written from FPSCR bits 31:28.
     Apsr,
 }
 
@@ -452,25 +394,18 @@ impl fmt::Display for VfpDest {
     }
 }
 
-/// A contiguous run of registers transferred by `vldm`/`vstm`/`vpush`/`vpop`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct VBlock {
-    /// `d` register the list starts at. A 32-bit list starts at `s(2 * first)`.
     pub first: DReg,
-    /// `imm8`: registers in 32-bit words. A doubleword list covers `words / 2` `d`
-    /// registers, which is why `vpush {d8-d15}` encodes `words = 16`.
     pub words: u8,
-    /// `sz`: the list is written as `d` registers rather than `s` registers.
     pub double: bool,
     pub base: Reg,
     pub mode: BlockMode,
     pub writeback: bool,
-    /// `vpush`/`vpop` name `sp` implicitly, so the base is not printed.
     pub implicit_base: bool,
 }
 
 impl VBlock {
-    /// Bytes moved by the transfer.
     pub const fn bytes(self) -> u32 {
         self.words as u32 * 4
     }
@@ -486,7 +421,6 @@ impl fmt::Display for VBlock {
             f.write_str(", ")?;
         }
         let prefix = if self.double { 'd' } else { 's' };
-        // `words` counts 32-bit registers, so a doubleword list covers half as many.
         let count = if self.double {
             self.words / 2
         } else {
@@ -506,45 +440,30 @@ impl fmt::Display for VBlock {
     }
 }
 
-/// Update applied to the base register of an Advanced SIMD structure transfer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PostUpdate {
-    /// `[r0]`: the base is left alone.
     None,
-    /// `[r0]!`: the base is advanced by the size of the transfer.
     Immediate,
-    /// `[r0], r1`: the base is advanced by a register after the access.
     Register(Reg),
 }
 
-/// Address operand of `vld1`…`vld4` and `vst1`…`vst4`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NeonMem {
     pub base: Reg,
-    /// First register of the list.
     pub first: DReg,
-    /// Registers in the list, 1 to 4.
     pub count: u8,
-    /// Distance between the registers of the list: 1, or 2 for the encodings that
-    /// name every other register.
     pub stride: u8,
-    /// Element size in bits: 8, 16, 32 or 64.
     pub esize: u8,
-    /// Interleaved streams in memory: 1 for `vld1`/`vst1`, otherwise the number of
-    /// registers.
     pub interleave: u8,
-    /// Alignment in bytes the encoding promises, or `None` for unaligned accesses.
     pub align: Option<u8>,
     pub update: PostUpdate,
 }
 
 impl NeonMem {
-    /// Bytes moved by the transfer.
     pub const fn bytes(&self) -> u32 {
         self.count as u32 * 8
     }
 
-    /// Register number of slot `slot` of the list.
     pub const fn register_number(&self, slot: u8) -> u8 {
         self.first.number() + slot * self.stride
     }
@@ -568,11 +487,6 @@ impl fmt::Display for NeonMem {
     }
 }
 
-/// Shift applied to the second operand of a data-processing instruction or to the index
-/// register of a load/store.
-///
-/// Immediate forms keep the architectural normalisation: `LSR #0` and `ASR #0` mean 32,
-/// and `ROR #0` is decoded as [`Shift::Rrx`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Shift {
     Lsl(u8),
@@ -608,13 +522,10 @@ impl fmt::Display for Shift {
     }
 }
 
-/// A register list of a block transfer, bit *n* set means register *n*.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RegList(u16);
 
 impl RegList {
-    /// Block transfers with an empty list are unpredictable, so they are not
-    /// representable.
     pub const fn new(bits: u16) -> Option<RegList> {
         if bits == 0 { None } else { Some(RegList(bits)) }
     }
@@ -627,7 +538,6 @@ impl RegList {
         self.0 >> reg.number() & 1 == 1
     }
 
-    /// Registers in ascending order.
     pub fn iter(self) -> impl Iterator<Item = Reg> {
         (0..16u8)
             .filter(move |n| self.0 >> n & 1 == 1)
@@ -665,16 +575,12 @@ impl fmt::Display for RegList {
     }
 }
 
-/// Instruction set state of a branch target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ExecState {
     Arm,
     Thumb,
 }
 
-/// Absolute branch target. `addr` is the address the core jumps to; the low bit is
-/// clear, and the interworking branch sets it when it writes `PC`, which the consumer
-/// derives from `state`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Target {
     pub addr: u32,
@@ -686,31 +592,21 @@ pub enum MemSize {
     Byte,
     Halfword,
     Word,
-    /// A register pair: eight bytes, low word first. Only `ldrd`/`strd` use it.
     Double,
 }
 
-/// Offset of a single-register load or store.
-///
-/// Register offsets only ever carry immediate shifts on A32; the register-shift variants
-/// of [`Shift`] are never produced here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Offset {
     Imm(u16),
     Reg { reg: Reg, shift: Shift },
 }
 
-/// Addressing mode of a single-register load or store.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Mem {
     pub base: Reg,
     pub offset: Offset,
-    /// `U` bit: add the offset to the base instead of subtracting it.
     pub add: bool,
-    /// `P` bit: the offset is applied before the access.
     pub pre_indexed: bool,
-    /// `W` bit. A post-indexed access writes the base back even though its `W` bit must
-    /// be zero; use [`Mem::writes_back`] for the effective rule.
     pub writeback: bool,
     pub size: MemSize,
 }
@@ -756,7 +652,6 @@ impl fmt::Display for Mem {
     }
 }
 
-/// Addressing mode of a block transfer, from the `P` and `U` bits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BlockMode {
     IncrementAfter,
@@ -776,7 +671,6 @@ impl BlockMode {
     }
 }
 
-/// Operand of a block transfer: base register, register list and addressing mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Block {
     pub base: Reg,
@@ -795,53 +689,34 @@ impl fmt::Display for Block {
     }
 }
 
-/// Operand of a decoded instruction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Operand {
     Reg(Reg),
-    /// A `d` register, or the first half of the `q` register of a NEON instruction.
     D(DReg),
-    /// One element of a `d` register, `d0[3]`.
     Lane {
         reg: DReg,
         index: u8,
     },
-    /// An `s` register.
     S(SReg),
-    /// Immediate. For data-processing instructions this is the rotated 32-bit value;
-    /// for `movw`/`movt` a 16-bit value; for `svc`/`bkpt` the comment field; for the
-    /// lane and shift amounts of a NEON instruction the encoded index.
     Imm(u32),
-    /// A `vmov.f32` immediate, already expanded from its eight encoded bits.
     ImmFloat32(u32),
-    /// A `vmov.f64` immediate, already expanded from its eight encoded bits.
     ImmFloat64(u64),
-    /// A 64-bit integer immediate, the expansion of a NEON modified immediate.
     Imm64(u64),
-    /// Register with a shift, the `<op2>` of a data-processing instruction.
     Shifted {
         reg: Reg,
         shift: Shift,
     },
-    /// Two consecutive registers of a pair instruction. `lo` comes first in the
-    /// encoding (`Rt`, `RdLo`); `hi` is its pair (`Rt + 1`, `RdHi`).
     Regs {
         lo: Reg,
         hi: Reg,
     },
     Mem(Mem),
     Block(Block),
-    /// Register list of a VFP block transfer.
     VBlock(VBlock),
-    /// Address operand of an Advanced SIMD structure transfer.
     NeonMem(NeonMem),
-    /// System register of `vmrs`/`vmsr`.
     VfpSys(VfpSys),
-    /// Destination of `vmrs`.
     VfpDest(VfpDest),
-    /// Type pair of a `vcvt`.
     Convert(Convert),
-    /// System register of an `mrc`/`mcr`.
     SysReg(A32SysReg),
     Target(Target),
 }
@@ -879,27 +754,18 @@ impl fmt::Display for Operand {
     }
 }
 
-/// One decoded A32 instruction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Insn {
-    /// Address of the instruction.
     pub pc: u32,
-    /// The original encoding.
     pub word: u32,
     pub cond: Cond,
     pub opcode: Opcode,
-    /// `S` bit of a data-processing instruction, or an implicit flag update for
-    /// `tst`/`teq`/`cmp`/`cmn`.
     pub sets_flags: bool,
-    /// Element size and width of an Advanced SIMD data-processing instruction; `None`
-    /// for the ARM and VFP classes.
     pub shape: Option<VecShape>,
     pub operands: Vec<Operand>,
 }
 
 impl Insn {
-    /// Mnemonic including the width, flag and addressing-mode suffixes the assembly
-    /// syntax uses (`ldrbne`, `adds`, `ldmiane`, `stmdb`).
     pub fn mnemonic(&self) -> String {
         let mut name = String::from(self.opcode.mnemonic());
         if matches!(self.opcode, Opcode::Ldr | Opcode::Str)
@@ -931,7 +797,6 @@ impl Insn {
         self.pc.wrapping_add(4)
     }
 
-    /// Branch target, if the instruction is a direct branch.
     pub fn target(&self) -> Option<Target> {
         self.operands.iter().find_map(|operand| match operand {
             Operand::Target(target) => Some(*target),
@@ -946,18 +811,13 @@ impl fmt::Display for Insn {
         let quad = self.shape.is_some_and(|shape| shape.q);
         let mut first = true;
         for operand in self.operands.iter() {
-            // The conversion type of a `vcvt` is printed as the mnemonic suffix.
             if matches!(operand, Operand::Convert(_)) {
                 continue;
             }
             f.write_str(if first { " " } else { ", " })?;
             first = false;
             match operand {
-                // A 128-bit form names the quadword even though the IR stores the first
-                // of its two `d` halves.
                 Operand::D(reg) if quad => write!(f, "q{}", reg.number() / 2)?,
-                // A modified immediate prints one lane; the IR keeps the value that
-                // fills the register.
                 Operand::Imm64(value)
                     if matches!(
                         self.opcode,
