@@ -81,8 +81,8 @@ green is implemented, light green only returns success or constants, gray is mis
  .dnsp / ExeFS / .nso / .nro ──► loader ──► modules (rtld, main, sdk, subsdk*) at their guest addresses
                                   │
                                   ▼
-                             discover ── entry points: module starts, relocations, dynamic symbols,
-                                  │      BL targets, ADR, ADRP+ADD
+                             discover ── entry points: module starts, .eh_frame_hdr/FDEs,
+                                  │      relocations, dynamic symbols, BL targets, ADR, ADRP+ADD
                                   ▼
                      lift (a64) ── IR per instruction ◄── the same IR the interpreter runs
                                   │
@@ -159,7 +159,10 @@ cargo build --release -p kirikae -p kirikae-gui
 kirikae build game.dnsp -o out                        # recompile a whole game into out/game.exe
 kirikae build game.dnsp -o out --profile run.profile  # also compile what a previous run interpreted
 kirikae build game.dnsp -o out --plugin my-crate      # link a crate whose install() runs first
+kirikae build game.dnsp -o out --split 2              # force the code into 2 DLLs (large titles)
 KIRIKAE_STATS=1 out/game.exe                          # fps, GPU work, native calls vs interpreted
+KIRIKAE_HEADLESS=1 KIRIKAE_CAPTURE=frames/window KIRIKAE_CAPTURE_FRAME=300 out/game.exe
+python tools/frame_diff.py frames/window_000300.ppm  # mean error, non-black pixels, histogram
 
 kirikae info game.dnsp                                # modules, segments and decoder coverage
 kirikae testgen hello.nro && kirikae run hello.nro    # built-in test program, interpreter only
@@ -172,6 +175,11 @@ kirikae dev module-dump game.dnsp sdk sdk.bin         # a module's loaded image,
 > On Windows, point `CARGO_TARGET_DIR` at a short folder if the project lives in a long path: the MSVC
 > linker fails on paths over 260 characters.
 
+`kirikae info` breaks decoder coverage down per module: words that lift to IR, SIMD/FP words that run
+through the `a64` runtime helper instead of inlined IR, SIMD/FP words the decoder still does not know,
+and the rest. A low "lifted in IR" number that is matched by "SIMD/FP via helper" is not a decoder
+gap; only "SIMD/FP unsupported" and "other" are.
+
 ### Release package
 
 `python tools/package_release.py` builds `kirikae.exe` and `kirikae-gui.exe` and packs
@@ -181,10 +189,11 @@ against them; `KIRIKAE_RUNTIME=<kirikae-rt folder>` points somewhere else).
 ## Features
 
 **Profile-guided coverage.** The generated executable records every address where the interpreter
-had to take over and writes the list to `<name>.profile` every 10 s (`KIRIKAE_PROFILE=<file>` moves
-it, `0` turns it off). The next `kirikae build` into the same folder reads it (or the one given with
-`--profile`) and compiles those addresses as functions: one play session is usually enough for
-interpretation to disappear. Only use a profile with the same game and version.
+had to take over and writes the list to `<name>.profile` every 10 s and once more when it exits
+(`KIRIKAE_PROFILE=<file>` moves it, `0` turns it off). The next `kirikae build` into the same folder
+reads it (or the one given with `--profile`) and compiles those addresses as functions: one play
+session is usually enough for interpretation to disappear. Only use a profile with the same game and
+version.
 
 **Game coverage reports.** The executable logs every IPC command, SVC, `nvdrv` ioctl and shader
 instruction the game uses, with its status (`implemented`, `stub`, `missing`), into
@@ -200,10 +209,10 @@ presentation pace and act on every presented frame (for example, to fix the cloc
 advances by frame).
 
 **NVN on the host (in progress).** `KIRIKAE_NVN=trace` counts the calls into the game's graphics
-driver, and `KIRIKAE_NVN=shadow` builds a host model of everything the game asks NVN for and checks
-it draw by draw against what the command processor decodes: the groundwork for replacing the game's
-driver with a direct Vulkan implementation. `KIRIKAE_NVN=exec` already draws the command lists the
-model fully understands straight from it and leaves only the rest to the command processor. `KIRIKAE_NVN=exec` already draws the command lists the
+driver. `KIRIKAE_NVN=record` records the calls into guest command memory and replays the recorded
+lists into Vulkan in submission order (lists the host did not record stay on the driver's own path),
+`KIRIKAE_NVN=shadow` builds a host model of everything the game asks NVN for and checks it draw by
+draw against what the command processor decodes, and `KIRIKAE_NVN=exec` draws the command lists the
 model fully understands straight from it and leaves only the rest to the command processor.
 
 ## Configuration
@@ -220,14 +229,15 @@ model fully understands straight from it and leaves only the rest to the command
 | `KIRIKAE_COVERAGE=<file>` | where to write what the game used (default `<exe>.coverage.json`, events in `<exe>-coverage/`; `0` turns it off); `KIRIKAE_COVERAGE_EVENTS=<n>` changes the 200-event limit per run |
 | `KIRIKAE_SIMD_HIST=<file>` | with `KIRIKAE_STATS`, how often each SIMD/FP instruction went through the runtime helper |
 | `KIRIKAE_HEADLESS=1` | no window (frames are still counted) |
+| `KIRIKAE_CAPTURE=<prefix>` | writes one presented frame as a binary PPM (`<prefix>_NNNNNN.ppm`, next to the executable when the prefix is relative) so the pixels can be checked without eyes; with a window it reads the swapchain image, without one the render target, and it writes an all-black frame plus the reason when the target was never drawn to. `python tools/frame_diff.py <file>` reports whether it is black |
+| `KIRIKAE_CAPTURE_FRAME=<n>` | which presented frame `KIRIKAE_CAPTURE` writes, 1-based (default 60) |
 | `KIRIKAE_FRAME_DUMP=<folder>` | writes one presented frame in 60 as PNG; `KIRIKAE_FRAME_DUMP_EVERY`, `_FROM` and `_COUNT` change the interval, start and count |
 | `KIRIKAE_PRESENT_DUMP=<folder>` | writes one swapchain image in 60 as PNG, as it goes to the window |
 | `KIRIKAE_VSYNC=1` | presents waiting for vertical blank (FIFO); otherwise MAILBOX or IMMEDIATE |
 | `KIRIKAE_GPU_TIME=frame` or `live` | what GPU timestamp reports write: one time per frame (the last presented one) or the current time (default) |
 | `KIRIKAE_NO_FRAME_LIMIT=1` | ignores the swap interval the game asks for and lets it run past 60 fps (games whose world advances by frame speed up) |
 | `KIRIKAE_KEEP_NOOP_DRAWS=1` | keeps draws that write nothing (all color masked, no depth, stencil or memory writes), skipped by default |
-| `KIRIKAE_NVN=trace` / `shadow` / `encode` | NVN call counting / host model checked against the command processor (see [Features](#features); slower) / also predicts the 3D registers of every draw from the model and reports the mismatches and the registers not predicted yet |
-| `KIRIKAE_NVN=exec` / `check` | runs the command list segments the model supports on the host instead of the command processor (falls back per segment) / runs everything on the command processor but checks every draw, clear, register and buffer write the host would have produced |
+| `KIRIKAE_NVN=trace` / `record` / `shadow` / `encode` | NVN call counting / record calls into guest command memory and replay them into Vulkan / host model checked against the command processor (see [Features](#features); slower) / also predicts the 3D registers of every draw from the model and reports the mismatches and the registers not predicted yet |
 | `KIRIKAE_NVN=exec` / `check` | runs the command list segments the model supports on the host instead of the command processor (falls back per segment) / runs everything on the command processor but checks every draw, clear, register and buffer write the host would have produced |
 | `KIRIKAE_NO_CHECKED=1` | re-checks every constant buffer and vertex stream on each draw instead of reusing checks within a batch |
 | `KIRIKAE_NO_BUFFER_CACHE=1` | copies vertex, index and constant buffers on every draw, without the GPU-side cache |

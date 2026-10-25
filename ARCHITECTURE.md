@@ -22,8 +22,8 @@ place to start.
 | Crate | Role | Start reading at |
 | --- | --- | --- |
 | `loader` | Reads NRO, NSO (LZ4), PFS0, NCA, RomFS and the folder layout into an `Executable`: modules laid out at their guest addresses (`LOAD_BASE` = `0x0800_0000`), the title ID and where the RomFS is. Also packs the source that gets embedded into `game.exe`, and builds RomFS images from folders. | `package.rs` (`read_source`, `from_exefs`, `pack`) |
-| `a64` | ARM64 decoding. `lift.rs` / `lift_fp.rs` turn one instruction into the small IR of `ir.rs`; every operation is a function in `ops.rs`. `simd/` holds the SIMD/FP semantics and an oracle to compare against a real Cortex-A57 model. | `ir.rs`, then `lift.rs` |
-| `recomp` | Function discovery (`discover.rs`: module entries, relocations, dynamic symbols, branch targets, ADRP+ADD), code generation with Cranelift (`clif.rs`, 1024 functions per object, in parallel) or as Rust source (`rust_backend.rs`, the reference), and the generated Cargo project (`project.rs`). | `project.rs` (`build`) |
+| `a64` | ARM64 decoding. `lift.rs` / `lift_fp.rs` / `lift_neon.rs` turn one instruction into the small IR of `ir.rs`; every operation is a function in `ops.rs`. `simd/` holds the SIMD/FP semantics and an oracle to compare against a real Cortex-A57 model. | `ir.rs`, then `lift.rs` |
+| `recomp` | Function discovery (`discover.rs`: module entries, `.eh_frame_hdr`/FDE bounds from `ehframe.rs`, relocations, dynamic symbols, branch targets, ADRP+ADD), code generation with Cranelift (`clif.rs`, 1024 functions per object, in parallel) or as Rust source (`rust_backend.rs`, the reference), and the generated Cargo project (`project.rs`). | `project.rs` (`build`) |
 | `rt` | The runtime linked into every game. Everything a game needs from the console. | see below |
 | `maxwell` | Maxwell (SM 5.x) shader decoding (`decode.rs`, `opcodes.rs` from envytools), control flow (`cfg.rs`), the shader program header (`sph.rs`) and the SPIR-V translator (`translate.rs`). | `translate.rs` |
 | `kirikae` | The command line tool. | `main.rs` |
@@ -41,8 +41,26 @@ place to start.
   `abi.rs` holds the field offsets and the helpers generated code calls.
 - `process.rs`: the `Process` (memory, modules, GPU, services, HLE table) and `run_until`, the
   dispatcher: an indirect branch looks up the recompiled function for its target, or falls back to
-  `interp.rs`. Addresses the interpreter had to run are recorded in `coverage.rs` for the next build.
-- `simd.rs`: SIMD/FP instructions the backend does not inline run through the `a64` semantics.
+  `interp.rs`. Addresses the interpreter had to run are recorded in `coverage.rs` and written to the
+  `.profile` every 10 s and when the program exits, for the next build.
+- `simd.rs`: SIMD/FP instructions the backend does not inline run through the `a64` semantics
+  (`kirikae info` counts them apart from words lifted to IR, not as missing).
+  V registers are two `u64` halves, so the integer NEON forms in `a64::lift_neon` (SHL/USHR/SSHR
+  by immediate on 8/16/32/64-bit lanes, 8/16-bit `DUP`/`INS`, `MUL`, `SMAX`/`UMAX`/`SMIN`/`UMIN`,
+  `MLA`/`MLS`, `SMAXP`/`UMAXP`/`SMINP`/`UMINP`, `ABS`/`NEG` and the saturating
+  `SQADD`/`SQSUB`/`SQABS`/`SQNEG`) are lifted to one `u64` op per half
+  (`Op::Vshl`/`Vushr`/`Vsshr`/`Splat`/`Vmul`/`Vmax`/`Vmin`/`Vmla`/`Vmls`/`Vpmax`/`Vpmin`/`Vabs`/
+  `Vneg`/`Vsat`); `lift_fp` keeps the bitwise three-same group, the wrapping `ADD`/`SUB`/`ADDP`
+  forms and the 32/64-bit `DUP`/`INS`.
+  The Cranelift lowering folds the lane shift and keep mask into `ishl`/`ushr`/`band` plus
+  immediates, unrolls `mul`/`mla` per lane, turns `max`/`min` into a borrow-free lane comparison
+  (`(x | H) - (y & !H)` with `H` the top bit of each lane) plus a mask select, `abs`/`neg` into
+  masks and lane-base additions, and the saturating forms into per-lane clamps (explicit overflow
+  rules for 64-bit lanes) whose cumulative `QC` update is an `FPSR` read-modify-write fed by
+  `Op::VsatFlag`. The interpreter shares the same ops, so both paths match the helper bit for bit
+  (differential tests in `crates/a64/tests/neon_lift.rs` and `crates/recomp/tests/clif_ops.rs`).
+  Everything else, including the scalar `Q = 1` forms, `SRI`/`SLI`, `PMUL` and the
+  general-register forms, still calls the helper.
 - `fault.rs`: turns host access violations into a guest backtrace with module offsets and symbols.
 
 ### Kernel
@@ -92,13 +110,19 @@ CPU writes (textures, constant buffers) is compared or hashed so only what chang
 `nvn/` wraps the game's NVN driver: `KIRIKAE_NVN=trace` counts calls, `shadow` builds a host model
 (`shadow.rs` for command lists and draws, `state.rs` for render state, `resources.rs` for pools,
 buffers, textures and views) and checks it against what the command processor decodes. This is the
-groundwork for drawing straight from NVN calls.
+groundwork for drawing straight from NVN calls. Alongside the shadow model, `host.rs` fills the host
+object table from the builder procs: `objects.rs` keys objects by guest address with deferred
+destruction and incarnations, `va.rs` allocates GPU virtual addresses and pool ranges, and
+`pools.rs`, `buffers.rs`, `textures.rs` and `samplers.rs` hold their decoded state. No command is
+recorded or replayed from them yet.
 
 ### Video and audio
 
 - `host1x/`: the multimedia engines. `nvdec.rs` (VP9 in `vp9.rs`, H.264 in `h264.rs` through
   OpenH264, behind the `h264` feature) and `vic.rs` (color conversion and composition).
-- `services/audio/`: the `audren` renderer (`mixer.rs`, `dsp.rs`) and the host output (`output.rs`).
+- `services/audio/`: the `audren` renderer (`mixer.rs`, `dsp.rs`, `effect.rs`) and the host output
+  (`output.rs`). `effect.rs` runs the mix effects (biquad, delay and the four-FDN reverb) after a mix
+  is built and before it is sent to its destination or the sink.
 
 ### Game-specific code
 
@@ -109,11 +133,15 @@ hardware behaves, it goes into a plugin (`kirikae build --plugin`), which can ho
 ## How a build works
 
 1. `loader::package::read_source` reads the dump; `from_exefs` lays the modules out.
-2. `recomp::discover` finds functions starting from module entries, relocations and symbols, plus the
-   addresses a previous run had to interpret (`<name>.profile`).
+2. `recomp::discover` finds functions starting from module entries, the unwind header
+   (`.eh_frame_hdr`, with FDE sizes), relocations and symbols, plus the addresses a previous run had
+   to interpret (`<name>.profile`).
 3. Each function is lifted to IR and compiled by Cranelift into object files, in parallel.
 4. `project.rs` writes a Cargo project that links the objects, depends on `kirikae-rt` and embeds the
-   packed dump; `cargo build` produces `game.exe`.
+   packed dump; `cargo build` produces `game.exe`. A PE image cannot exceed 2 GiB and the Windows
+   loader gives up below that, so when the objects would not fit the code goes into
+   `<name>_chunk<N>.dll` files next to a thin `game.exe` that loads them and joins their entry
+   tables (`docs/plan/findings/large-executables.md`).
 
 ## Tests
 

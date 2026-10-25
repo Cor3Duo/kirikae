@@ -1,0 +1,72 @@
+name: Regression
+description: Something that worked in an earlier commit now fails
+labels: [regression]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this when a game or the tooling **used to work** and a change broke it. Read
+        [LEGAL.md](https://github.com/Cor3Duo/kirikae/blob/main/LEGAL.md) first.
+        **Never attach or link game files, keys, firmware, saves, recompiled executables or screenshots of copyrighted content.**
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: Rules
+      options:
+        - label: The game was dumped from my own console.
+          required: true
+        - label: This report contains no game files, keys, firmware, saves or links to them.
+          required: true
+  - type: input
+    id: title
+    attributes:
+      label: Game title ID and version
+      placeholder: "0100000000000000, v1.0.0"
+  - type: input
+    id: good
+    attributes:
+      label: Last known good commit
+      description: Commit where it worked.
+      placeholder: "abc1234"
+    validations:
+      required: true
+  - type: input
+    id: bad
+    attributes:
+      label: First bad commit
+      description: Commit where it started failing, if known.
+      placeholder: "def5678"
+  - type: dropdown
+    id: stage
+    attributes:
+      label: What regressed?
+      options:
+        - kirikae build (recompiling)
+        - Starting the game
+        - In game (crash or hang)
+        - Graphics
+        - Audio or video
+        - Input
+        - GUI
+        - Tooling / progress report
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: symptom
+    attributes:
+      label: Symptom
+      description: What changed (exception, result code, missing output, frame rate) and how to reproduce it.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Console output of the failing run, ideally with `KIRIKAE_STATS=1` and `KIRIKAE_TRACE_IPC=1` when it is an IPC problem.
+      render: text
+  - type: input
+    id: system
+    attributes:
+      label: System
+      placeholder: "Windows 11 23H2, RX 550 (Adrenalin 24.x)"

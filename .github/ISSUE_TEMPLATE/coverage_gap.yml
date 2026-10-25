@@ -1,0 +1,81 @@
+name: Coverage gap
+description: The game uses a service command, SVC, ioctl or shader instruction that kirikae does not implement
+labels: [coverage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this when a game reaches a point where kirikae reports a **stub** or **missing**
+        command, SVC, ioctl or shader instruction. Read [LEGAL.md](https://github.com/Cor3Duo/kirikae/blob/main/LEGAL.md) first.
+        **Never attach or link game files, keys, firmware, saves, recompiled executables or screenshots of copyrighted content.**
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: Rules
+      options:
+        - label: The game was dumped from my own console.
+          required: true
+        - label: This report contains no game files, keys, firmware, saves or links to them.
+          required: true
+  - type: input
+    id: title
+    attributes:
+      label: Game title ID and version
+      description: The 16-digit title ID from `kirikae info` and the game version.
+      placeholder: "0100000000000000, v1.0.0"
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Kirikae commit
+      description: Output of `git rev-parse --short HEAD`.
+      placeholder: "abc1234"
+    validations:
+      required: true
+  - type: dropdown
+    id: section
+    attributes:
+      label: What is missing?
+      options:
+        - Horizon service command (IPC)
+        - Kernel SVC
+        - GPU driver ioctl (nvdrv)
+        - Maxwell shader instruction
+        - NVN procedure
+        - Filesystem / mount
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: item
+    attributes:
+      label: Item
+      description: Interface and command from the coverage report, e.g. `fsp-srv 2` or `svcBreak 0x26`.
+      placeholder: "fsp-srv 2"
+    validations:
+      required: true
+  - type: textarea
+    id: where
+    attributes:
+      label: Where in the game
+      description: What the game was doing (menu, level, cutscene, frame number). No copyrighted assets.
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Coverage output
+      description: The relevant lines from `python tools/coverage_report.py out/`. Logs only, no images or saves.
+      render: text
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Windows version, GPU and driver version.
+      placeholder: "Windows 11 23H2, RX 550 (Adrenalin 24.x)"
+  - type: textarea
+    id: idea
+    attributes:
+      label: How it could be implemented (optional)
+      description: What the hardware does, with a source if you have one (Switchbrew, homebrew docs).
