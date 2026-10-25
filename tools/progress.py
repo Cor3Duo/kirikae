@@ -2,12 +2,10 @@
 
 import argparse
 import datetime
-import os
 import html
 import json
 import math
 import re
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -18,14 +16,6 @@ HORIZON = ROOT / "crates/rt/src/horizon.rs"
 REFERENCE = ROOT / "tools/reference/horizon.txt"
 MAXWELL_OPCODES = ROOT / "crates/maxwell/src/opcodes.rs"
 MAXWELL_TRANSLATE = ROOT / "crates/maxwell/src/translate.rs"
-NVN_DIR = ROOT / "crates/rt/src/nvn"
-STATUS_MD = ROOT / "docs/plan/STATUS.md"
-
-NVN_HOST = NVN_DIR / "host.rs"
-NVN_STATE = NVN_DIR / "state.rs"
-NVN_SHADOW = NVN_DIR / "shadow.rs"
-NVN_RESOURCES = NVN_DIR / "resources.rs"
-
 SHADER_CLASSES = {
     "floating point": "fadd fadd32i fmul fmul32i ffma ffma32i fmnmx fset fsetp fcmp fchk fswzadd mufu rro dadd dmul dfma dmnmx dset dsetp",
     "half precision": "hadd2 hadd2_32i hmul2 hmul2_32i hfma2 hfma2_32i hset2 hsetp2",
@@ -48,20 +38,6 @@ SHADER_FAMILIES = {
     "texture": "tex texs tld tlds tld4 tld4s txq txd txa tmml tmmls suld sust isberd",
     "control": "bra brx ssy sync pbk brk cont pcnt exit kil bar membar depbar nop cal jcal ret jmp jmx pret sam rtt bpt preexit ide",
 }
-
-NVN_FAMILIES = ["pools", "buffers", "textures", "samplers", "programs", "device", "commands", "state", "other"]
-NVN_FAMILY_LABELS = {
-    "pools": "memory, texture and sampler pools",
-    "buffers": "buffers",
-    "textures": "textures and views",
-    "samplers": "samplers",
-    "programs": "programs and shader data",
-    "device": "device handles",
-    "commands": "command buffers and queues",
-    "state": "state setters",
-    "other": "other procs",
-}
-NVN_CONSTANT_PREFIX = "Handle("
 
 NV_DEVICES = {
     "nvmap": "/dev/nvmap",
@@ -514,7 +490,6 @@ SECTIONS = [
     ("services", "Horizon services", "IPC commands"),
     ("svc", "Kernel SVCs", "SVCs"),
     ("ioctl", "GPU driver (nvdrv)", "ioctls"),
-    ("nvn", "NVN host (WS4)", "NVN procs"),
     ("shaders", "Maxwell shader instructions", "mnemonics"),
 ]
 
@@ -555,87 +530,6 @@ def shader_groups():
 def read_text(path):
     return path.read_text(encoding="utf-8") if path.is_file() else ""
 
-def named_arms(src, fn_name):
-    """Quoted `"Name" => body` arms of a dispatcher's `match name`, with the `nvn` prefix restored."""
-    body = fn_body(strip_comments(src), fn_name)
-    if not body:
-        return {}
-    m = re.search(r"match name(?:\.strip_prefix\(\"nvn\"\)\?)?\s*\{", body)
-    if not m:
-        return {}
-    out = {}
-    for pattern, arm in match_arms(body, m.end() - 1):
-        if pattern.strip() == "_":
-            continue
-        for name in re.findall(r'"([A-Za-z0-9_]+)"', pattern):
-            out[name if name.startswith("nvn") else "nvn" + name] = arm
-    return out
-
-def nvn_family(name):
-    n = name[3:] if name.startswith("nvn") else name
-    if n.startswith(("MemoryPool", "TexturePool", "SamplerPool")):
-        return "pools"
-    if n.startswith("Buffer"):
-        return "buffers"
-    if n.startswith("Sampler"):
-        return "samplers"
-    if n.startswith("Texture"):
-        return "textures"
-    if n.startswith("Program"):
-        return "programs"
-    if n.startswith("Device"):
-        return "device"
-    if n.startswith(("CommandBuffer", "Queue")):
-        return "commands"
-    if "State" in n:
-        return "state"
-    return "other"
-
-def nvn_section():
-    """What the NVN host takes over, against every `nvn*` proc the nvn modules name."""
-    sources = [NVN_HOST, NVN_STATE, NVN_SHADOW, NVN_RESOURCES]
-    if not all(p.is_file() for p in sources):
-        return None
-    host = named_arms(read_text(NVN_HOST), "proc")
-    state = named_arms(read_text(NVN_STATE), "setter")
-    hooks = named_arms(read_text(NVN_SHADOW), "hook")
-    resources = named_arms(read_text(NVN_RESOURCES), "call")
-    m = re.search(r"const NOT_RECORDED: \[&str; \d+\] = \[(.*?)\];", strip_comments(read_text(NVN_SHADOW)), re.S)
-    elsewhere = set(re.findall(r'"(nvn[A-Za-z0-9_]+)"', m.group(1))) if m else set()
-    hosted = set(host) | set(state)
-    constants = {n for n, arm in host.items() if arm.startswith(NVN_CONSTANT_PREFIX)}
-    known = hosted | set(hooks) | set(resources) | elsewhere
-    groups = []
-    for fam in NVN_FAMILIES:
-        names = sorted(n for n in known if nvn_family(n) == fam)
-        if not names:
-            continue
-        groups.append(
-            {
-                "name": fam,
-                "family": fam,
-                "official": NVN_FAMILY_LABELS.get(fam, fam),
-                "url": "",
-                "referenced": False,
-                "implemented": [n for n in names if n in hosted],
-                "constant": sorted(n for n in names if n in constants),
-                "missing": [{"id": n, "name": ""} for n in names if n not in hosted],
-                "undocumented": [],
-                "total": len(names),
-            }
-        )
-    return {
-        "id": "nvn",
-        "title": "NVN host (WS4)",
-        "unit": "NVN procs",
-        "implemented": len(hosted),
-        "constant": len(constants),
-        "silent": 0,
-        "total": len(known),
-        "referenced": False,
-        "groups": groups,
-    }
-
 def shader_family(name):
     for fam in ("atomics", "texture", "control"):
         if name in SHADER_FAMILIES[fam].split():
@@ -675,196 +569,6 @@ def shader_breakdown(groups):
             }
         )
     return stages, families
-
-def split_md_row(line):
-    line = line.strip()
-    if line.startswith("|"):
-        line = line[1:]
-    if line.endswith("|") and not line.endswith("\\|"):
-        line = line[:-1]
-    cells, cur, i = [], "", 0
-    while i < len(line):
-        if line[i] == "\\" and i + 1 < len(line) and line[i + 1] == "|":
-            cur += "|"
-            i += 2
-            continue
-        if line[i] == "|":
-            cells.append(cur.strip())
-            cur = ""
-        else:
-            cur += line[i]
-        i += 1
-    cells.append(cur.strip())
-    return cells
-
-def compat_record(rec):
-    instructions = rec.get("instructions", "")
-    if instructions != "" and rec.get("reachable_total") not in (None, ""):
-        instructions = f'{instructions}/{rec["reachable_total"]}'
-    return {
-        "game": str(rec.get("game", "")),
-        "status": str(rec.get("status", "")),
-        "functions": rec.get("functions", ""),
-        "instructions": instructions,
-        "frames": rec.get("frames", ""),
-        "fps": rec.get("fps", ""),
-        "gaps": rec.get("gaps", ""),
-        "note": str(rec.get("note") or ""),
-    }
-
-def compat_json_rows(text):
-    data = json.loads(text)
-    if isinstance(data, dict):
-        data = data.get("games", [])
-    return [compat_record(r) for r in data if isinstance(r, dict) and r.get("game")]
-
-def compat_markdown_rows(text):
-    header, rows = None, []
-    for line in text.splitlines():
-        if not line.lstrip().startswith("|"):
-            continue
-        cells = split_md_row(line)
-        if header is None:
-            if cells and cells[0].strip().lower() == "game":
-                header = [c.strip().lower() for c in cells]
-            continue
-        if all(set(c) <= set("-: ") for c in cells):
-            continue
-        rec = dict(zip(header, cells))
-        rows.append(compat_record(rec))
-    return rows
-
-def load_compat(path):
-    """The batch matrix (compat.json or compat.md), or None when there is none."""
-    if path is None:
-        return None
-    p = Path(path)
-    if p.is_dir():
-        found = [p / n for n in ("compat.json", "compat.md") if (p / n).is_file()]
-        if not found:
-            return None
-        p = found[0]
-    if not p.is_file():
-        return None
-    try:
-        text = p.read_text(encoding="utf-8")
-        rows = compat_json_rows(text) if p.suffix.lower() == ".json" else compat_markdown_rows(text)
-    except (OSError, ValueError) as e:
-        print(f"note: cannot read {p}: {e}", file=sys.stderr)
-        return None
-    if not rows:
-        return None
-    boots = sum(r["status"] == "boots" for r in rows)
-    compiled = sum(r["status"] in ("boots", "compiled") for r in rows)
-    return {
-        "source": p.name,
-        "counts": {"games": len(rows), "boots": boots, "compiled": compiled},
-        "games": rows,
-    }
-
-
-def discovery_root():
-    """The artifact folder, with the same default as tools/discovery/loop.py."""
-    env = os.environ.get("KIRIKAE_DISCOVERY_DIR")
-    if env:
-        return Path(env)
-    base = os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share"
-    return Path(base) / "kirikae-discovery"
-
-
-def resolve_compat(explicit=None):
-    """The batch matrix if it exists: --compat, KIRIKAE_COMPAT, then the discovery work folder.
-
-    `tools/discovery/batch.py` writes `compat.json`/`compat.md` under `<work>/`; the CI entry
-    point passes it only when the artifact is there and the section is skipped otherwise.
-    """
-    for candidate in (explicit, os.environ.get("KIRIKAE_COMPAT"), str(discovery_root() / "batch")):
-        if not candidate:
-            continue
-        p = Path(candidate)
-        if p.is_dir() and any((p / n).is_file() for n in ("compat.json", "compat.md")):
-            return p
-        if p.is_file():
-            return p
-    return None
-
-WORKSTREAM_STATUS = {"hecho": "done", "resuelto": "done", "confirmado": "confirmed", "parcial": "partial"}
-
-def workstream_rows():
-    """The workstream table of docs/plan/STATUS.md, one row per WS with its status counts."""
-    if not STATUS_MD.is_file():
-        return []
-    by_ws = {}
-    for line in read_text(STATUS_MD).splitlines():
-        if not line.lstrip().startswith("|"):
-            continue
-        cells = split_md_row(line)
-        if len(cells) < 3 or not re.fullmatch(r"WS\d+", cells[0].strip()):
-            continue
-        ws, item, status = cells[0].strip(), cells[1], cells[2]
-        clean = lambda s: re.sub(r"[`*]", "", s).strip()
-        state = WORKSTREAM_STATUS.get(clean(status).lower().split(" (")[0], "pending")
-        entry = by_ws.setdefault(
-            ws, {"ws": ws, "items": 0, "done": 0, "partial": 0, "pending": 0, "confirmed": 0, "state": "done"}
-        )
-        entry["items"] += 1
-        entry[state] += 1
-        rank = {"done": 0, "confirmed": 1, "partial": 2, "pending": 3}
-        if rank[state] > rank[entry["state"]]:
-            entry["state"] = state
-        entry.setdefault("latest", clean(item))
-    order = sorted(by_ws, key=lambda w: int(w[2:]))
-    return [by_ws[w] for w in order]
-
-def report_compat(report):
-    compat = report.get("compat")
-    if not compat:
-        return []
-    rows = [
-        "<h2>Compatibility matrix</h2>",
-        f'<p class="muted">{compat["counts"]["games"]} titles from <code>{html.escape(compat["source"])}</code>: '
-        f'{compat["counts"]["boots"]} boot to frames, {compat["counts"]["compiled"]} compile. '
-        "The matrix is produced by <code>tools/discovery/batch.py</code> and stays outside the repository.</p>",
-        '<table><tr><th>Game</th><th>Status</th><th class="n">Functions</th><th class="n">Instructions</th>'
-        '<th class="n">Frames</th><th class="n">FPS</th><th class="n">Gaps</th><th>Note</th></tr>',
-    ]
-    for g in compat["games"]:
-        cls = {"boots": "done", "compiled": "", "crash": "missing", "compile_error": "missing", "aarch32": "missing"}.get(g["status"], "")
-        note = html.escape(str(g["note"]))
-        note = note.replace("|", "&#124;")
-        rows.append(
-            f'<tr><td>{html.escape(g["game"])}</td><td class="{cls}">{html.escape(g["status"])}</td>'
-            f'<td class="n">{html.escape(str(g["functions"]))}</td><td class="n">{html.escape(str(g["instructions"]))}</td>'
-            f'<td class="n">{html.escape(str(g["frames"]))}</td><td class="n">{html.escape(str(g["fps"]))}</td>'
-            f'<td class="n">{html.escape(str(g["gaps"]))}</td><td>{note}</td></tr>'
-        )
-    rows.append("</table>")
-    return rows
-
-def report_workstreams(report):
-    rows = report.get("workstreams") or []
-    if not rows:
-        return []
-    done = sum(r["done"] for r in rows)
-    total = sum(r["items"] for r in rows)
-    out = [
-        "<h2>Workstreams</h2>",
-        f'<p class="muted">{done} of {total} tracked items done, from '
-        '<a href="../plan/STATUS.md"><code>docs/plan/STATUS.md</code></a>.</p>',
-        '<table><tr><th>WS</th><th class="n">Items</th><th class="n">Done</th><th class="n">Partial</th>'
-        '<th class="n">Open</th><th>Status</th><th>Last item</th></tr>',
-    ]
-    for w in rows:
-        open_items = w["pending"] + w.get("confirmed", 0)
-        width = 100 * (w["done"] + 0.5 * w["partial"]) / w["items"] if w["items"] else 0
-        out.append(
-            f'<tr><td>{html.escape(w["ws"])}</td><td class="n">{w["items"]}</td><td class="n">{w["done"]}</td>'
-            f'<td class="n">{w["partial"]}</td><td class="n">{open_items}</td>'
-            f'<td><span class="bar"><i style="width:{width:.0f}%"></i></span>{html.escape(w["state"])}</td>'
-            f'<td>{html.escape(w.get("latest", ""))}</td></tr>'
-        )
-    out.append("</table>")
-    return out
 
 def report_shader_breakdown(report):
     stages, families = report.get("shader_stages") or [], report.get("shader_families") or []
@@ -908,11 +612,6 @@ def build_report():
             done = sum(len(g["implemented"]) for g in shader)
             total = sum(g["total"] for g in shader)
             sections.append({"id": sid, "title": title, "unit": unit, "implemented": done, "total": total, "groups": shader})
-            continue
-        if sid == "nvn":
-            section = nvn_section()
-            if section:
-                sections.append(section)
             continue
         keys = sorted({k for k in list(code) + list(ref) if k[0] == sid}, key=lambda k: (family(*k), k[1]))
         groups = []
@@ -979,7 +678,6 @@ def build_report():
         },
     }
     report["shader_stages"], report["shader_families"] = shader_breakdown(shader)
-    report["workstreams"] = workstream_rows()
     return report
 
 STATUS_RANK = {"implemented": 0, "stub": 1, "missing": 2}
@@ -1310,19 +1008,12 @@ def section_table(section):
             f' {section["silent"]} more are handled by a silent stub (it answers but returns no real data) '
             "and are not counted as implemented."
         )
-    if section["id"] == "nvn":
-        what = "NVN procs named by the runtime"
-        note = (
-            ' No external NVN reference list: the total is the surface these modules name, and a proc counts as '
-            "implemented when the host takes it over."
-        )
-    else:
-        what = f'documented {section["unit"]}'
-        note = ""
+    what = f'documented {section["unit"]}'
+    note = ""
     rows = [
         f'<h2>{html.escape(section["title"])}</h2>',
         f'<p class="muted">{done_section} of {section["total"]} {what} ({pct(done_section, section["total"])}).{silent_note}{note}</p>',
-        f'<table><tr><th>Interface</th><th>{"Group" if section["id"] == "nvn" else "Official name"}</th>'
+        f'<table><tr><th>Interface</th><th>Official name</th>'
         '<th class="n">Done</th><th class="n">Constant</th><th class="n">Total</th><th class="n">%</th></tr>',
     ]
     fam = None
@@ -1345,8 +1036,6 @@ def section_table(section):
             items = "".join(f'<li><code>{(hex(m["id"]) if hexa else m["id"])}</code> {html.escape(m["name"])}</li>' for m in g["missing"])
             missing = f'<details><summary>{len(g["missing"])} missing</summary><ul>{items}</ul></details>'
         if section["id"] == "shaders":
-            pass
-        elif section["id"] == "nvn":
             pass
         elif not g["referenced"]:
             missing += '<div class="muted">no reference list: total = handled commands</div>'
@@ -1415,14 +1104,12 @@ def render_html(report):
         f'<p>Generated by <code>tools/progress.py</code> on {report["generated"]}. Raw numbers: <a href="progress.json">progress.json</a>. '
         f'<a href="history.html">History</a> (one point a day). In total: {total_done} of {total_all} ({pct(total_done, total_all)}).</p>',
     ]
-    parts += report_workstreams(report)
     if "coverage" in report:
         parts.append(coverage_section(report))
     for s in report["sections"]:
         parts.append(section_table(s))
         if s["id"] == "shaders":
             parts += report_shader_breakdown(report)
-    parts += report_compat(report)
     parts.append(
         "<h2>How it is counted</h2><p>A command counts as implemented when the runtime has its own arm for it in the "
         "<code>match</code> of the service (<code>crates/rt/src/services/**/*.rs</code>), the SVC (<code>horizon.rs</code>) or the "
@@ -1440,12 +1127,6 @@ def render_html(report):
         "<p>The totals are the commands documented on <a href=\"https://switchbrew.org\">Switchbrew</a> "
         "(<code>tools/reference/horizon.txt</code>, IDs and names only) for the interfaces Kirikae exposes or games ask for, "
         "not every system service. A new interface joins the count when it joins the reference.</p>"
-        "<p>NVN procs are the <code>nvn*</code> names in <code>crates/rt/src/nvn/*.rs</code>. An NVN proc is "
-        "<em>implemented</em> when <code>host::proc</code> takes it over (object, state or recording work) or "
-        "<code>state::setter</code> decodes it; it is <em>missing</em> when only <code>shadow::hook</code>, "
-        "<code>resources::call</code> or the not-recorded list names it, which leaves it on the recompiled driver path. "
-        "The device handle getters are <em>constant</em>: their arm only packs two ids. There is no external NVN "
-        "reference list yet, so the total is the surface these modules name, not the whole NVN API.</p>"
         "<p>Shader instructions count the mnemonics of the Maxwell opcode table generated from envytools "
         "(<code>crates/maxwell/src/opcodes.rs</code>) that have their own arm in the SPIR-V translator "
         "(<code>crates/maxwell/src/translate.rs</code>). A mnemonic counts whole even when only some of its "
@@ -1453,10 +1134,7 @@ def render_html(report):
         "<code>tools/progress.py</code> lists the mnemonics only one stage encodes (fragment: <code>ipa</code>, "
         "<code>pixld</code>, <code>kil</code>, <code>out</code>; compute: <code>bar</code>, <code>membar</code>, "
         "<code>cctl</code>, <code>cctll</code>, <code>cctlt</code>); the rest count in every stage. Families are the "
-        "same mnemonics grouped as atomics, textures, control flow and ALU.</p>"
-        "<p>The compatibility matrix is optional: <code>--compat</code> (or <code>KIRIKAE_COMPAT</code>) points at the "
-        "<code>compat.json</code>/<code>compat.md</code> that <code>tools/discovery/batch.py</code> writes outside the "
-        "repository, and the section is skipped when the file is absent.</p></body></html>"
+        "same mnemonics grouped as atomics, textures, control flow and ALU.</p></body></html>"
     )
     return "\n".join(parts)
 
@@ -1470,7 +1148,7 @@ def update_history(path, report):
 
 def render_history(history):
     W, H, pad = 900, 300, 40
-    colors = {"services": "#2ea043", "svc": "#4493f8", "ioctl": "#d29922", "nvn": "#db6d28", "shaders": "#a371f7"}
+    colors = {"services": "#2ea043", "svc": "#4493f8", "ioctl": "#d29922", "shaders": "#a371f7"}
     names = {sid: title for sid, title, _ in SECTIONS}
     n = len(history)
     xs = [pad + (W - 2 * pad) * (i / (n - 1) if n > 1 else 0.5) for i in range(n)]
@@ -1536,59 +1214,6 @@ def self_test():
     check(found.get(None) == {0: True, 1: False, 2: False, 16: False, 17: False, 18: False}, "service arms")
     check(found.get("svc/IFoo") == {3: True}, "service arms with an interface name")
     check(is_trivial("Reply::ok().u32(1)") and not is_trivial("self.real()"), "trivial bodies")
-
-    nvn = """pub fn proc(name: &str) -> Option<Proc> {
-        Some(match name.strip_prefix("nvn")? {
-            "BufferInitialize" => BufferInitialize,
-            "DeviceGetTextureHandle" => Handle(HandleProc::Texture),
-            "SamplerBuilderSetBorderColor" | "SamplerBuilderSetBorderColour" => SamplerBuilder(Field::BorderColor),
-            _ => return state::setter(name).map(Proc::State),
-        })
-    }"""
-    arms = named_arms(nvn, "proc")
-    check(
-        set(arms) == {
-            "nvnBufferInitialize",
-            "nvnDeviceGetTextureHandle",
-            "nvnSamplerBuilderSetBorderColor",
-            "nvnSamplerBuilderSetBorderColour",
-        },
-        "nvn proc arms",
-    )
-    check({n for n, a in arms.items() if a.startswith(NVN_CONSTANT_PREFIX)} == {"nvnDeviceGetTextureHandle"}, "nvn constant arms")
-    state = """pub fn setter(name: &str) -> Option<Setter> {
-        Some(match name.strip_prefix("nvn")? {
-            "ChannelMaskStateSetDefaults" => ChannelMaskDefaults,
-            _ => return None,
-        })
-    }"""
-    check(set(named_arms(state, "setter")) == {"nvnChannelMaskStateSetDefaults"}, "nvn state setters")
-    check(nvn_family("nvnTexturePoolRegisterTexture") == "pools", "nvn family")
-    check(nvn_family("nvnCommandBufferDrawArrays") == "commands", "nvn family commands")
-
-    record = {
-        "game": "Demo",
-        "status": "boots",
-        "functions": 12,
-        "instructions": 34,
-        "reachable_total": 56,
-        "frames": 90,
-        "fps": 29.9,
-        "gaps": 3,
-        "note": "ok",
-    }
-    rows = compat_json_rows(json.dumps([record]))
-    check(rows == [compat_record(record)] and rows[0]["instructions"] == "34/56", "compat json")
-    md = "\n".join(
-        [
-            "# Kirikae compatibility matrix",
-            "",
-            "| Game | Status | Functions | Instructions | Frames | FPS | Gaps | Note |",
-            "|---|---|---:|---|---:|---:|---:|---|",
-            "| Demo | boots | 12 | 34/56 | 90 | 29.9 | 3 | ok |",
-        ]
-    )
-    check(compat_markdown_rows(md) == [{k: str(v) for k, v in r.items()} for r in rows], "compat markdown")
 
     groups = shader_groups()
     names = {m["id"] for g in groups for m in g["missing"]} | {n for g in groups for n in g["implemented"]}
@@ -1777,10 +1402,6 @@ impl Code {
     )
 
     report = build_report()
-    nvn = next((s for s in report["sections"] if s["id"] == "nvn"), None)
-    check(nvn is not None and nvn["total"] > 0, "nvn section")
-    if nvn:
-        check(nvn["implemented"] + sum(len(g["missing"]) for g in nvn["groups"]) == nvn["total"], "nvn partition")
     service_groups = {g["name"]: g for g in report["sections"][0]["groups"]}
     for name in ("bsd:u", "bsd:s", "bsd:a", "mii:e", "ns:am2", "ns/IReadOnlyApplicationControlDataInterface"):
         check(service_groups.get(name, {}).get("referenced", False), f"{name} is counted against its reference")
@@ -1791,7 +1412,6 @@ impl Code {
         "silent stubs stay flagged after gaining a reference",
     )
     check(report.get("shader_stages") and report.get("shader_families"), "shader breakdown in the report")
-    check(report.get("workstreams"), "workstreams in the report")
 
     with tempfile.TemporaryDirectory(prefix="kirikae-progress-") as tmp:
         stored = json.loads((write_outputs(Path(tmp) / "progress", report) / "progress.json").read_text(encoding="utf-8"))
@@ -1815,12 +1435,6 @@ impl Code {
         and (services.get("silent", 0) == 0 or "handled" in services_line),
         "console prints counted services and the handled count when silent stubs exist",
     )
-
-    with tempfile.TemporaryDirectory(prefix="kirikae-progress-") as tmp:
-        (Path(tmp) / "compat.json").write_text(json.dumps([record]), encoding="utf-8")
-        resolved = resolve_compat(tmp)
-        check(resolved is not None and load_compat(resolved)["counts"]["games"] == 1, "compat artifact is resolved when it exists")
-    check("[skip ci]" in PROGRESS_COMMIT, "ci commit cannot retrigger the workflow")
 
     first = json.dumps(report, sort_keys=True)
     second = json.dumps(build_report(), sort_keys=True)
@@ -1853,16 +1467,6 @@ def summary_lines(report):
             lines.append(f'{section["title"]}: {done}/{total} ({pct(done, total)})')
     for stage in report.get("shader_stages", []):
         lines.append(f'shaders {stage["name"]}: {stage["implemented"]}/{stage["total"]} ({pct(stage["implemented"], stage["total"])})')
-    if report.get("workstreams"):
-        done = sum(w["done"] for w in report["workstreams"])
-        total = sum(w["items"] for w in report["workstreams"])
-        lines.append(f"workstreams: {done}/{total} tracked items done")
-    compat = report.get("compat")
-    if compat:
-        lines.append(
-            f'compatibility: {compat["counts"]["games"]} titles '
-            f'({compat["counts"]["boots"]} boot, {compat["counts"]["compiled"]} compile)'
-        )
     totals = report.get("totals")
     if totals:
         lines.append(
@@ -1884,7 +1488,7 @@ def write_outputs(out, report):
     (out / "index.html").write_text(render_html(report), encoding="utf-8")
     badges = out / "badges"
     badges.mkdir(exist_ok=True)
-    labels = {"services": "services", "svc": "SVCs", "ioctl": "nvdrv ioctls", "nvn": "NVN host", "shaders": "shader ops"}
+    labels = {"services": "services", "svc": "SVCs", "ioctl": "nvdrv ioctls", "shaders": "shader ops"}
     for s in report["sections"]:
         done = implemented_real(s)
         ratio = done / s["total"] if s["total"] else 0
@@ -1894,81 +1498,6 @@ def write_outputs(out, report):
     history = update_history(out / "history.json", report)
     (out / "history.html").write_text(render_history(history), encoding="utf-8")
     return out
-
-
-PROGRESS_COMMIT = "chore(progress): regenerate the dashboard [skip ci]"
-BOT_NAME = "github-actions[bot]"
-BOT_EMAIL = "41898282+github-actions[bot]@users.noreply.github.com"
-
-
-def git(*args):
-    return subprocess.run(["git", *args], cwd=str(ROOT), text=True, capture_output=True)
-
-
-def ci(out, dry_run=False, push=False, compat_path=None):
-    """The entry point of .github/workflows/progress.yml.
-
-    Regenerates the dashboard, commits it when it changed and (with --push) pushes the commit.
-    --dry-run writes the files and reports what would be committed, without touching git.
-    """
-    report = build_report()
-    compat = load_compat(resolve_compat(compat_path))
-    if compat:
-        report["compat"] = compat
-    out = write_outputs(out, report)
-    lines = summary_lines(report)
-    for line in lines:
-        print(line)
-    print(f"wrote {out}")
-    step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
-    if step_summary:
-        try:
-            with open(step_summary, "a", encoding="utf-8") as f:
-                f.write("### Progress dashboard\n\n```\n" + "\n".join(lines) + "\n```\n")
-        except OSError as e:
-            print(f"note: cannot write the step summary: {e}", file=sys.stderr)
-
-    try:
-        rel = out.resolve().relative_to(ROOT).as_posix()
-    except ValueError:
-        print(f"ci: {out} is outside the repository; nothing to commit")
-        return 0
-    status = git("status", "--porcelain", "--", rel)
-    if status.returncode != 0:
-        print(f"ci: git status failed: {status.stderr.strip()}", file=sys.stderr)
-        return status.returncode
-    changed = [line for line in status.stdout.splitlines() if line.strip()]
-    if not changed:
-        print(f"ci: {rel} is up to date")
-        return 0
-    for line in changed:
-        print(f"ci: {line}")
-    if dry_run:
-        print(f'ci: dry run, would commit {len(changed)} changed file(s) as "{PROGRESS_COMMIT}"')
-        return 0
-    add = git("add", "--", rel)
-    if add.returncode != 0:
-        print(f"ci: git add failed: {add.stderr.strip()}", file=sys.stderr)
-        return add.returncode
-    commit = git(
-        "-c", f"user.name={BOT_NAME}", "-c", f"user.email={BOT_EMAIL}",
-        "commit", "-m", PROGRESS_COMMIT, "--", rel,
-    )
-    if commit.returncode != 0:
-        print(f"ci: git commit failed: {commit.stderr.strip()}", file=sys.stderr)
-        return commit.returncode
-    print(f"ci: committed {len(changed)} file(s)")
-    if push:
-        pushed = git("push")
-        if pushed.returncode != 0:
-            branch = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
-            if branch and branch != "HEAD":
-                pushed = git("push", "origin", f"HEAD:{branch}")
-        if pushed.returncode != 0:
-            print(f"ci: git push failed: {pushed.stderr.strip()}", file=sys.stderr)
-            return pushed.returncode
-        print("ci: pushed")
-    return 0
 
 
 def main():
@@ -1982,36 +1511,13 @@ def main():
         metavar="FILE_OR_DIR",
         help="<name>.coverage.json files written by recompiled games, or folders holding them",
     )
-    ap.add_argument(
-        "--compat",
-        metavar="FILE_OR_DIR",
-        help="batch compatibility matrix (compat.json or compat.md), or the folder holding it; "
-        "defaults to KIRIKAE_COMPAT or the discovery loop's work folder",
-    )
     ap.add_argument("--self-test", action="store_true", help="check the parsers against synthetic sources and exit")
-    ap.add_argument(
-        "--ci",
-        action="store_true",
-        help="workflow entry point: regenerate docs/progress and commit it when it changed",
-    )
-    ap.add_argument("--dry-run", action="store_true", help="with --ci: regenerate and report, but do not commit or push")
-    ap.add_argument("--push", action="store_true", help="with --ci: push the commit to the current branch")
     args = ap.parse_args()
     sys.stdout.reconfigure(errors="replace")
     if args.self_test:
         sys.exit(self_test())
-    if args.dry_run or args.push:
-        if not args.ci:
-            ap.error("--dry-run and --push are only valid with --ci")
-    if args.ci and args.coverage:
-        ap.error("--ci regenerates docs/progress; it does not take --coverage")
     out = Path(args.out or ROOT / ("docs/progress-games" if args.coverage else "docs/progress"))
-    if args.ci:
-        sys.exit(ci(out, dry_run=args.dry_run, push=args.push, compat_path=args.compat))
     report = build_report()
-    compat = load_compat(resolve_compat(args.compat))
-    if compat:
-        report["compat"] = compat
     if args.coverage:
         files = load_coverage(args.coverage)
         if not files:
