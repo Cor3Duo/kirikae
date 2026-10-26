@@ -28,11 +28,18 @@ pub mod perm {
     pub const RX: u32 = 5;
 }
 
+pub mod attr {
+    pub const UNCACHED: u32 = 0x8;
+    pub const PERMISSION_LOCKED: u32 = 0x10;
+    pub const SETTABLE: u32 = UNCACHED | PERMISSION_LOCKED;
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Region {
     pub range: Range<u64>,
     pub state: u32,
     pub perm: u32,
+    pub attr: u32,
 }
 
 #[derive(Debug)]
@@ -43,7 +50,7 @@ pub enum PhysicalError {
 }
 
 fn insert_merged(mapped: &mut BTreeMap<u64, Region>, mut r: Region) {
-    let same = |o: &Region, r: &Region| o.state == r.state && o.perm == r.perm;
+    let same = |o: &Region, r: &Region| o.state == r.state && o.perm == r.perm && o.attr == r.attr;
     if let Some((&key, prev)) = mapped.range(..r.range.start).next_back()
         && prev.range.end == r.range.start
         && same(prev, &r)
@@ -106,7 +113,7 @@ impl GuestMemory {
         if !unsafe { sys::commit(self.base.add(start as usize), (end - start) as usize) } {
             return Err(io::Error::last_os_error());
         }
-        mapped.insert(start, Region { range: start..end, state, perm });
+        mapped.insert(start, Region { range: start..end, state, perm, attr: 0 });
         Ok(())
     }
 
@@ -160,7 +167,7 @@ impl GuestMemory {
             }
         }
         for g in gaps {
-            insert_merged(&mut mapped, Region { range: g, state: state::HEAP, perm: perm::RW });
+            insert_merged(&mut mapped, Region { range: g, state: state::HEAP, perm: perm::RW, attr: 0 });
         }
         Ok(total)
     }
@@ -200,7 +207,36 @@ impl GuestMemory {
                 mapped.insert(end, Region { range: end..r.range.end, ..r.clone() });
             }
             let inner = r.range.start.max(start)..r.range.end.min(end);
-            insert_merged(&mut mapped, Region { range: inner, state: r.state, perm });
+            insert_merged(&mut mapped, Region { range: inner, state: r.state, perm, attr: r.attr });
+        }
+        true
+    }
+
+    pub fn set_attribute(&self, start: u64, end: u64, mask: u32, value: u32) -> bool {
+        let mut mapped = self.mapped.lock().unwrap();
+        let mut at = start;
+        while at < end {
+            match mapped.range(..=at).next_back() {
+                Some((_, r)) if r.range.contains(&at) => at = r.range.end,
+                _ => return false,
+            }
+        }
+        let keys: Vec<u64> = mapped.range(..end).filter(|(_, r)| r.range.end > start).map(|(s, _)| *s).collect();
+        let mut changed = Vec::with_capacity(keys.len());
+        for key in keys {
+            let r = mapped.remove(&key).unwrap();
+            if r.range.start < start {
+                mapped.insert(r.range.start, Region { range: r.range.start..start, ..r.clone() });
+            }
+            if r.range.end > end {
+                mapped.insert(end, Region { range: end..r.range.end, ..r.clone() });
+            }
+            let inner = r.range.start.max(start)..r.range.end.min(end);
+            let attr = (r.attr & !mask) | (value & mask);
+            changed.push(Region { range: inner, state: r.state, perm: r.perm, attr });
+        }
+        for r in changed {
+            insert_merged(&mut mapped, r);
         }
         true
     }
@@ -222,7 +258,7 @@ impl GuestMemory {
         }
         let start = mapped.range(..=addr).next_back().map_or(0, |(_, r)| r.range.end);
         let end = mapped.range(addr..).next().map_or(ADDR_MASK + 1, |(s, _)| *s);
-        Region { range: start..end, state: state::FREE, perm: perm::NONE }
+        Region { range: start..end, state: state::FREE, perm: perm::NONE, attr: 0 }
     }
 
     pub fn is_mapped(&self, addr: u64, len: u64) -> bool {
@@ -379,6 +415,20 @@ mod tests {
         assert_eq!(m.query(base).state, state::FREE);
         m.map_physical(base + 0x2000, base + 0x3000, u64::MAX).unwrap();
         assert_eq!(m.read(base + 0x2000, 4).unwrap(), vec![0; 4]);
+    }
+
+    #[test]
+    fn setting_a_shared_attribute_merges_neighbours() {
+        let m = GuestMemory::new().unwrap();
+        let base = 0x2_0000_0000;
+        for i in 0..3 {
+            m.map_as(base + i * PAGE, PAGE, state::HEAP, perm::RW).unwrap();
+        }
+        assert!(m.set_attribute(base + PAGE, base + 2 * PAGE, attr::UNCACHED, attr::UNCACHED));
+        assert_eq!(m.query(base + PAGE).attr, attr::UNCACHED);
+        assert!(m.set_attribute(base, base + 3 * PAGE, attr::UNCACHED, 0), "clearing over a neighbour that already has the value");
+        assert_eq!(m.query(base).range, base..base + 3 * PAGE, "the three pages merge back");
+        assert_eq!(m.query(base).attr, 0);
     }
 
     #[test]
