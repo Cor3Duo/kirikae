@@ -29,6 +29,7 @@ pub mod stub;
 pub mod time;
 pub mod vi;
 pub mod bt;
+pub mod btm;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Buf {
@@ -172,6 +173,7 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "vi:s" => Arc::new(vi::Vi { name: "vi:s" }),
         "vi:u" => Arc::new(vi::Vi { name: "vi:u" }),
         "bt" => Arc::new(bt::Bt),
+        "btm:u" => Arc::new(btm::BtmU),
         _ => Arc::new(stub::Stub::new(name)),
     }
 }
