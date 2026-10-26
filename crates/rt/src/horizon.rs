@@ -677,4 +677,47 @@ mod tests {
         assert_eq!(got[9], u64::from(state::HEAP));
         assert_eq!(got[10], u64::from(perm::RW));
     }
+
+    extern "C" fn wait_on_handle_lists(c: &mut Cpu) {
+        c.x[1] = HEAP_ALIGN;
+        dispatch(c, 0x01);
+        let list = c.x[1];
+
+        dispatch(c, 0x45);
+        let (writable, readable) = (c.x[1], c.x[2]);
+        c.x[0] = writable;
+        dispatch(c, 0x11);
+
+        let handles: Vec<u8> = (0..=0x40).flat_map(|_| (readable as u32).to_le_bytes()).collect();
+        let written = c.process().memory.write(list, &handles);
+
+        let wait = |c: &mut Cpu, list: u64, count: u64| {
+            c.x[0] = 0;
+            c.x[1] = list;
+            c.x[2] = count;
+            c.x[3] = 0;
+            dispatch(c, 0x18);
+            (c.x[0], c.x[1])
+        };
+        let unmapped = wait(c, 0xdead_0000, 0x41);
+        let too_many = wait(c, list, 0x41);
+        let maximum = wait(c, list, 0x40);
+
+        record(
+            "wait_lists",
+            &[u64::from(written), unmapped.0, too_many.0, maximum.0, maximum.1],
+        );
+        c.halt();
+    }
+
+    #[test]
+    fn waiting_on_more_than_64_handles_is_refused() {
+        run_guest(wait_on_handle_lists);
+        let got = observed("wait_lists");
+        assert_eq!(got[0], 1, "the handle list is mapped");
+        assert_eq!(got[1], 0xee01, "the list is not read when the count is too high");
+        assert_eq!(got[2], 0xee01, "65 signaled handles are refused, not truncated");
+        assert_eq!(got[3], RESULT_SUCCESS, "64 handles still wait");
+        assert_eq!(got[4], 0, "the signaled event is the first handle");
+    }
 }
