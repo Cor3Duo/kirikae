@@ -5,7 +5,7 @@ use crate::cpu::Cpu;
 use crate::services::stub::unimplemented_named;
 use crate::services::{Buf, Reply, Request, Service};
 
-pub const SSL_NOT_AVAILABLE: u32 = 0x0021_2a0a;
+pub const NO_CONNECTION: u32 = (208 << 9) | 123;
 
 const HOST_NAME_MAX: usize = 0xff;
 #[cfg(test)]
@@ -69,15 +69,11 @@ impl Ssl {
     }
 
     fn set_debug_option(&self, req: &Request) -> Reply {
-        let kind = req.u32(0);
-        if kind != 0 {
-            return Reply::err(SSL_NOT_AVAILABLE);
+        if req.u32(0) != 0 {
+            return Reply::ok();
         }
-        let Some(buf) = req.in_buf(0) else {
-            return Reply::err(SSL_NOT_AVAILABLE);
-        };
-        if buf.size == 0 {
-            return Reply::err(SSL_NOT_AVAILABLE);
+        if req.in_buf(0).is_none_or(|buf| buf.size == 0) {
+            return Reply::ok();
         }
         self.debug_option.store(1, Relaxed);
         Reply::ok()
@@ -85,7 +81,7 @@ impl Ssl {
 
     fn get_debug_option(&self, c: &Cpu, req: &Request) -> Reply {
         if req.u32(0) != 0 {
-            return Reply::err(SSL_NOT_AVAILABLE);
+            return Reply::ok();
         }
         if let Some(buf) = req.out_buf(0) {
             let value = [self.debug_option.load(Relaxed) as u8];
@@ -111,13 +107,11 @@ impl Service for Ssl {
             1 => Reply::ok().u32(self.context_count.load(Relaxed)),
             2 => self.get_certificates(c, req),
             3 => Reply::ok().u32(0),
-            4 => Reply::err(SSL_NOT_AVAILABLE),
             5 => self.set_interface_version(req),
             6 => self.flush_session_cache(),
             7 => self.set_debug_option(req),
             8 => self.get_debug_option(c, req),
             9 => Reply::ok(),
-            10 => Reply::err(SSL_NOT_AVAILABLE),
             11 => Reply::ok().u32(0),
             100 => self.create_context(),
             101 => {
@@ -125,8 +119,6 @@ impl Service for Ssl {
                 Reply::ok()
             }
             102 => Reply::ok().u64(self.core_mask.load(Relaxed)),
-            103 => Reply::err(SSL_NOT_AVAILABLE),
-            104 | 105 => Reply::err(SSL_NOT_AVAILABLE),
             _ => unimplemented_named(self.name, "unknown ssl command", c, req),
         }
     }
@@ -135,6 +127,7 @@ impl Service for Ssl {
 struct SslContext {
     crl_import_date_check: AtomicU32,
     connections: AtomicU32,
+    next_pki: AtomicU64,
 }
 
 impl SslContext {
@@ -142,6 +135,7 @@ impl SslContext {
         SslContext {
             crl_import_date_check: AtomicU32::new(1),
             connections: AtomicU32::new(0),
+            next_pki: AtomicU64::new(1),
         }
     }
 
@@ -151,8 +145,7 @@ impl SslContext {
                 self.crl_import_date_check.store(req.u32(4), Relaxed);
                 Reply::ok()
             }
-            0 => Reply::ok(),
-            _ => Reply::err(SSL_NOT_AVAILABLE),
+            _ => Reply::ok(),
         }
     }
 }
@@ -178,7 +171,7 @@ impl Service for SslContext {
                 Reply::ok().object(Arc::new(SslConnection::new()))
             }
             3 => Reply::ok().u32(self.connections.load(Relaxed)),
-            4 | 5 | 8 | 10 | 12 | 13 => Reply::err(SSL_NOT_AVAILABLE),
+            4 | 5 | 8 | 10 | 12 => Reply::ok().u64(self.next_pki.fetch_add(1, Relaxed)),
             6 | 7 | 11 => Reply::ok(),
             9 => Reply::ok(),
             _ => unimplemented_named("ssl/ISslContext", "unknown ssl context command", c, req),
@@ -214,11 +207,8 @@ impl SslConnection {
     }
 
     fn set_host_name(&self, c: &Cpu, req: &Request) -> Reply {
-        let Some(buf) = req.in_buf(0) else {
-            return Reply::err(SSL_NOT_AVAILABLE);
-        };
-        let Some(bytes) = read_guest(c, buf) else {
-            return Reply::err(SSL_NOT_AVAILABLE);
+        let Some(bytes) = req.in_buf(0).and_then(|buf| read_guest(c, buf)) else {
+            return Reply::ok();
         };
         let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
         let mut name = bytes[..end.min(HOST_NAME_MAX)].to_vec();
@@ -254,19 +244,15 @@ impl SslConnection {
     fn set_option(&self, req: &Request) -> Reply {
         let value = req.data.first().copied().unwrap_or(0) != 0;
         let kind = req.u32(4) as usize;
-        if kind >= OPTION_TYPES {
-            return Reply::err(SSL_NOT_AVAILABLE);
+        if kind < OPTION_TYPES {
+            lock(&self.options)[kind] = value;
         }
-        lock(&self.options)[kind] = value;
         Reply::ok()
     }
 
     fn get_option(&self, req: &Request) -> Reply {
         let kind = req.u32(0) as usize;
-        if kind >= OPTION_TYPES {
-            return Reply::err(SSL_NOT_AVAILABLE);
-        }
-        Reply::ok().u8(u8::from(lock(&self.options)[kind]))
+        Reply::ok().u8(u8::from(lock(&self.options).get(kind).copied().unwrap_or(false)))
     }
 }
 
@@ -296,7 +282,7 @@ impl Service for SslConnection {
             6 => Reply::ok().u32(self.verify.load(Relaxed)),
             7 => Reply::ok().u32(self.io_mode.load(Relaxed)),
             8 | 9 | 10 | 11 | 13 | 14 | 25 | 31 | 32 | 33 | 36 | 37 => {
-                Reply::err(SSL_NOT_AVAILABLE)
+                Reply::err(NO_CONNECTION)
             }
             12 => Reply::ok().u32(0),
             15 => Reply::ok(),
@@ -613,7 +599,7 @@ mod tests {
                 0,
                 0,
                 0,
-                SSL_NOT_AVAILABLE as u64,
+                NO_CONNECTION as u64,
                 5,
                 5,
                 1,
@@ -809,11 +795,11 @@ mod tests {
                 0,
                 0,
                 0x7,
-                SSL_NOT_AVAILABLE as u64,
-                SSL_NOT_AVAILABLE as u64,
-                SSL_NOT_AVAILABLE as u64,
-                SSL_NOT_AVAILABLE as u64,
-                SSL_NOT_AVAILABLE as u64,
+                crate::services::result::CMIF_UNKNOWN_COMMAND as u64,
+                0,
+                NO_CONNECTION as u64,
+                NO_CONNECTION as u64,
+                NO_CONNECTION as u64,
                 0,
                 0,
                 0,
@@ -825,9 +811,29 @@ mod tests {
         );
     }
 
+    extern "C" fn pki_imports(c: &mut Cpu) {
+        let context = SslContext::new();
+        let ids: Vec<u64> = [4u32, 5, 8, 10, 12]
+            .into_iter()
+            .map(|cmd| {
+                let r = context.call(c, &Request { cmd, ..Request::default() });
+                assert_eq!(r.result, 0, "command {cmd} is local and works offline");
+                u64::from_le_bytes(r.data[..8].try_into().unwrap())
+            })
+            .collect();
+        record("ssl_pki", &ids);
+        c.halt();
+    }
+
+    #[test]
+    fn pki_imports_succeed_offline_with_distinct_ids() {
+        run(pki_imports);
+        assert_eq!(observed("ssl_pki"), vec![1, 2, 3, 4, 5]);
+    }
+
     #[test]
     fn the_documented_sizes_are_the_ones_the_sysmodule_uses() {
-        assert_eq!(SSL_NOT_AVAILABLE, 0x212a0a);
+        assert_eq!(NO_CONNECTION, 0x1a07b);
         assert_eq!(CIPHER_INFO_SIZE, 0x48);
         assert_eq!(DTLS_TIMEOUT_SIZE, 8);
         assert_eq!(HOST_NAME_MAX, 0xff);
