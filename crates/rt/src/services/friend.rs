@@ -74,13 +74,13 @@ impl NotificationService {
         match req.cmd {
             0 => Some(Reply::ok().copy_handle(self.queue.event)),
             1 => Some(Reply::ok()),
-            2 => Some(Reply::ok().bytes(&[0; SIZED_NOTIFICATION_INFO_SIZE])),
+            2 => Some(Reply::err(NOTIFICATION_QUEUE_EMPTY)),
             _ => None,
         }
     }
 }
 
-const SIZED_NOTIFICATION_INFO_SIZE: usize = 0x10;
+const NOTIFICATION_QUEUE_EMPTY: u32 = (15 << 9) | 121;
 const USER_PRESENCE_VIEW_SIZE: usize = 0xe0;
 const USER_SETTING_SIZE: usize = 0x800;
 
@@ -116,9 +116,7 @@ impl FriendService {
             20400 => Some(empty_list()),
             20401 => Some(Reply::ok()),
             20500 => Some(Reply::ok()),
-            20600 => Some(Reply::ok().bytes(&[0; USER_PRESENCE_VIEW_SIZE])),
             20700 => Some(empty_list()),
-            20800 => Some(Reply::ok().bytes(&[0; USER_SETTING_SIZE])),
             20801 => Some(Reply::ok()),
             20900 => Some(Reply::ok()),
             30100 | 30110 | 30120 | 30121 => Some(Reply::ok()),
@@ -133,8 +131,11 @@ impl Service for FriendService {
     }
 
     fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
-        if req.cmd == 0 {
-            return Reply::ok().copy_handle(self.completion_event(c));
+        match req.cmd {
+            0 => return Reply::ok().copy_handle(self.completion_event(c)),
+            20600 => return zeroed_output(c, req, USER_PRESENCE_VIEW_SIZE),
+            20800 => return zeroed_output(c, req, USER_SETTING_SIZE),
+            _ => {}
         }
         match self.command(req) {
             Some(r) => r,
@@ -146,6 +147,14 @@ impl Service for FriendService {
             ),
         }
     }
+}
+
+fn zeroed_output(c: &Cpu, req: &Request, size: usize) -> Reply {
+    if let Some(buf) = req.out_buf(0) {
+        let n = (buf.size as usize).min(size);
+        c.process().memory.write(buf.addr, &vec![0u8; n]);
+    }
+    Reply::ok()
 }
 
 fn empty_list() -> Reply {
@@ -214,7 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn the_notification_queue_has_its_event_and_empty_pops() {
+    fn the_notification_queue_has_its_event_and_refuses_an_empty_pop() {
         let service = NotificationService {
             queue: Arc::new(Notifications { event: 0x1234 }),
         };
@@ -223,8 +232,7 @@ mod tests {
         let clear = service.command(&request(1)).expect("Clear");
         assert_eq!((clear.result, clear.data.len()), (0, 0));
         let pop = service.command(&request(2)).expect("Pop");
-        assert_eq!(pop.result, 0);
-        assert_eq!(pop.data, [0; SIZED_NOTIFICATION_INFO_SIZE], "an empty queue pops a zeroed notification");
+        assert_eq!((pop.result, pop.data.len()), (NOTIFICATION_QUEUE_EMPTY, 0), "an empty queue refuses Pop");
     }
 
     #[test]
@@ -256,21 +264,30 @@ mod tests {
             })
             .expect("GetReceivedFriendRequestCount");
         assert_eq!(requests.data, [0; 8]);
-        let presence = FriendService::new()
-            .command(&Request {
-                cmd: 20600,
-                ..Default::default()
-            })
-            .expect("GetUserPresenceView");
-        assert_eq!(presence.data.len(), USER_PRESENCE_VIEW_SIZE);
-        assert!(presence.data.iter().all(|&b| b == 0));
-        let setting = FriendService::new()
-            .command(&Request {
-                cmd: 20800,
-                ..Default::default()
-            })
-            .expect("LoadUserSetting");
-        assert_eq!(setting.data.len(), USER_SETTING_SIZE);
-        assert!(setting.data.iter().all(|&b| b == 0));
+    }
+
+    static VIEWS: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+
+    extern "C" fn views_land_in_the_output_buffer(c: &mut Cpu) {
+        let out = 0x1_2000_0000u64;
+        c.process().memory.map_as(out, 0x1000, crate::mem::state::NORMAL, crate::mem::perm::RW).unwrap();
+        let service = FriendService::new();
+        for (cmd, size) in [(20600u32, USER_PRESENCE_VIEW_SIZE), (20800, USER_SETTING_SIZE)] {
+            c.process().memory.write(out, &[0xaa; 0x1000]);
+            let reply = service.call(c, &Request { cmd, b: vec![crate::services::Buf { addr: out, size: size as u64 }], ..Default::default() });
+            let written = c.process().memory.read(out, 0x1000).unwrap();
+            let zeroed = written[..size].iter().all(|&b| b == 0) && written[size..].iter().all(|&b| b == 0xaa);
+            VIEWS.lock().unwrap().extend([u64::from(reply.result), reply.data.len() as u64, u64::from(zeroed)]);
+        }
+        c.halt();
+    }
+
+    #[test]
+    fn presence_view_and_user_setting_fill_the_output_buffer_not_the_reply() {
+        let entries: &'static [crate::abi::Entry] = Box::leak(vec![crate::abi::Entry { addr: 0x1000_0000, func: views_land_in_the_output_buffer }].into_boxed_slice());
+        let exe = kirikae_loader::Executable { modules: Vec::new(), entry: entries[0].addr, title_id: None, main_stack_size: None, system_resource_size: 0, romfs: None };
+        let result = crate::process::run_executable(&exe, entries, crate::process::RunOptions { capture_output: true }).expect("the fake guest runs");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(*VIEWS.lock().unwrap(), vec![0, 0, 1, 0, 0, 1]);
     }
 }
