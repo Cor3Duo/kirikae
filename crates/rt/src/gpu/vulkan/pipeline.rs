@@ -151,6 +151,8 @@ pub(super) struct PipelineCompiler {
     pub(super) pending: FastSet<PipelineKey>,
     pub(super) failed: HashMap<PipelineKey, String>,
     pub(super) workers: Vec<std::thread::JoinHandle<()>>,
+    /// Set by `stop`: workers leave the rest of the queue uncompiled instead of draining it.
+    stopping: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl PipelineCompiler {
@@ -161,16 +163,20 @@ impl PipelineCompiler {
         let (tx, rx) = std::sync::mpsc::channel::<PipelineKey>();
         let rx = Arc::new(std::sync::Mutex::new(rx));
         let done = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let n = std::thread::available_parallelism().map_or(2, |n| n.get()).saturating_sub(2).clamp(1, 4);
         let workers: Vec<_> = (0..n)
             .filter_map(|i| {
-                let (rx, done, device) = (rx.clone(), done.clone(), device.clone());
+                let (rx, done, device, stopping) = (rx.clone(), done.clone(), device.clone(), stopping.clone());
                 std::thread::Builder::new()
                     .name(format!("kirikae-pipelines-{i}"))
                     .spawn(move || {
                         loop {
                             let next = rx.lock().unwrap().recv();
                             let Ok(key) = next else { return };
+                            if stopping.load(std::sync::atomic::Ordering::Relaxed) {
+                                return;
+                            }
                             let r = build_pipeline(&device, cache, &key);
                             done.lock().unwrap().push((key, r));
                         }
@@ -181,7 +187,7 @@ impl PipelineCompiler {
         if workers.is_empty() {
             return None;
         }
-        Some(PipelineCompiler { queue: Some(tx), done, pending: FastSet::default(), failed: HashMap::default(), workers })
+        Some(PipelineCompiler { queue: Some(tx), done, pending: FastSet::default(), failed: HashMap::default(), workers, stopping })
     }
 
     pub(super) fn queue(&mut self, key: &PipelineKey) {
@@ -200,7 +206,9 @@ impl PipelineCompiler {
         out
     }
 
+    /// Waits only for the pipelines being compiled right now; what is still queued would be thrown away anyway.
     pub(super) fn stop(&mut self) -> Vec<Built> {
+        self.stopping.store(true, std::sync::atomic::Ordering::Relaxed);
         self.queue = None;
         for w in self.workers.drain(..) {
             let _ = w.join();
