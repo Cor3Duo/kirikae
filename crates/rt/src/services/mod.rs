@@ -4,6 +4,7 @@ use crate::cpu::Cpu;
 
 pub mod acc;
 pub mod am;
+pub mod csrng;
 pub mod fs;
 pub mod hid;
 pub mod hwopus;
@@ -135,6 +136,7 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "lm" => Arc::new(lm::Lm),
         "apm" | "apm:am" => Arc::new(apm::Apm),
         "appletOE" => Arc::new(am::AppletOe),
+        "csrng" => Arc::new(csrng::Csrng),
         "omm" => Arc::new(omm::Omm),
         "pctl" => Arc::new(pctl::Pctl { name: "pctl" }),
         "pdm:qry" => Arc::new(pdm::PdmQry),
@@ -159,6 +161,7 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "ldr:ro" | "ro:1" => Arc::new(ro::Ro),
         "set" => Arc::new(set::Set),
         "mm:u" => Arc::new(mm::Mm),
+        "mii:u" | "mii:e" => Arc::new(mii::Mii::new(name)),
         "nfp:user" => Arc::new(nfp::Nfp),
         "vi:m" => Arc::new(vi::Vi { name: "vi:m" }),
         "vi:s" => Arc::new(vi::Vi { name: "vi:s" }),
