@@ -67,21 +67,18 @@ impl LibraryAppletCreator {
         if size as u64 > tmem_size {
             return Reply::err(RESULT_INVALID_PARAMETERS);
         }
-        let Some(bytes) = p.memory.read(addr, tmem_size) else {
-            return Reply::err(RESULT_INVALID_PARAMETERS);
-        };
-        Reply::ok().object(Arc::new(Storage::buffer(bytes, read_only)))
+        Reply::ok().object(Arc::new(Storage::transfer_memory(addr, size as u64, read_only)))
     }
 
-    fn create_handle_storage(&self, req: &Request) -> Reply {
+    fn create_handle_storage(&self, c: &mut Cpu, req: &Request) -> Reply {
         let size = req.u64(0) as i64;
         if size <= 0 {
             return Reply::err(RESULT_OBJECT_INVALID);
         }
-        let Some(handle) = req.copy_handles.first().copied() else {
+        let Some(object) = req.copy_handles.first().and_then(|&h| c.process().handles.lock().unwrap().get(h)) else {
             return Reply::err(RESULT_INVALID_PARAMETERS);
         };
-        Reply::ok().object(Arc::new(Storage::handle(size as u64, handle)))
+        Reply::ok().object(Arc::new(Storage::handle(size as u64, object)))
     }
 }
 
@@ -97,7 +94,7 @@ impl Service for LibraryAppletCreator {
             2 => Reply::ok().u8(0),
             10 => self.create_storage(req),
             11 => self.create_transfer_memory_storage(c, req),
-            12 => self.create_handle_storage(req),
+            12 => self.create_handle_storage(c, req),
             _ => unimplemented("am/ILibraryAppletCreator", c, req),
         }
     }
@@ -198,7 +195,8 @@ impl Service for LibraryAppletAccessor {
             30 => Reply::ok(),
             50 | 60 => Reply::ok(),
             100 | 102 | 103 => self.push_storage(req),
-            101 | 104 => match self.output.lock().unwrap().take() {
+            104 => Reply::err(RESULT_NOT_AVAILABLE),
+            101 => match self.output.lock().unwrap().take() {
                 Some(data) => {
                     c.process().set_event(self.out_event, false);
                     Reply::ok().object(Arc::new(Storage::new(data)))
@@ -330,10 +328,7 @@ mod tests {
             &Request {
                 cmd: 10,
                 data: 0x18u64.to_le_bytes().to_vec(),
-                a: vec![Buf {
-                    addr: src,
-                    size: 0x10,
-                }],
+                a: vec![Buf { addr: src, size: 8 }],
                 ..Default::default()
             },
         );
@@ -342,14 +337,39 @@ mod tests {
             &Request {
                 cmd: 11,
                 data: 0x18u64.to_le_bytes().to_vec(),
-                x: vec![Buf {
-                    addr: dst,
-                    size: 0x10,
-                }],
+                b: vec![Buf { addr: dst, size: 8 }],
                 ..Default::default()
             },
         );
         let stored = c.process().memory.read(dst, 0x10).unwrap();
+        let write_across = accessor.call(
+            c,
+            &Request {
+                cmd: 10,
+                data: 0x18u64.to_le_bytes().to_vec(),
+                a: vec![Buf { addr: src, size: 0x10 }],
+                ..Default::default()
+            },
+        );
+        let read_across = accessor.call(
+            c,
+            &Request {
+                cmd: 11,
+                data: 0x18u64.to_le_bytes().to_vec(),
+                b: vec![Buf { addr: dst + 0x20, size: 0x10 }],
+                ..Default::default()
+            },
+        );
+        let read_into_input = accessor.call(
+            c,
+            &Request {
+                cmd: 11,
+                data: 0u64.to_le_bytes().to_vec(),
+                x: vec![Buf { addr: dst + 0x20, size: 0x10 }],
+                ..Default::default()
+            },
+        );
+        let untouched = c.process().memory.read(dst + 0x20, 0x10).unwrap().iter().all(|b| *b == 0xff);
         let write_past = accessor.call(
             c,
             &Request {
@@ -400,33 +420,27 @@ mod tests {
                 u64::from(read_past.result),
                 u64::from(write_at_end.result),
                 u64::from(read_at_end.result),
+                u64::from(write_across.result),
+                u64::from(read_across.result),
+                u64::from(read_into_input.result),
+                u64::from(untouched),
             ],
         );
         c.halt();
     }
 
     #[test]
-    fn storage_reads_and_writes_clamp_and_reject_out_of_range_offsets() {
+    fn storage_reads_and_writes_refuse_ranges_past_the_end() {
         run_guest(storage_bounds);
+        let oob = u64::from(RESULT_OUT_OF_BOUNDS);
         assert_eq!(
             observed("storage"),
-            vec![
-                0,
-                0x20,
-                0,
-                0,
-                1,
-                1,
-                u64::from(RESULT_OUT_OF_BOUNDS),
-                u64::from(RESULT_OUT_OF_BOUNDS),
-                0,
-                0,
-            ]
+            vec![0, 0x20, 0, 0, 1, 1, oob, oob, oob, oob, oob, oob, 0, 1]
         );
     }
 
     extern "C" fn storage_read_only(c: &mut Cpu) {
-        let storage: Arc<dyn Service> = Arc::new(Storage::buffer(vec![0; 0x10], true));
+        let storage: Arc<dyn Service> = Arc::new(Storage::transfer_memory(0, 0x10, true));
         let accessor = open(&storage, c);
         let src = guest_buffer(c, 0x1_1000_2000, 0x10);
         let _ = c.process().memory.write(src, b"abcd");
@@ -440,7 +454,8 @@ mod tests {
             },
         );
         let wrong_open = storage.call(c, &request(1, Vec::new()));
-        let handle_storage: Arc<dyn Service> = Arc::new(Storage::handle(0x100, 7));
+        let handle_storage: Arc<dyn Service> =
+            Arc::new(Storage::handle(0x100, KObject::TransferMemory { addr: 0, size: 0x100 }));
         let handle_open = handle_storage.call(c, &request(0, Vec::new()));
         record(
             "read_only",
@@ -477,7 +492,7 @@ mod tests {
             .insert(KObject::TransferMemory { addr, size: 0x1000 });
         let creator = LibraryAppletCreator;
         let mut data = 1u64.to_le_bytes().to_vec();
-        data.extend_from_slice(&0x1000u64.to_le_bytes());
+        data.extend_from_slice(&8u64.to_le_bytes());
         let reply = creator.call(
             c,
             &Request {
@@ -507,6 +522,18 @@ mod tests {
             },
         );
         let bytes = c.process().memory.read(out, 8).unwrap();
+        let src = guest_buffer(c, 0x1_2000_2000, 4);
+        let _ = c.process().memory.write(src, b"done");
+        let write = accessor.call(
+            c,
+            &Request {
+                cmd: 10,
+                data: 0u64.to_le_bytes().to_vec(),
+                a: vec![Buf { addr: src, size: 4 }],
+                ..Default::default()
+            },
+        );
+        let written = c.process().memory.read(addr, 4).unwrap();
         record(
             "tmem",
             &[
@@ -515,19 +542,21 @@ mod tests {
                 u64::from(open_after),
                 u64::from_le_bytes(size.data[..8].try_into().unwrap()),
                 u64::from(read.result),
-                u64::from(bytes == b"payload\0".to_vec()),
+                u64::from(bytes == b"changed!".to_vec()),
+                u64::from(write.result),
+                u64::from(written == b"done".to_vec()),
             ],
         );
         c.halt();
     }
 
     #[test]
-    fn a_transfer_memory_storage_copies_the_bytes_and_leaves_the_handle_to_the_guest() {
+    fn a_transfer_memory_storage_maps_the_requested_bytes_and_leaves_the_handle_to_the_guest() {
         run_guest(transfer_memory_storage);
         assert_eq!(
             observed("tmem"),
-            vec![0, 1, 1, 0x1000, 0, 1],
-            "the object is returned, the guest keeps its handle and the data is copied"
+            vec![0, 1, 1, 8, 0, 1, 0, 1],
+            "the storage has the requested size, the guest keeps its handle and reads and writes go to the mapped memory"
         );
     }
 
@@ -610,7 +639,11 @@ mod tests {
                 u64::from(opened.result),
                 u64::from_le_bytes(size.data[..8].try_into().unwrap()),
                 u64::from_le_bytes(got.data[..8].try_into().unwrap()),
-                u64::from(got.copy_handles.first().copied() == Some(handle)),
+                u64::from(got.copy_handles.first().copied() != Some(handle)),
+                u64::from(matches!(
+                    got.copy_handles.first().and_then(|&h| c.process().handles.lock().unwrap().get(h)),
+                    Some(KObject::TransferMemory { addr: a, size: 0x200 }) if a == addr
+                )),
             ],
         );
         c.halt();
@@ -621,7 +654,7 @@ mod tests {
         run_guest(handle_storage);
         assert_eq!(
             observed("handle"),
-            vec![0, u64::from(RESULT_OPENED_AS_WRONG_TYPE), 0x200, 0x200, 1,]
+            vec![0, u64::from(RESULT_OPENED_AS_WRONG_TYPE), 0x200, 0x200, 1, 1]
         );
     }
 
@@ -923,5 +956,23 @@ mod tests {
             observed("unknown"),
             vec![0, 1, u64::from(RESULT_NOT_AVAILABLE), 0, 0]
         );
+    }
+
+    extern "C" fn interactive_channel(c: &mut Cpu) {
+        let accessor = launch(c, APPLET_SOFTWARE_KEYBOARD);
+        let _ = accessor.call(c, &request(10, Vec::new()));
+        let interactive = accessor.call(c, &request(104, Vec::new()));
+        let normal = accessor.call(c, &request(101, Vec::new()));
+        record(
+            "interactive",
+            &[u64::from(interactive.result), u64::from(normal.result), normal.objects.len() as u64],
+        );
+        c.halt();
+    }
+
+    #[test]
+    fn popping_interactive_data_leaves_the_normal_output_in_place() {
+        run_guest(interactive_channel);
+        assert_eq!(observed("interactive"), vec![u64::from(RESULT_NOT_AVAILABLE), 0, 1]);
     }
 }
