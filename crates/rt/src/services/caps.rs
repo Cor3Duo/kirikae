@@ -9,7 +9,6 @@ const fn capsrv_error(description: u32) -> u32 {
     (description << 9) | CAPSRV_MODULE
 }
 
-const ALBUM_IS_NOT_MOUNTED: u32 = capsrv_error(21);
 const ALBUM_FILE_NOT_FOUND: u32 = capsrv_error(23);
 
 pub struct CapsSu;
@@ -46,19 +45,12 @@ impl Service for CapsU {
     fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
         match req.cmd {
             32 => Reply::ok(),
-            102 | 140..=147 => not_mounted(c, "GetAlbumFileList"),
-            130 => not_mounted(c, "PrecheckToCreateContentsByAruid"),
+            102 | 140..=147 => Reply::ok().u64(0),
+            130 => Reply::ok(),
             103..=105 | 110 | 120 | 60002 => file_not_found(c, req.cmd),
             _ => unimplemented_named("caps:u", "unknown", c, req),
         }
     }
-}
-
-fn not_mounted(c: &Cpu, what: &str) -> Reply {
-    c.process().warn_once(format!(
-        "caps:u: {what} has no mounted album; reporting AlbumIsNotMounted"
-    ));
-    Reply::err(ALBUM_IS_NOT_MOUNTED)
 }
 
 fn file_not_found(c: &Cpu, cmd: u32) -> Reply {
@@ -75,7 +67,7 @@ mod tests {
     #[test]
     fn both_capture_ports_are_opened_from_the_registry() {
         let listed = crate::services::harness::call_service("caps:u", None, Request { cmd: 102, ..Default::default() });
-        assert_eq!(listed.result, ALBUM_IS_NOT_MOUNTED);
+        assert_eq!((listed.result, listed.data), (0, 0u64.to_le_bytes().to_vec()));
         let version = crate::services::harness::call_service("caps:su", None, Request { cmd: 32, ..Default::default() });
         assert_eq!((version.result, version.data.len()), (0, 0));
     }
@@ -137,7 +129,7 @@ mod tests {
                     ..Default::default()
                 },
             );
-            harness::record("unknown", &[reply.result as u64, reply.data.len() as u64]);
+            harness::record("caps/unknown", &[reply.result as u64, reply.data.len() as u64]);
             c.halt();
         }
         harness::run(vec![Entry {
@@ -145,7 +137,7 @@ mod tests {
             func: probe,
         }]);
         assert_eq!(
-            harness::observed("unknown"),
+            harness::observed("caps/unknown"),
             vec![crate::services::result::CMIF_UNKNOWN_COMMAND as u64, 0]
         );
     }
@@ -161,8 +153,7 @@ mod tests {
                     ..Default::default()
                 },
             );
-            harness::record(
-                "shim",
+            harness::record("caps/shim",
                 &[
                     reply.result as u64,
                     reply.data.len() as u64,
@@ -176,11 +167,11 @@ mod tests {
             addr: harness::ENTRY,
             func: probe,
         }]);
-        assert_eq!(harness::observed("shim"), vec![0, 0, 0, 0]);
+        assert_eq!(harness::observed("caps/shim"), vec![0, 0, 0, 0]);
     }
 
     #[test]
-    fn caps_u_lists_and_the_save_precheck_report_the_album_as_not_mounted() {
+    fn caps_u_lists_an_empty_album_and_accepts_the_save_precheck() {
         extern "C" fn probe(c: &mut Cpu) {
             let mut all = Vec::new();
             for cmd in [102u32, 140, 141, 142, 143, 144, 145, 146, 147, 130] {
@@ -193,7 +184,7 @@ mod tests {
                 );
                 all.extend([reply.result as u64, reply.data.len() as u64]);
             }
-            harness::record("lists", &all);
+            harness::record("caps/lists", &all);
             c.halt();
         }
         harness::run(vec![Entry {
@@ -201,11 +192,11 @@ mod tests {
             func: probe,
         }]);
         let mut expected = Vec::new();
-        for _ in 0..10 {
-            expected.extend([ALBUM_IS_NOT_MOUNTED as u64, 0]);
+        for _ in 0..9 {
+            expected.extend([0, 8]);
         }
-        assert_eq!(harness::observed("lists"), expected);
-        assert_eq!(ALBUM_IS_NOT_MOUNTED, 0x2ACE);
+        expected.extend([0, 0]);
+        assert_eq!(harness::observed("caps/lists"), expected);
     }
 
     #[test]
@@ -226,7 +217,7 @@ mod tests {
                     reply.objects.len() as u64,
                 ]);
             }
-            harness::record("files", &all);
+            harness::record("caps/files", &all);
             c.halt();
         }
         harness::run(vec![Entry {
@@ -238,7 +229,7 @@ mod tests {
             expected.extend([ALBUM_FILE_NOT_FOUND as u64, 0, 0]);
         }
         assert_eq!(
-            harness::observed("files"),
+            harness::observed("caps/files"),
             expected,
             "no buffer is filled and no accessor object is handed out"
         );
@@ -255,7 +246,7 @@ mod tests {
                     ..Default::default()
                 },
             );
-            harness::record("unknown", &[reply.result as u64, reply.data.len() as u64]);
+            harness::record("caps/unknown", &[reply.result as u64, reply.data.len() as u64]);
             c.halt();
         }
         harness::run(vec![Entry {
@@ -263,7 +254,7 @@ mod tests {
             func: probe,
         }]);
         assert_eq!(
-            harness::observed("unknown"),
+            harness::observed("caps/unknown"),
             vec![crate::services::result::CMIF_UNKNOWN_COMMAND as u64, 0]
         );
     }
