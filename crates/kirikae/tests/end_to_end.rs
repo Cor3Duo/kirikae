@@ -15,7 +15,7 @@ fn build_and_run(file: &[u8], name: &str, backend: Backend, fast_regs: bool) -> 
     let mut opts = BuildOptions::new(out_dir(name), name);
     opts.backend = backend;
     opts.fast_regs = fast_regs;
-    let report = build(&Source::Single(file.to_vec()), &opts).unwrap();
+    let report = build(&Source::Single(file.to_vec(), None), &opts).unwrap();
     let run = run_built(&report, &[]);
     (report, run)
 }
