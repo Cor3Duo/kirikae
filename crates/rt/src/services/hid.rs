@@ -310,13 +310,14 @@ impl Npads {
         let events = self.events.lock().unwrap();
         for id in changed {
             if let Some(e) = events.get(&id) {
-                e.signaled.store(true, Relaxed);
+                p.sched.store_event(e, true);
             }
         }
     }
 }
 
 fn acquire_style_set_event(
+    sched: &crate::sched::Scheduler,
     events: &Mutex<HashMap<u32, Arc<Event>>>,
     handles: &mut crate::kernel::HandleTable,
     id: u32,
@@ -327,7 +328,7 @@ fn acquire_style_set_event(
         .entry(id)
         .or_insert_with(|| Arc::new(Event { signaled: AtomicBool::new(false) }))
         .clone();
-    event.signaled.store(true, Relaxed);
+    sched.store_event(&event, true);
     handles.insert(KObject::Event(event))
 }
 
@@ -390,7 +391,7 @@ impl Service for Hid {
                 let p = c.process();
                 let n = npads(c);
                 let mut handles = p.handles.lock().unwrap();
-                let handle = acquire_style_set_event(&n.events, &mut handles, req.u32(0));
+                let handle = acquire_style_set_event(&p.sched, &n.events, &mut handles, req.u32(0));
                 Reply::ok().copy_handle(handle)
             }
             108 => {
@@ -514,13 +515,36 @@ mod tests {
 
     #[test]
     fn every_acquire_gets_a_fresh_handle_for_the_same_event() {
+        let sched = crate::sched::Scheduler::default();
         let events = Mutex::new(HashMap::new());
         let mut handles = HandleTable::default();
-        let first = acquire_style_set_event(&events, &mut handles, 0);
-        let second = acquire_style_set_event(&events, &mut handles, 0);
+        let first = acquire_style_set_event(&sched, &events, &mut handles, 0);
+        let second = acquire_style_set_event(&sched, &events, &mut handles, 0);
         assert_ne!(first, second, "each client gets its own handle");
         let signaled = |h| matches!(handles.get(h), Some(KObject::Event(e)) if e.signaled.load(Relaxed));
         assert!(signaled(first) && signaled(second));
         assert_eq!(events.lock().unwrap().len(), 1, "one event per npad id");
+    }
+
+    #[test]
+    fn signaling_a_style_set_event_wakes_a_blocked_waiter() {
+        let sched = crate::sched::Scheduler::default();
+        let event = Event { signaled: AtomicBool::new(false) };
+        std::thread::scope(|s| {
+            let waiter = s.spawn(|| {
+                let mut st = sched.lock();
+                while !event.signaled.load(Relaxed) {
+                    let (next, wait) = sched.changed.wait_timeout(st, std::time::Duration::from_secs(5)).unwrap();
+                    if wait.timed_out() {
+                        return false;
+                    }
+                    st = next;
+                }
+                true
+            });
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            sched.store_event(&event, true);
+            assert!(waiter.join().unwrap(), "the waiter was not woken");
+        });
     }
 }

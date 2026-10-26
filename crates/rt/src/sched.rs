@@ -416,6 +416,16 @@ impl Scheduler {
     pub fn touch(&self) {
         self.epoch.fetch_add(1, Ordering::Relaxed);
     }
+
+    pub fn store_event(&self, e: &crate::kernel::Event, signaled: bool) {
+        let _st = self.lock();
+        if signaled && !e.signaled.swap(true, Ordering::Relaxed) {
+            self.notify();
+        } else {
+            e.signaled.store(signaled, Ordering::Relaxed);
+            self.touch();
+        }
+    }
 }
 
 thread_local! {
