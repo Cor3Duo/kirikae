@@ -61,15 +61,18 @@ impl Service for LdnSession {
             }
             2 => self.offline_or(INVALID_ARGUMENT),
             3 => Reply::ok().bytes(&0u16.to_le_bytes()),
-            4 | 5 | 102 | 103 | 200 | 300 => self.offline_or(INVALID_STATE),
+            4 | 5 | 102 | 103 | 200..=209 | 300..=304 => self.offline_or(INVALID_STATE),
             100 => {
-                let handle = *c
-                    .process()
-                    .service_state("ldn.state_change", || c.process().create_event(false));
+                let p = c.process();
+                let event = *p.service_state("ldn.state_change", || p.create_event(false));
+                let Some(object) = p.handles.lock().unwrap().get(event) else {
+                    return Reply::err(INVALID_STATE);
+                };
+                let handle = p.handles.lock().unwrap().insert(object);
                 Reply::ok().copy_handle(handle)
             }
             104 if req.u32(0) > 1 => Reply::err(INVALID_ARGUMENT),
-            104 | 201..=209 | 301..=304 => Reply::err(INVALID_STATE),
+            104 => Reply::err(INVALID_STATE),
             400 | 402 => {
                 self.disabled.store(true, Relaxed);
                 Reply::err(DEVICE_DISABLED)
@@ -126,7 +129,7 @@ mod tests {
         assert_eq!(dd, 0x2ccb, "DeviceDisabled is 2203-0022");
         assert_eq!(
             harness::observed("ldn/offline"),
-            vec![0, state, dd, 6, 0, 2, dd, dd, dd, dd, dd, dd, dd, dd, state, state]
+            vec![0, state, dd, 6, 0, 2, dd, dd, dd, dd, dd, dd, dd, dd, dd, dd]
         );
     }
 
@@ -136,19 +139,25 @@ mod tests {
             let (input, output) = (0x1_2000_0000u64, 0x1_2000_1000u64);
             c.process().memory.map_as(input, 0x2000, crate::mem::state::NORMAL, crate::mem::perm::RW).unwrap();
             c.process().memory.write(input, &[0xaa; 0x2000]);
-            let req = Request {
-                cmd: 1,
-                x: vec![Buf { addr: input, size: 0x480 }],
-                c: vec![Buf { addr: output, size: 0x480 }],
-                ..Default::default()
-            };
-            let reply = LdnSession::default().call(c, &req);
+            let session = LdnSession::default();
+            let mut results = Vec::new();
+            for cmd in [1, 101] {
+                c.process().memory.write(output, &[0xbb; 0x480]);
+                let req = Request {
+                    cmd,
+                    x: vec![Buf { addr: input, size: 0x480 }],
+                    c: vec![Buf { addr: output, size: 0x480 }],
+                    ..Default::default()
+                };
+                results.push(u64::from(session.call(c, &req).result));
+            }
             let kept = c.process().memory.read(input, 0x480).unwrap();
             let zeroed = c.process().memory.read(output, 0x480).unwrap();
             harness::record(
                 "ldn/buffers",
                 &[
-                    u64::from(reply.result),
+                    results[0],
+                    results[1],
                     u64::from(kept.iter().all(|&b| b == 0xaa)),
                     u64::from(zeroed.iter().all(|&b| b == 0)),
                 ],
@@ -156,27 +165,34 @@ mod tests {
             c.halt();
         }
         harness::run(vec![Entry { addr: harness::ENTRY, func: probe }]);
-        assert_eq!(harness::observed("ldn/buffers"), vec![u64::from(INVALID_STATE), 1, 1]);
+        assert_eq!(
+            harness::observed("ldn/buffers"),
+            vec![u64::from(INVALID_STATE), u64::from(INVALID_STATE), 1, 1]
+        );
     }
 
     #[test]
-    fn sessions_share_one_unsignalled_state_change_event() {
+    fn each_request_gets_its_own_handle_to_one_unsignalled_state_change_event() {
         extern "C" fn probe(c: &mut Cpu) {
             let first = call(&LdnSession::default(), c, 100);
             let second = call(&LdnSession::default(), c, 100);
-            let handle = first.copy_handles[0];
-            let signaled = match c.process().handles.lock().unwrap().get(handle) {
-                Some(KObject::Event(e)) => u64::from(e.signaled.load(Relaxed)),
-                _ => 2,
+            let (a, b) = (first.copy_handles[0], second.copy_handles[0]);
+            let handles = c.process().handles.lock().unwrap();
+            let (same, signaled) = match (handles.get(a), handles.get(b)) {
+                (Some(KObject::Event(x)), Some(KObject::Event(y))) => {
+                    (u64::from(std::sync::Arc::ptr_eq(&x, &y)), u64::from(x.signaled.load(Relaxed)))
+                }
+                _ => (0, 2),
             };
+            drop(handles);
             harness::record(
                 "ldn/event",
-                &[u64::from(first.result), u64::from(handle == second.copy_handles[0]), signaled],
+                &[u64::from(first.result), u64::from(a != b), same, signaled],
             );
             c.halt();
         }
         harness::run(vec![Entry { addr: harness::ENTRY, func: probe }]);
-        assert_eq!(harness::observed("ldn/event"), vec![0, 1, 0]);
+        assert_eq!(harness::observed("ldn/event"), vec![0, 1, 1, 0]);
     }
 
     #[test]
