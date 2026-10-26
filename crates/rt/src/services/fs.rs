@@ -15,6 +15,9 @@ const DIRECTORY_NOT_EMPTY: u32 = 0x4d002;
 const OUT_OF_RANGE: u32 = 0x3e402;
 const INVALID_BIS_PARTITION: u32 = 0x2ee202;
 
+const SYSTEM_DATA_FIRST: u64 = 0x0100_0000_0000_0800;
+const SYSTEM_DATA_LAST: u64 = 0x0100_0000_0000_0fff;
+
 const ENTRY_DIRECTORY: u8 = 0;
 const ENTRY_FILE: u8 = 1;
 const DIRECTORY_ENTRY_SIZE: usize = 0x310;
@@ -101,7 +104,14 @@ impl Service for FsProxy {
                 Some(_) => Reply::ok().object(Arc::new(RomStorage)),
                 None => Reply::err(TARGET_NOT_FOUND),
             },
-            202 | 203 => Reply::err(TARGET_NOT_FOUND),
+            202 => match req.u64(8) {
+                id @ SYSTEM_DATA_FIRST..=SYSTEM_DATA_LAST => {
+                    p.warn_once(format!("fsp-srv: system data {id:#018x} is not available; serving an empty archive"));
+                    Reply::ok().object(Arc::new(DataStorage(kirikae_loader::romfs::empty())))
+                }
+                _ => Reply::err(TARGET_NOT_FOUND),
+            },
+            203 => Reply::err(TARGET_NOT_FOUND),
             1003 | 1004 | 1006 => Reply::ok(),
             1005 => Reply::ok().u32(0),
             1011 => Reply::ok().u32(0).u32(1),
@@ -138,6 +148,29 @@ impl Service for RomStorage {
             }
             4 => Reply::ok().u64(romfs.lock().unwrap().size()),
             _ => unimplemented("fs/IStorage(RomFS)", c, req),
+        }
+    }
+}
+
+struct DataStorage(Vec<u8>);
+
+impl Service for DataStorage {
+    fn name(&self) -> String {
+        "fs/IStorage(SystemData)".into()
+    }
+
+    fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
+        match req.cmd {
+            0 => {
+                let (offset, size) = (req.u64(0) as usize, req.u64(8) as usize);
+                let Some(b) = req.b.first() else { return Reply::err(OUT_OF_RANGE) };
+                let start = offset.min(self.0.len());
+                let end = start.saturating_add(size.min(b.size as usize)).min(self.0.len());
+                c.process().memory.write(b.addr, &self.0[start..end]);
+                Reply::ok()
+            }
+            4 => Reply::ok().u64(self.0.len() as u64),
+            _ => unimplemented("fs/IStorage(SystemData)", c, req),
         }
     }
 }
