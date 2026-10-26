@@ -6,6 +6,8 @@ pub mod acc;
 pub mod am;
 pub mod csrng;
 pub mod fs;
+#[cfg(test)]
+pub(crate) mod harness;
 pub mod hid;
 pub mod hwopus;
 pub mod apm;
