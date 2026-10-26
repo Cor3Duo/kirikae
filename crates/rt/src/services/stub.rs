@@ -1,5 +1,5 @@
 use crate::cpu::Cpu;
-use crate::services::{result, Reply, Request, Service};
+use crate::services::{Reply, Request, Service, result};
 
 const STUB_OUTPUT: usize = 0x20;
 
@@ -27,6 +27,22 @@ pub fn unimplemented(service: &str, c: &mut Cpu, req: &Request) -> Reply {
     Reply::ok().bytes(&[0; STUB_OUTPUT])
 }
 
+pub fn unimplemented_named(service: &str, command: &str, c: &mut Cpu, req: &Request) -> Reply {
+    crate::usage::mark_stub("unimplemented");
+    let p = c.process();
+    p.warn_once(format!(
+        "{service} command {} ({command}) is not implemented (in: {} bytes, A={} B={} X={} C={}, called from {})",
+        req.cmd,
+        req.data.len(),
+        req.a.len(),
+        req.b.len(),
+        req.x.len(),
+        req.c.len(),
+        p.describe(c.x[30])
+    ));
+    Reply::err(result::CMIF_UNKNOWN_COMMAND)
+}
+
 pub fn plain_ok() -> Reply {
     crate::usage::mark_stub("plain ok");
     Reply::ok()
@@ -38,7 +54,9 @@ pub struct Stub {
 
 impl Stub {
     pub fn new(name: &str) -> Stub {
-        Stub { name: name.to_string() }
+        Stub {
+            name: name.to_string(),
+        }
     }
 }
 
