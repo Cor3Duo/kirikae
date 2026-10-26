@@ -10,6 +10,7 @@ pub mod hwopus;
 pub mod apm;
 pub mod audio;
 pub mod lm;
+pub mod mii;
 pub mod mm;
 pub mod nfp;
 pub mod nvdrv;
