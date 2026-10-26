@@ -159,6 +159,7 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "ldr:ro" | "ro:1" => Arc::new(ro::Ro),
         "set" => Arc::new(set::Set),
         "mm:u" => Arc::new(mm::Mm),
+        "mii:u" | "mii:e" => Arc::new(mii::Mii::new(name)),
         "nfp:user" => Arc::new(nfp::Nfp),
         "vi:m" => Arc::new(vi::Vi { name: "vi:m" }),
         "vi:s" => Arc::new(vi::Vi { name: "vi:s" }),
