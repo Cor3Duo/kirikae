@@ -268,11 +268,8 @@ pub enum Opcode {
     VceqF,
     VcgeF,
     Vtst,
-    VabsU,
-    VnegU,
     VabsF,
     VnegF,
-    VsqrtF,
     Vrev16,
     Vrev32,
     Vrev64,
@@ -306,11 +303,8 @@ impl Opcode {
             Opcode::VcgeU => "vcge",
             Opcode::VceqF => "vceq",
             Opcode::VcgeF => "vcge",
-            Opcode::VabsU => "vabs",
-            Opcode::VnegU => "vneg",
             Opcode::VabsF => "vabs",
             Opcode::VnegF => "vneg",
-            Opcode::VsqrtF => "vsqrt",
             other => other.name(),
         }
     }
@@ -407,8 +401,6 @@ impl Opcode {
             | Opcode::VcgeU
             | Opcode::VmaxU
             | Opcode::VminU
-            | Opcode::VabsU
-            | Opcode::VnegU
             | Opcode::VmovLaneU => ElemStyle::Unsigned,
             Opcode::VaddF
             | Opcode::VsubF
@@ -422,8 +414,7 @@ impl Opcode {
             | Opcode::VceqF
             | Opcode::VcgeF
             | Opcode::VabsF
-            | Opcode::VnegF
-            | Opcode::VsqrtF => ElemStyle::Float,
+            | Opcode::VnegF => ElemStyle::Float,
             _ => ElemStyle::Hidden,
         }
     }

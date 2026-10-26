@@ -171,12 +171,20 @@ fn neon_matches_the_assembler() {
         (0xf2800030, "vmvn.i32 d0, #0x0"),
         (0xf2800931, "vbic.i16 d0, #0x1"),
         (0xf2b10302, "vext.8 d0, d1, d2, #0x3"),
+        (0xf3b80001, "vrev64.32 d0, d1"),
+        (0xf3b400c2, "vrev32.16 q0, q1"),
+        (0xf3b00101, "vrev16.8 d0, d1"),
+        (0xf3b50301, "vabs.s16 d0, d1"),
+        (0xf3b103c2, "vneg.s8 q0, q1"),
+        (0xf3b90701, "vabs.f32 d0, d1"),
+        (0xf3b907c2, "vneg.f32 q0, q1"),
+        (0xf3b00581, "vmvn d0, d1"),
     ]);
 }
 
 #[test]
-fn shift_by_immediate_is_reported_unsupported_not_misdecoded() {
-    for word in [0xf38d0011, 0xf2bf0052, 0xf2920511, 0xf3880a11, 0xf28c0812, 0xf29d0912, 0xf3a00191] {
+fn shift_by_immediate_and_crypto_are_reported_unsupported_not_misdecoded() {
+    for word in [0xf38d0011, 0xf2bf0052, 0xf2920511, 0xf3880a11, 0xf28c0812, 0xf29d0912, 0xf3a00191, 0xf3b80011, 0xf3b80052, 0xf3b00302, 0xf3b00382] {
         assert_eq!(decode(0x1000, word).err(), Some(DecodeError::Unsupported), "{word:#010x}");
     }
 }

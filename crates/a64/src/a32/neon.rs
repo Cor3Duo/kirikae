@@ -124,22 +124,22 @@ fn two_register(pc: u32, word: u32) -> Result<Insn, DecodeError> {
     let vm = word & 0xf;
     let mbit = word & 0x20 != 0;
     let q = word & 0x40 != 0;
+    if word & 0x0810 != 0 {
+        return Err(DecodeError::Unsupported);
+    }
     let size = (word >> 18) & 3;
-    let opc = (word >> 7) & 0x1f;
-    let u = word & 0x0001_0000 != 0;
+    let opc1 = (word >> 16) & 3;
+    let opc2 = (word >> 7) & 0xf;
     let esize = 8u8 << size;
-    let (opcode, style) = match (u, size, opc) {
-        (false, _, 0b00000) => (Opcode::Vrev64, esize),
-        (false, _, 0b00001) => (Opcode::Vrev32, esize),
-        (false, _, 0b00010) => (Opcode::Vrev16, esize),
-        (false, _, 0b01011) => (Opcode::Vmvn, 8),
-        (true, _, 0b00110) => (Opcode::Vabs, esize),
-        (false, _, 0b00110) => (Opcode::VabsU, esize),
-        (true, _, 0b00111) => (Opcode::Vneg, esize),
-        (false, _, 0b00111) => (Opcode::VnegU, esize),
-        (true, 2, 0b01110) => (Opcode::VabsF, 32),
-        (true, 2, 0b01111) => (Opcode::VnegF, 32),
-        (true, 2, 0b11111) => (Opcode::VsqrtF, 32),
+    let (opcode, style) = match (opc1, opc2, size) {
+        (0, 0b0000, _) => (Opcode::Vrev64, esize),
+        (0, 0b0001, _) => (Opcode::Vrev32, esize),
+        (0, 0b0010, _) => (Opcode::Vrev16, esize),
+        (0, 0b1011, 0) => (Opcode::Vmvn, 8),
+        (1, 0b0110, _) => (Opcode::Vabs, esize),
+        (1, 0b0111, _) => (Opcode::Vneg, esize),
+        (1, 0b1110, 2) => (Opcode::VabsF, 32),
+        (1, 0b1111, 2) => (Opcode::VnegF, 32),
         _ => return Err(DecodeError::Unsupported),
     };
     let dest = double(vd, word & 0x0040_0000 != 0);
