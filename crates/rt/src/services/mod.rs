@@ -11,10 +11,13 @@ pub mod hwopus;
 pub mod apm;
 pub mod audio;
 pub mod lm;
+pub mod mii;
 pub mod mm;
 pub mod nfp;
 pub mod nvdrv;
+pub mod omm;
 pub mod pctl;
+pub mod pdm;
 pub mod pl;
 pub mod ro;
 pub mod set;
@@ -134,7 +137,9 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "apm" | "apm:am" => Arc::new(apm::Apm),
         "appletOE" => Arc::new(am::AppletOe),
         "csrng" => Arc::new(csrng::Csrng),
+        "omm" => Arc::new(omm::Omm),
         "pctl" => Arc::new(pctl::Pctl { name: "pctl" }),
+        "pdm:qry" => Arc::new(pdm::PdmQry),
         "pctl:s" => Arc::new(pctl::Pctl { name: "pctl:s" }),
         "pctl:r" => Arc::new(pctl::Pctl { name: "pctl:r" }),
         "pctl:a" => Arc::new(pctl::Pctl { name: "pctl:a" }),
