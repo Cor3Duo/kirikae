@@ -132,6 +132,7 @@ pub struct Shader {
     pub inputs: u32,
     pub outputs: u32,
     pub color_outputs: u32,
+    pub writes_depth: bool,
     pub unsupported: Vec<&'static str>,
     pub mnemonics: Vec<(&'static str, u32)>,
     pub brx: Vec<(u32, Vec<u32>)>,
@@ -2595,6 +2596,7 @@ impl<'a> Translator<'a> {
             self.b.store(var, value, None, [])?;
         }
         if self.header.ps_writes_depth() {
+            self.shader.writes_depth = true;
             let f32_ = self.t.f32;
             let var = self.builtin(BuiltIn::FragDepth, f32_, true);
             let d = self.rf(reg + 1)?;

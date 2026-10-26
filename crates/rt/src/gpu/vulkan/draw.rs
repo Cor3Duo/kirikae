@@ -50,6 +50,17 @@ pub(super) struct Bound {
     pub(super) descriptors: Option<(vk::PipelineLayout, Vec<Descriptor>)>,
 }
 
+/// Vulkan's depth test, write and compare op for DEPTH_TEST_ENABLE, DEPTH_WRITE_ENABLE and DEPTH_TEST_FUNC.
+/// A fragment shader that exports depth still writes it with the test off (games build downsampled depth buffers
+/// that way), which Vulkan only does with the test on, so that case passes always instead.
+/// Without a depth export the test-off write is dropped: forcing it there hides geometry that should be drawn.
+fn depth_state(test: bool, write: bool, func: u32, exports_depth: bool) -> (bool, bool, vk::CompareOp) {
+    if !test && write && exports_depth {
+        return (true, true, vk::CompareOp::ALWAYS);
+    }
+    (test, write, formats::compare_op(func))
+}
+
 pub(super) fn changed<T: PartialEq>(slot: &mut Option<T>, v: T) -> bool {
     let new = slot.as_ref() != Some(&v);
     if new {
@@ -259,6 +270,7 @@ impl Renderer {
             }
         }
 
+        let exports_depth = fs.as_ref().is_some_and(|f| f.shader.writes_depth);
         let pair = (vs.module, fs.as_ref().map_or(vk::ShaderModule::null(), |f| f.module));
         let (set_layout, layout) = match self.pair_layouts.get(&pair) {
             Some(&l) => l,
@@ -504,7 +516,7 @@ impl Renderer {
                 d.cmd_set_blend_constants(cmd, &constants.map(f32::from_bits));
             }
             let has_depth = depth.is_some() && crate::env_var!("KIRIKAE_NO_DEPTH_TEST").is_none();
-            let (test, write, op) = (has_depth && regs[0x4b3] & 1 == 1, has_depth && regs[0x4ba] & 1 == 1, formats::compare_op(regs[0x4c3]));
+            let (test, write, op) = depth_state(has_depth && regs[0x4b3] & 1 == 1, has_depth && regs[0x4ba] & 1 == 1, regs[0x4c3], exports_depth);
             let was = b.depth;
             if changed(&mut b.depth, (test, write, op)) {
                 if was.is_none_or(|w| w.0 != test) {
@@ -577,5 +589,19 @@ impl Renderer {
         self.scratch = scratch;
         self.lap(8, &mut lap);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ash::vk::CompareOp;
+    use super::depth_state;
+
+    #[test]
+    fn only_depth_exports_write_with_the_test_off() {
+        // A depth downsample: test off, write on, the fragment shader exports depth.
+        assert_eq!(depth_state(false, true, 8, true), (true, true, CompareOp::ALWAYS));
+        assert_eq!(depth_state(false, true, 8, false), (false, true, CompareOp::ALWAYS));
+        assert_eq!(depth_state(true, true, 4, true), (true, true, CompareOp::LESS_OR_EQUAL));
     }
 }
