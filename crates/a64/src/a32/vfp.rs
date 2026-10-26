@@ -178,7 +178,7 @@ fn vblock(
     if words == 0 {
         return Err(DecodeError::Unpredictable);
     }
-    if double && !words.is_multiple_of(2) {
+    if double && (!words.is_multiple_of(2) || words / 2 > 16) {
         return Err(DecodeError::Unpredictable);
     }
     let end = if double {
@@ -398,13 +398,12 @@ fn register_transfer(pc: u32, word: u32, cond: Cond) -> Result<Insn, DecodeError
     let rt = reg((word >> 12) & 0xf);
     let vn = (word >> 16) & 0xf;
     if (word >> 21) & 0b111 == 0b111 {
-        let field = (word >> 16) & 0xf;
-        let Some(sys) = VfpSys::from_field(field) else {
-            return Err(DecodeError::Unsupported);
-        };
         if cp != 0b1010 {
             return element_transfer(pc, word, cond, rt, vn);
         }
+        let Some(sys) = VfpSys::from_field((word >> 16) & 0xf) else {
+            return Err(DecodeError::Unsupported);
+        };
         if word & 0xef != 0 {
             return Err(DecodeError::Unpredictable);
         }

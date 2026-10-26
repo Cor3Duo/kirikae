@@ -286,7 +286,7 @@ fn structure(pc: u32, word: u32) -> Result<Insn, DecodeError> {
         (_, 1) => 64,
         _ => return Err(DecodeError::Unallocated),
     };
-    let align = (alignment != 0).then(|| (esize / 8) << alignment);
+    let align = (alignment != 0).then(|| 4u8 << alignment);
     let base = reg((word >> 16) & 0xf);
     let first = double((word >> 12) & 0xf, word & 0x0040_0000 != 0);
     let last =

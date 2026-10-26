@@ -207,12 +207,42 @@ fn cases_found_by_the_llvm_differential_match_the_assembler() {
         (0xec8d8b1e, "vstmia sp, {d8-d22}"),
         (0xe10f0000, "mrs r0, apsr"),
         (0xe128f000, "msr APSR_nzcvq, r0"),
+        (0xeef80a10, "vmrs r0, fpexc"),
+        (0xeef30b70, "vmov.u8 r0, d3[7]"),
+        (0xeee40b10, "vdup.8 q2, r0"),
+        (0xf420071f, "vld1.8 {d0}, [r0:64]"),
+        (0xec9d8b04, "vldmia sp, {d8, d9}"),
     ]);
 }
 
 #[test]
 fn undefined_encodings_found_by_the_llvm_differential_are_refused() {
-    for word in [0xf3774618u32, 0xf2f5680c, 0xf37a4340, 0xf23468b6, 0xf279399b, 0xf43d5a3f, 0xf43eb60e, 0xeea7ab19, 0xeef2baf0, 0xee734b16] {
-        assert!(decode(0x1000, word).is_err(), "{word:#010x}");
+    let cases = [
+        (0xf3774618u32, DecodeError::Unallocated),
+        (0xf2f5680c, DecodeError::Unallocated),
+        (0xf37a4340, DecodeError::Unallocated),
+        (0xf23468b6, DecodeError::Unallocated),
+        (0xf279399b, DecodeError::Unallocated),
+        (0xf3b80080, DecodeError::Unallocated),
+        (0xf3bd0301, DecodeError::Unallocated),
+        (0xf43d5a3f, DecodeError::Unallocated),
+        (0xf420072f, DecodeError::Unallocated),
+        (0xf42007af, DecodeError::Unallocated),
+        (0xf420083f, DecodeError::Unallocated),
+        (0xeea7ab19, DecodeError::Unpredictable),
+        (0xeef1baf0, DecodeError::Unpredictable),
+        (0xeef2baf0, DecodeError::Unsupported),
+        (0xee734b16, DecodeError::Unpredictable),
+        (0xecbd8b22, DecodeError::Unpredictable),
+    ];
+    for (word, error) in cases {
+        assert_eq!(decode(0x1000, word).err(), Some(error), "{word:#010x}");
+    }
+}
+
+#[test]
+fn two_register_neighbours_are_reported_unsupported_not_misdecoded() {
+    for word in [0xf3b10802u32, 0xf3bc0c01, 0xf3b10000, 0xf3b10100, 0xf3b00780, 0xf3b00500, 0xf3b902c0, 0xf3b20000] {
+        assert_eq!(decode(0x1000, word).err(), Some(DecodeError::Unsupported), "{word:#010x}");
     }
 }

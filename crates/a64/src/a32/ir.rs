@@ -353,7 +353,7 @@ impl VfpSys {
         match field & 0xf {
             0 => Some(VfpSys::Fpsid),
             1 => Some(VfpSys::Fpscr),
-            2 => Some(VfpSys::Fpexc),
+            8 => Some(VfpSys::Fpexc),
             5 => Some(VfpSys::Mvfr2),
             6 => Some(VfpSys::Mvfr1),
             7 => Some(VfpSys::Mvfr0),
@@ -474,7 +474,10 @@ impl fmt::Display for NeonMem {
             }
             write!(f, "d{}", self.register_number(slot))?;
         }
-        write!(f, "}}, [{}]", self.base)?;
+        match self.align {
+            Some(bytes) => write!(f, "}}, [{}:{}]", self.base, u32::from(bytes) * 8)?,
+            None => write!(f, "}}, [{}]", self.base)?,
+        }
         match self.update {
             PostUpdate::None => Ok(()),
             PostUpdate::Immediate => f.write_str("!"),
