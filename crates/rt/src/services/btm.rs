@@ -80,7 +80,7 @@ fn scan_filter_parameter(c: &mut Cpu, req: &Request) -> Reply {
     let parameter_id = parameter_id(req);
     let pattern: [u8; 6] = match parameter_id {
         0x1 => [0x00, 0x01, 0x00, 0x00, 0x01, 0x00],
-        0xFFFF => [0xAD, 0xDE, 0x00, 0xEF, 0xBE, 0x00],
+        0xFFFF => [0; 6],
         _ => {
             c.process().warn_once(format!(
                 "btm:u: GetBleScanFilterParameter({parameter_id:#x}) names no documented filter"
@@ -151,8 +151,7 @@ mod tests {
     fn get_core_returns_the_documented_core_object() {
         extern "C" fn probe(c: &mut Cpu) {
             let created = BtmU.call(c, &Request::default());
-            harness::record(
-                "core",
+            harness::record("btm/core",
                 &[
                     created.result as u64,
                     created.objects.len() as u64,
@@ -167,7 +166,7 @@ mod tests {
             func: probe,
         }]);
         assert_eq!(
-            harness::observed("core"),
+            harness::observed("btm/core"),
             vec![0, 1, 0, 0],
             "GetCore succeeds with one object and no raw data"
         );
@@ -201,7 +200,7 @@ mod tests {
                     signaled as u64,
                 ]);
             }
-            harness::record("events", &all);
+            harness::record("btm/events", &all);
             c.halt();
         }
         harness::run(vec![Entry {
@@ -213,7 +212,7 @@ mod tests {
             expected.extend([0, 1, 1, 1, 0]);
         }
         assert_eq!(
-            harness::observed("events"),
+            harness::observed("btm/events"),
             expected,
             "each event command returns bool 1, a real handle and no signal"
         );
@@ -248,14 +247,14 @@ mod tests {
                 );
                 all.extend([reply.result as u64, reply.data.len() as u64, width as u64]);
             }
-            harness::record("queries", &all);
+            harness::record("btm/queries", &all);
             c.halt();
         }
         harness::run(vec![Entry {
             addr: harness::ENTRY,
             func: probe,
         }]);
-        let observed = harness::observed("queries");
+        let observed = harness::observed("btm/queries");
         for (i, chunk) in observed.chunks(3).enumerate() {
             assert_eq!(chunk[0], 0, "query {i} succeeds");
             assert_eq!(chunk[1], chunk[2], "query {i} has its documented width");
@@ -291,18 +290,16 @@ mod tests {
                     ..Default::default()
                 },
             );
-            harness::record("first", &[first.result as u64, first.data.len() as u64]);
-            harness::record("second", &[second.result as u64, second.data.len() as u64]);
-            harness::record(
-                "uuid",
+            harness::record("btm/first", &[first.result as u64, first.data.len() as u64]);
+            harness::record("btm/second", &[second.result as u64, second.data.len() as u64]);
+            harness::record("btm/uuid",
                 &[
                     uuid.result as u64,
                     uuid.data.len() as u64,
                     uuid.data.iter().all(|&b| b == 0) as u64,
                 ],
             );
-            harness::record(
-                "bytes",
+            harness::record("btm/bytes",
                 &[1u64]
                     .into_iter()
                     .chain(first.data.iter().map(|&b| u64::from(b)))
@@ -316,24 +313,24 @@ mod tests {
             func: probe,
         }]);
         assert_eq!(
-            harness::observed("first"),
+            harness::observed("btm/first"),
             vec![0, BLE_ADVERTISE_PACKET_PARAMETER_SIZE as u64]
         );
         assert_eq!(
-            harness::observed("second"),
+            harness::observed("btm/second"),
             vec![0, BLE_ADVERTISE_PACKET_PARAMETER_SIZE as u64]
         );
         assert_eq!(
-            harness::observed("uuid"),
+            harness::observed("btm/uuid"),
             vec![0, GATT_ATTRIBUTE_UUID_SIZE as u64, 1]
         );
         assert_eq!(
-            harness::observed("bytes"),
+            harness::observed("btm/bytes"),
             vec![
-                1, 0x53, 0x05, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x53, 0x05, 0xAD, 0xDE, 0x00,
-                0xEF, 0xBE, 0x00
+                1, 0x53, 0x05, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x53, 0x05, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00
             ],
-            "company id 0x0553 then the published pattern"
+            "company id 0x0553 then the documented pattern for 0x1, zeros for 0xFFFF"
         );
     }
 
@@ -371,14 +368,14 @@ mod tests {
                 },
             );
             all.extend([reply.result as u64, reply.data.len() as u64]);
-            harness::record("errors", &all);
+            harness::record("btm/errors", &all);
             c.halt();
         }
         harness::run(vec![Entry {
             addr: harness::ENTRY,
             func: probe,
         }]);
-        let observed = harness::observed("errors");
+        let observed = harness::observed("btm/errors");
         let mut expected = Vec::new();
         for _ in 0..3 {
             expected.extend([LOW_LAYER_FAILURE as u64, 0]);
@@ -410,7 +407,7 @@ mod tests {
                 );
                 all.extend([reply.result as u64, reply.data.len() as u64]);
             }
-            harness::record("scans", &all);
+            harness::record("btm/scans", &all);
             c.halt();
         }
         harness::run(vec![Entry {
@@ -418,7 +415,7 @@ mod tests {
             func: probe,
         }]);
         assert_eq!(
-            harness::observed("scans"),
+            harness::observed("btm/scans"),
             vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
         );
     }
@@ -433,7 +430,7 @@ mod tests {
                     ..Default::default()
                 },
             );
-            harness::record("unknown", &[reply.result as u64, reply.data.len() as u64]);
+            harness::record("btm/unknown", &[reply.result as u64, reply.data.len() as u64]);
             c.halt();
         }
         harness::run(vec![Entry {
@@ -441,7 +438,7 @@ mod tests {
             func: probe,
         }]);
         assert_eq!(
-            harness::observed("unknown"),
+            harness::observed("btm/unknown"),
             vec![crate::services::result::CMIF_UNKNOWN_COMMAND as u64, 0]
         );
     }
