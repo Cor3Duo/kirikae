@@ -14,6 +14,7 @@ pub mod mii;
 pub mod mm;
 pub mod nfp;
 pub mod nvdrv;
+pub mod omm;
 pub mod pctl;
 pub mod pdm;
 pub mod pl;
@@ -134,6 +135,7 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "lm" => Arc::new(lm::Lm),
         "apm" | "apm:am" => Arc::new(apm::Apm),
         "appletOE" => Arc::new(am::AppletOe),
+        "omm" => Arc::new(omm::Omm),
         "pctl" => Arc::new(pctl::Pctl { name: "pctl" }),
         "pdm:qry" => Arc::new(pdm::PdmQry),
         "pctl:s" => Arc::new(pctl::Pctl { name: "pctl:s" }),
