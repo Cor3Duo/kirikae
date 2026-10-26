@@ -171,7 +171,8 @@ fn vblock(
 ) -> Result<Insn, DecodeError> {
     let load = (word >> 20) & 1 != 0;
     let base = reg((word >> 16) & 0xf);
-    let first = d((word >> 12) & 0xf, (word >> 22) & 1 != 0);
+    let (field, high) = ((word >> 12) & 0xf, (word >> 22) & 1 != 0);
+    let first = if double { d(field, high).number() } else { s(field, high).number() };
     let writeback = (word >> 21) & 1 != 0;
     let words = (word & 0xff) as u8;
     if words == 0 {
@@ -181,9 +182,9 @@ fn vblock(
         return Err(DecodeError::Unpredictable);
     }
     let end = if double {
-        u16::from(first.number()) + u16::from(words / 2)
+        u16::from(first) + u16::from(words / 2)
     } else {
-        2 * u16::from(first.number()) + u16::from(words)
+        u16::from(first) + u16::from(words)
     };
     if end > 32 {
         return Err(DecodeError::Unpredictable);

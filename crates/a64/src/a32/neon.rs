@@ -19,13 +19,10 @@ fn data_processing(pc: u32, word: u32) -> Result<Insn, DecodeError> {
     if word & 0x0fb0_0000 == 0x03b0_0000 {
         return two_register(pc, word);
     }
-    if word & 0x0fb0_0000 == 0x02b0_0000 {
-        if word & 0x10 != 0 {
-            return Err(DecodeError::Unallocated);
-        }
+    if word & 0x0fb0_0010 == 0x02b0_0000 {
         return extract(pc, word);
     }
-    if word & 0x0eb0_0010 == 0x0280_0010 {
+    if word & 0x0eb8_0090 == 0x0280_0010 {
         return modified_immediate(pc, word);
     }
     if word & 0x0080_0000 == 0 {

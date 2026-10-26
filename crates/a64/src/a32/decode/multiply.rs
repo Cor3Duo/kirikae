@@ -107,6 +107,29 @@ fn long_multiply(pc: u32, word: u32, cond: Cond) -> Result<Insn, DecodeError> {
     ))
 }
 
+pub(super) fn multiply_subtract(pc: u32, word: u32, cond: Cond) -> Result<Insn, DecodeError> {
+    let rd = reg((word >> 16) & 0xf);
+    let ra = reg((word >> 12) & 0xf);
+    let rs = reg((word >> 8) & 0xf);
+    let rm = reg(word & 0xf);
+    if [rd, ra, rs, rm].contains(&Reg::PC) {
+        return Err(DecodeError::Unpredictable);
+    }
+    Ok(insn(
+        pc,
+        word,
+        cond,
+        Opcode::Mls,
+        false,
+        vec![
+            Operand::Reg(rd),
+            Operand::Reg(rm),
+            Operand::Reg(rs),
+            Operand::Reg(ra),
+        ],
+    ))
+}
+
 pub(super) fn multiply(pc: u32, word: u32, cond: Cond) -> Result<Insn, DecodeError> {
     let accumulate = (word >> 21) & 1 != 0;
     let sets_flags = (word >> 20) & 1 != 0;

@@ -230,29 +230,19 @@ fn hint_space(pc: u32, word: u32) -> Result<Insn, DecodeError> {
     if word & 0x0fff_ff00 == 0x057f_f000 {
         let low = word & 0xf;
         let opcode = match (word >> 4) & 0xf {
-            0b0011 => match low {
-                0 => Opcode::Nop,
-                1 => Opcode::Yield,
-                2 => Opcode::Wfe,
-                3 => Opcode::Wfi,
-                4 => Opcode::Sev,
-                5 => Opcode::Sevl,
-                _ => return Err(DecodeError::Unallocated),
-            },
+            0b0001 if low == 0xf => Opcode::Clrex,
             0b0100 => Opcode::Dsb,
             0b0101 => Opcode::Dmb,
             0b0110 => Opcode::Isb,
-            0b0111 if low == 0 => Opcode::Clrex,
+            0b0111 if low == 0 => Opcode::Sb,
             _ => return Err(DecodeError::Unallocated),
         };
-        return Ok(insn(
-            pc,
-            word,
-            Cond::Al,
-            opcode,
-            false,
-            vec![Operand::Imm(low)],
-        ));
+        let operands = if matches!(opcode, Opcode::Dsb | Opcode::Dmb | Opcode::Isb) {
+            vec![Operand::Imm(low)]
+        } else {
+            Vec::new()
+        };
+        return Ok(insn(pc, word, Cond::Al, opcode, false, operands));
     }
     let op1 = (word >> 20) & 0x1f;
     if op1 & 0b10111 == 0b10101 && (word >> 12) & 0xf == 0xf {
@@ -343,19 +333,10 @@ fn system_immediate(pc: u32, word: u32, cond: Cond) -> Result<Insn, DecodeError>
             2 => Opcode::Wfe,
             3 => Opcode::Wfi,
             4 => Opcode::Sev,
-            _ => return Err(DecodeError::Unsupported),
+            5 => Opcode::Sevl,
+            _ => Opcode::Nop,
         };
-        if cond != Cond::Al {
-            return Err(DecodeError::Unpredictable);
-        }
-        return Ok(insn(
-            pc,
-            word,
-            cond,
-            opcode,
-            false,
-            vec![Operand::Imm(imm8)],
-        ));
+        return Ok(insn(pc, word, cond, opcode, false, Vec::new()));
     }
     if mask == 0 {
         return Err(DecodeError::Unpredictable);
@@ -386,6 +367,9 @@ fn data_processing_operands(opcode: Opcode, rd: Reg, rn: Reg, op2: Operand) -> V
 fn data_processing_register(pc: u32, word: u32, cond: Cond) -> Result<Insn, DecodeError> {
     if word & 0x0fc0_00f0 == 0x90 {
         return multiply(pc, word, cond);
+    }
+    if word & 0x0ff0_00f0 == 0x0060_0090 {
+        return multiply_subtract(pc, word, cond);
     }
 
     if word & 0x90 == 0x90 {

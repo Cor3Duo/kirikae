@@ -396,7 +396,7 @@ impl fmt::Display for VfpDest {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct VBlock {
-    pub first: DReg,
+    pub first: u8,
     pub words: u8,
     pub double: bool,
     pub base: Reg,
@@ -426,11 +426,7 @@ impl fmt::Display for VBlock {
         } else {
             self.words
         };
-        let first = if self.double {
-            self.first.number()
-        } else {
-            self.first.number() * 2
-        };
+        let first = self.first;
         let last = first + count - 1;
         match count {
             1 => write!(f, "{{{prefix}{first}}}"),

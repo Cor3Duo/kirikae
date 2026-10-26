@@ -1,10 +1,11 @@
 use super::*;
 
 pub(super) fn exclusive(pc: u32, word: u32, cond: Cond) -> Result<Insn, DecodeError> {
-    let exclusive = match (word >> 8) & 0xf {
-        0b1111 | 0b1110 => true,
-        0b1100 => false,
-        _ => return Err(DecodeError::Unpredictable),
+    let (exclusive, ordered) = match (word >> 8) & 0xf {
+        0b1111 => (true, false),
+        0b1110 => (true, true),
+        0b1100 => (false, true),
+        _ => return Err(DecodeError::Unallocated),
     };
     let load = (word >> 20) & 1 != 0;
     let byte = (word >> 22) & 1 != 0;
@@ -14,6 +15,7 @@ pub(super) fn exclusive(pc: u32, word: u32, cond: Cond) -> Result<Insn, DecodeEr
         (false, false) => MemSize::Word,
         (true, false) => MemSize::Byte,
         (true, true) => MemSize::Halfword,
+        (false, true) if exclusive => MemSize::Double,
         (false, true) => return Err(DecodeError::Unallocated),
     };
     let mem = Mem {
@@ -62,31 +64,47 @@ pub(super) fn exclusive(pc: u32, word: u32, cond: Cond) -> Result<Insn, DecodeEr
             vec![Operand::Reg(rt), Operand::Mem(mem)],
         ));
     }
-    let (status, rt) = if load {
+    let pair = size == MemSize::Double;
+    let field = if load { (word >> 12) & 0xf } else { word & 0xf };
+    if pair && (field & 1 != 0 || field == 14) {
+        return Err(DecodeError::Unpredictable);
+    }
+    let rt = require_not_pc(reg(field))?;
+    let rt2 = pair.then(|| reg(field + 1));
+    let status = if load {
         if word & 0xf != 0xf {
             return Err(DecodeError::Unpredictable);
         }
-        (None, require_not_pc(reg((word >> 12) & 0xf))?)
+        None
     } else {
         let status = require_not_pc(reg((word >> 12) & 0xf))?;
-        let rt = require_not_pc(reg(word & 0xf))?;
-        if status == rt {
+        if status == rt || Some(status) == rt2 || status == base {
             return Err(DecodeError::Unpredictable);
         }
-        (Some(status), rt)
+        Some(status)
     };
-    let opcode = match (load, size) {
-        (true, MemSize::Word) => Opcode::Ldrex,
-        (true, MemSize::Byte) => Opcode::Ldrexb,
-        (true, _) => Opcode::Ldrexh,
-        (false, MemSize::Word) => Opcode::Strex,
-        (false, MemSize::Byte) => Opcode::Strexb,
-        (false, _) => Opcode::Strexh,
+    let opcode = match (load, ordered, size) {
+        (true, false, MemSize::Word) => Opcode::Ldrex,
+        (true, false, MemSize::Byte) => Opcode::Ldrexb,
+        (true, false, MemSize::Halfword) => Opcode::Ldrexh,
+        (true, false, MemSize::Double) => Opcode::Ldrexd,
+        (true, true, MemSize::Word) => Opcode::Ldaex,
+        (true, true, MemSize::Byte) => Opcode::Ldaexb,
+        (true, true, MemSize::Halfword) => Opcode::Ldaexh,
+        (true, true, MemSize::Double) => Opcode::Ldaexd,
+        (false, false, MemSize::Word) => Opcode::Strex,
+        (false, false, MemSize::Byte) => Opcode::Strexb,
+        (false, false, MemSize::Halfword) => Opcode::Strexh,
+        (false, false, MemSize::Double) => Opcode::Strexd,
+        (false, true, MemSize::Word) => Opcode::Stlex,
+        (false, true, MemSize::Byte) => Opcode::Stlexb,
+        (false, true, MemSize::Halfword) => Opcode::Stlexh,
+        (false, true, MemSize::Double) => Opcode::Stlexd,
     };
-    let operands = match status {
-        Some(status) => vec![Operand::Reg(status), Operand::Reg(rt), Operand::Mem(mem)],
-        None => vec![Operand::Reg(rt), Operand::Mem(mem)],
-    };
+    let mut operands: Vec<Operand> = status.into_iter().map(Operand::Reg).collect();
+    operands.push(Operand::Reg(rt));
+    operands.extend(rt2.map(Operand::Reg));
+    operands.push(Operand::Mem(mem));
     Ok(insn(pc, word, cond, opcode, false, operands))
 }
 
