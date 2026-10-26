@@ -348,13 +348,48 @@ impl Service for SslConnection {
 mod tests {
     use super::*;
     use crate::abi::Entry;
-    use crate::services::harness;
+    use crate::process::{RunOptions, run_executable};
+
+    static OBSERVED: Mutex<Vec<(&'static str, Vec<u64>)>> = Mutex::new(Vec::new());
+
+    fn record(name: &'static str, values: &[u64]) {
+        OBSERVED.lock().unwrap().push((name, values.to_vec()));
+    }
+
+    fn observed(name: &'static str) -> Vec<u64> {
+        let mut all = OBSERVED.lock().unwrap();
+        let i = all
+            .iter()
+            .position(|(n, _)| *n == name)
+            .expect("the fake guest recorded nothing");
+        all.remove(i).1
+    }
 
     fn run(probe: extern "C" fn(&mut Cpu)) {
-        harness::run(vec![Entry {
-            addr: harness::ENTRY,
-            func: probe,
-        }]);
+        let entries: &'static [Entry] = Box::leak(
+            vec![Entry {
+                addr: 0x1000_0000,
+                func: probe,
+            }]
+            .into_boxed_slice(),
+        );
+        let exe = kirikae_loader::Executable {
+            modules: Vec::new(),
+            entry: entries[0].addr,
+            title_id: None,
+            main_stack_size: None,
+            system_resource_size: 0,
+            romfs: None,
+        };
+        let result = run_executable(
+            &exe,
+            entries,
+            RunOptions {
+                capture_output: true,
+            },
+        )
+        .expect("the fake guest runs");
+        assert_eq!(result.exit_code, 0);
     }
 
     fn map(c: &mut Cpu, addr: u64, size: u64) -> u64 {
@@ -530,7 +565,7 @@ mod tests {
                 },
             );
 
-            harness::record(
+            record(
                 "ssl_context",
                 &[
                     create.result as u64,
@@ -563,7 +598,7 @@ mod tests {
             host = host << 8 | u64::from(b);
         }
         assert_eq!(
-            harness::observed("ssl_context"),
+            observed("ssl_context"),
             vec![
                 0,
                 1,
@@ -735,7 +770,7 @@ mod tests {
                 .read(out, DTLS_TIMEOUT_SIZE as u64)
                 .expect("the DTLS timeout");
 
-            harness::record(
+            record(
                 "ssl_offline",
                 &[
                     certificates.result as u64,
@@ -764,7 +799,7 @@ mod tests {
         }
         run(probe);
         assert_eq!(
-            harness::observed("ssl_offline"),
+            observed("ssl_offline"),
             vec![
                 0,
                 0,

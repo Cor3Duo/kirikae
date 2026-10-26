@@ -25,6 +25,7 @@ pub mod pl;
 pub mod ro;
 pub mod set;
 pub mod sm;
+pub mod ssl;
 pub mod stub;
 pub mod time;
 pub mod vi;
@@ -165,6 +166,8 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "pl:u" => Arc::new(pl::Pl),
         "ldr:ro" | "ro:1" => Arc::new(ro::Ro),
         "set" => Arc::new(set::Set),
+        "ssl" => Arc::new(ssl::Ssl::new("ssl")),
+        "ssl:s" => Arc::new(ssl::Ssl::new("ssl:s")),
         "mm:u" => Arc::new(mm::Mm),
         "mii:u" | "mii:e" => Arc::new(mii::Mii::new(name)),
         "nfp:user" => Arc::new(nfp::Nfp),
