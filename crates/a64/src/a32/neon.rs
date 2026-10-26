@@ -272,8 +272,8 @@ fn structure(pc: u32, word: u32) -> Result<Insn, DecodeError> {
     let size = (word >> 6) & 3;
     let alignment = (word >> 4) & 3;
     let undefined = match kind {
-        0b0111 | 0b0110 | 0b0100 | 0b0101 => alignment & 0b10 != 0,
-        0b1010 | 0b1000 | 0b1001 => alignment == 0b11,
+        0b0100..=0b0111 => alignment & 0b10 != 0,
+        0b1000..=0b1010 => alignment == 0b11,
         _ => false,
     };
     if undefined {
