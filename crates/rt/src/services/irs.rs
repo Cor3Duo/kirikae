@@ -18,6 +18,7 @@ const IR_SENSOR_MODE_NONE: u32 = 0;
 
 const LAST_PLAYER_ID: u32 = 7;
 const HANDHELD_ID: u32 = 0x20;
+const HANDHELD_INDEX: u32 = 8;
 
 pub struct Irs;
 
@@ -68,7 +69,7 @@ fn status_manager() -> Vec<u8> {
 fn camera_handle(npad: u32) -> Option<u32> {
     let player = match npad {
         0..=LAST_PLAYER_ID => npad,
-        HANDHELD_ID => 0,
+        HANDHELD_ID => HANDHELD_INDEX,
         _ => return None,
     };
     Some(player)
@@ -115,7 +116,7 @@ mod tests {
         for npad in 0..=LAST_PLAYER_ID {
             assert_eq!(camera_handle(npad), Some(npad));
         }
-        assert_eq!(camera_handle(HANDHELD_ID), Some(0));
+        assert_eq!(camera_handle(HANDHELD_ID), Some(HANDHELD_INDEX), "handheld does not collide with player 1");
         for npad in [8, 0x10, 0x1f, 0x21, 0x30, u32::MAX] {
             assert_eq!(camera_handle(npad), None);
         }
@@ -130,7 +131,7 @@ mod tests {
 
         let r = npad_ir_camera_handle(HANDHELD_ID);
         assert_eq!(r.result, 0);
-        assert_eq!(r.data, 0u32.to_le_bytes());
+        assert_eq!(r.data, HANDHELD_INDEX.to_le_bytes());
 
         let r = npad_ir_camera_handle(0x3f);
         assert_eq!(r.result, IRSENSOR_NOT_READY);
