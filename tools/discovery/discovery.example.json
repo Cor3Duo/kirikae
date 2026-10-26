@@ -2,9 +2,9 @@
   "kirikae": "target/release/kirikae.exe",
   "games": [
     {
-      "name": "title-010015100b514000",
+      "name": "title-0100000000000001",
       "source": "path/to/decrypted/dump",
-      "out": "out/title-010015100b514000",
+      "out": "out/title-0100000000000001",
       "build_args": ["--profile"],
       "build_timeout": 1800,
       "scenarios": [

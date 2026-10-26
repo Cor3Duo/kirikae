@@ -5,7 +5,7 @@ Mechanical stage of the discovery loop: no AI, no network. It normalizes what a 
 used and what failed, fingerprints it, routes each item to the source file that most
 likely implements it, and merges everything into a persistent items.jsonl.
 
-    python tools/discovery/triage.py --game title-010015100b514000 \
+    python tools/discovery/triage.py --game title-0100000000000001 \
         --coverage path/to/game.coverage.json --log path/to/stderr.log
 
 Outputs, under $KIRIKAE_DISCOVERY_DIR (default: %LOCALAPPDATA%/kirikae-discovery):

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Measure captured frames so a black (or wrong) frame is visible without eyes.
 
-Reads the formats the runtime writes: binary PPM (P6, `KIRIKAE_CAPTURE`) and
-8-bit PNG (the `KIRIKAE_FRAME_DUMP` / `KIRIKAE_PRESENT_DUMP` dumps). Standard
-library only; no image package is needed.
+Reads 8-bit PNG (the runtime's `KIRIKAE_FRAME_DUMP` / `KIRIKAE_PRESENT_DUMP` dumps) and
+binary PPM (P6). Standard library only; no image package is needed.
 
     python tools/frame_diff.py frame_000061.ppm
     python tools/frame_diff.py reference.png captured.ppm

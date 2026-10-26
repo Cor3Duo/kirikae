@@ -54,14 +54,6 @@ if folder:
         color = (0, 0, 0) if i == 0 else (40 * i, 10 * i, 200 - 20 * i)
         png(os.path.join(folder, f"frame{start + i * every:06}.png"), color)
 
-prefix = os.environ.get("KIRIKAE_CAPTURE")
-if prefix:
-    frame = int(os.environ.get("KIRIKAE_CAPTURE_FRAME", "1"))
-    path = f"{prefix}_{frame:06}.ppm"
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "wb") as f:
-        f.write(b"P6\n1 1\n255\n" + bytes([10, 20, 30]))
-
 coverage = os.environ.get("KIRIKAE_COVERAGE")
 if coverage:
     os.makedirs(os.path.dirname(coverage), exist_ok=True)
@@ -152,7 +144,6 @@ class LoopTest(unittest.TestCase):
             "seconds": 3,
             "capture_every": 1,
             "capture_fps": 10,
-            "capture_frame": 30,
             "input": "1:A",
         }
         manifest_path = loop.cycle(self.config(scenario), None, None, True, False)
@@ -162,8 +153,7 @@ class LoopTest(unittest.TestCase):
         env = json.loads((self.out / "env.json").read_text(encoding="utf-8"))
         self.assertEqual(env["KIRIKAE_INPUT"], "1:A")
         self.assertEqual(env["KIRIKAE_FRAME_DUMP_EVERY"], "10")
-        self.assertEqual(env["KIRIKAE_CAPTURE_FRAME"], "30")
-        self.assertTrue((run / "capture_000030.ppm").is_file())
+        self.assertNotIn("KIRIKAE_CAPTURE_FRAME", env)
 
         captures = json.loads((run / "captures.json").read_text(encoding="utf-8"))
         self.assertEqual(captures["schema"], 1)

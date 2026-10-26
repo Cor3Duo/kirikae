@@ -1,8 +1,8 @@
 # Discovery loop
 
-Mechanical half of the plan in [`docs/plan/MASTER-PLAN.md`](../../docs/plan/MASTER-PLAN.md):
-build a game, run it headless under scripted input, collect artifacts, and turn them
-into deduplicated, routed work items. No AI, no network, no game data in the repository.
+The mechanical half of the discovery loop: build a game, run it headless under scripted
+input, collect artifacts, and turn them into deduplicated, routed work items. No AI, no
+network, no game data in the repository.
 
 ## Quick start
 
@@ -17,9 +17,9 @@ cp tools/discovery/discovery.example.json discovery.json
 python tools/discovery/loop.py --config discovery.json
 
 # just triage artifacts you already have
-python tools/discovery/triage.py --game title-010015100b514000 \
-  --coverage out/title-010015100b514000/extracted.coverage.json \
-  --log out/title-010015100b514000/run2.log
+python tools/discovery/triage.py --game title-0100000000000001 \
+  --coverage out/title-0100000000000001/extracted.coverage.json \
+  --log out/title-0100000000000001/run2.log
 ```
 
 Artifacts go to `$KIRIKAE_DISCOVERY_DIR` (default `%LOCALAPPDATA%\kirikae-discovery`),
@@ -55,14 +55,7 @@ optional boot pass, resuming from `state.jsonl`, and writes `compat.md` / `compa
 python tools/discovery/batch.py --config tools/discovery/batch.example.json
 python tools/discovery/batch.py --config batch.json --limit 10
 python tools/discovery/batch.py --config batch.json --compile-only
-python tools/discovery/batch.py --config batch.json --profile-loop --profile-seconds 60
 ```
-
-`--profile-loop` builds through `kirikae build --profile-loop`, which alternates a build, a
-bounded headless run and a rebuild with what the run interpreted, stopping when the count
-stops falling or a run adds nothing new. It starts each game, so it is opt-in; the per-run bound is
-`--profile-seconds` (default `boot_seconds`, at least 10) and the whole command has its own
-timeout. The iterations land in `compat.json` and in the matrix's Profile column.
 
 Each game gets `<work>/<game>/{out,build.log,run/}`; `work` defaults to
 `%LOCALAPPDATA%/kirikae-discovery/batch`. The matrix is the per-game companion of

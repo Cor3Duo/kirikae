@@ -11,9 +11,9 @@ Config (JSON):
   "kirikae": "target/release/kirikae.exe",
   "games": [
     {
-      "name": "title-010015100b514000",
+      "name": "title-0100000000000001",
       "source": "path/to/decrypted/dump",
-      "out": "out/title-010015100b514000",
+      "out": "out/title-0100000000000001",
       "build_args": ["--profile"],
       "scenarios": [
         {"name": "boot", "seconds": 60, "input": null},
@@ -31,16 +31,15 @@ A scenario with `capture_every` writes every Nth presented frame with the runtim
 classifies each PNG with `tools/frame_diff.py` and writes `captures.json` next to the
 run. `capture_every_frames` does the same with a frame interval instead of a wall-clock
 one, for titles whose frame rate collapses under gameplay; those captures carry the
-frame number and no second label. `capture_frame` additionally asks `KIRIKAE_CAPTURE`
-for one PPM at that frame. Neither changes how the game runs; both are evidence of what
-reached the screen.
+frame number and no second label. Captures never change how the game runs; they are
+evidence of what reached the screen.
 
 `runner` is an optional command prefix for the executable, as in `batch.py`; the tests
 use it to run a Python script that ends in `.exe` without a real build.
 
 Usage:
     python tools/discovery/loop.py --config discovery.json
-    python tools/discovery/loop.py --config discovery.json --game title-010015100b514000 --scenario boot
+    python tools/discovery/loop.py --config discovery.json --game title-0100000000000001 --scenario boot
     python tools/discovery/loop.py --config discovery.json --skip-build --skip-triage
 
 Everything written by a cycle lives outside the repository, under
@@ -144,9 +143,6 @@ def scenario_env(game: dict, scenario: dict, run_dir: Path) -> dict:
         env["KIRIKAE_FRAME_DUMP_EVERY"] = str(schedule["every_frames"])
         env["KIRIKAE_FRAME_DUMP_FROM"] = str(schedule["from_frame"])
         env["KIRIKAE_FRAME_DUMP_COUNT"] = str(schedule["count"])
-    if scenario.get("capture_frame"):
-        env["KIRIKAE_CAPTURE"] = str(run_dir / "capture")
-        env["KIRIKAE_CAPTURE_FRAME"] = str(int(scenario["capture_frame"]))
     env.update({k: str(v) for k, v in scenario.get("env", {}).items()})
     return env
 
