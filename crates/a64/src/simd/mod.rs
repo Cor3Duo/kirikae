@@ -1,3 +1,4 @@
+mod crypto;
 pub mod fp;
 mod fpscalar;
 mod ldst;
@@ -21,6 +22,9 @@ pub trait Env {
 }
 
 pub fn exec(e: &mut dyn Env, w: u32) -> bool {
+    if crypto::supported(w) {
+        return crypto::exec(e, w);
+    }
     if (w >> 25) & 0b111 == 0b111 {
         if w >> 28 & 1 == 1 && w >> 30 & 1 == 0 {
             fpscalar::exec(e, w)
