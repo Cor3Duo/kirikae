@@ -212,12 +212,12 @@ impl GuestMemory {
         true
     }
 
-    pub fn set_attribute(&self, start: u64, end: u64, mask: u32, value: u32) -> bool {
+    pub fn set_attribute(&self, start: u64, end: u64, mask: u32, value: u32, allowed: &[u32]) -> bool {
         let mut mapped = self.mapped.lock().unwrap();
         let mut at = start;
         while at < end {
             match mapped.range(..=at).next_back() {
-                Some((_, r)) if r.range.contains(&at) => at = r.range.end,
+                Some((_, r)) if r.range.contains(&at) && allowed.contains(&r.state) => at = r.range.end,
                 _ => return false,
             }
         }
@@ -418,15 +418,28 @@ mod tests {
     }
 
     #[test]
+    fn attributes_only_change_where_the_state_allows_it() {
+        let m = GuestMemory::new().unwrap();
+        let base = 0x2_0000_0000;
+        m.map_as(base, PAGE, state::HEAP, perm::RW).unwrap();
+        m.map_as(base + PAGE, PAGE, state::CODE_STATIC, perm::RX).unwrap();
+        let allowed = [state::HEAP, state::CODE_MUTABLE];
+        assert!(m.set_attribute(base, base + PAGE, attr::UNCACHED, attr::UNCACHED, &allowed));
+        assert!(!m.set_attribute(base, base + 2 * PAGE, attr::UNCACHED, 0, &allowed), "a code page is refused");
+        assert_eq!(m.query(base).attr, attr::UNCACHED, "a refused call leaves the map untouched");
+        assert_eq!(m.query(base + PAGE).attr, 0);
+    }
+
+    #[test]
     fn setting_a_shared_attribute_merges_neighbours() {
         let m = GuestMemory::new().unwrap();
         let base = 0x2_0000_0000;
         for i in 0..3 {
             m.map_as(base + i * PAGE, PAGE, state::HEAP, perm::RW).unwrap();
         }
-        assert!(m.set_attribute(base + PAGE, base + 2 * PAGE, attr::UNCACHED, attr::UNCACHED));
+        assert!(m.set_attribute(base + PAGE, base + 2 * PAGE, attr::UNCACHED, attr::UNCACHED, &[state::HEAP]));
         assert_eq!(m.query(base + PAGE).attr, attr::UNCACHED);
-        assert!(m.set_attribute(base, base + 3 * PAGE, attr::UNCACHED, 0), "clearing over a neighbour that already has the value");
+        assert!(m.set_attribute(base, base + 3 * PAGE, attr::UNCACHED, 0, &[state::HEAP]), "clearing over a neighbour that already has the value");
         assert_eq!(m.query(base).range, base..base + 3 * PAGE, "the three pages merge back");
         assert_eq!(m.query(base).attr, 0);
     }

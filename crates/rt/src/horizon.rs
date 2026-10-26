@@ -262,7 +262,7 @@ fn set_memory_attribute(c: &mut Cpu) {
         RESULT_INVALID_MEMORY_STATE
     } else if (mask | value) & !attr::SETTABLE != 0 || value & !mask != 0 || (mask ^ value) & attr::PERMISSION_LOCKED != 0 {
         RESULT_INVALID_COMBINATION
-    } else if c.process().memory.set_attribute(addr, addr + size, mask, value) {
+    } else if c.process().memory.set_attribute(addr, addr + size, mask, value, &[state::HEAP, state::CODE_MUTABLE]) {
         RESULT_SUCCESS
     } else {
         RESULT_INVALID_MEMORY_STATE
