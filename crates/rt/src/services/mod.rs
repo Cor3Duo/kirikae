@@ -5,6 +5,8 @@ use crate::cpu::Cpu;
 pub mod acc;
 pub mod am;
 pub mod fs;
+#[cfg(test)]
+pub(crate) mod harness;
 pub mod hid;
 pub mod hwopus;
 pub mod apm;
