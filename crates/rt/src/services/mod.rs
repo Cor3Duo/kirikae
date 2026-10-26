@@ -23,6 +23,7 @@ pub mod set;
 pub mod sm;
 pub mod stub;
 pub mod time;
+pub mod version;
 pub mod vi;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

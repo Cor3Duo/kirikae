@@ -220,6 +220,7 @@ model fully understands straight from it and leaves only the rest to the command
 | `KIRIKAE_COVERAGE=<file>` | where to write what the game used (default `<exe>.coverage.json`, events in `<exe>-coverage/`; `0` turns it off); `KIRIKAE_COVERAGE_EVENTS=<n>` changes the 200-event limit per run |
 | `KIRIKAE_SIMD_HIST=<file>` | with `KIRIKAE_STATS`, how often each SIMD/FP instruction went through the runtime helper |
 | `KIRIKAE_HEADLESS=1` | no window (frames are still counted) |
+| `KIRIKAE_SDK_VERSION=<v>` | the title's SDK version (`17`, `17.5`, `17.5.4` or `unknown`) instead of the one read from the `-Release` strings of its SDK modules; commands that only exist in some SDK versions answer by it |
 | `KIRIKAE_FRAME_DUMP=<folder>` | writes one presented frame in 60 as PNG; `KIRIKAE_FRAME_DUMP_EVERY`, `_FROM` and `_COUNT` change the interval, start and count |
 | `KIRIKAE_PRESENT_DUMP=<folder>` | writes one swapchain image in 60 as PNG, as it goes to the window |
 | `KIRIKAE_VSYNC=1` | presents waiting for vertical blank (FIFO); otherwise MAILBOX or IMMEDIATE |

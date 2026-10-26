@@ -10,6 +10,7 @@ use kirikae_loader::{Executable, Module, LOAD_BASE};
 use crate::cpu::Cpu;
 use crate::horizon::{MAIN_THREAD_HANDLE, MAIN_THREAD_ID, MAIN_THREAD_PRIORITY, STACK_REGION_BASE, TICK_HZ};
 use crate::kernel::{KObject, KThread};
+use crate::services::version::{SdkVersion, Version};
 use crate::mem::{perm, state, GuestMemory, PAGE};
 
 pub use crate::abi::{Entry, GuestFn};
@@ -82,6 +83,8 @@ pub struct Process {
     modules: Vec<(String, std::ops::Range<u64>)>,
     symbols: Vec<(u64, String)>,
     pub title_id: u64,
+    sdk_version: SdkVersion,
+    inferred_sdk: Mutex<Option<Version>>,
     code_size: u64,
     stack_size: u64,
     entries: &'static [Entry],
@@ -162,6 +165,21 @@ impl Process {
             self.sched.touch();
         }
         true
+    }
+
+    pub fn sdk_version(&self) -> SdkVersion {
+        self.sdk_version
+    }
+
+    pub fn infer_sdk_version(&self, at_least: Version, service: &str, command: &str) {
+        if !self.sdk_version.is_unknown() {
+            return;
+        }
+        let mut inferred = self.inferred_sdk.lock().unwrap();
+        if inferred.is_none_or(|known| known < at_least) {
+            *inferred = Some(at_least);
+            eprintln!("kirikae: title SDK unknown; {service} command {command} implies at least {at_least}");
+        }
     }
 
     pub fn service_state<T: std::any::Any + Send + Sync>(&self, key: &'static str, init: impl FnOnce() -> T) -> Arc<T> {
@@ -505,6 +523,7 @@ pub fn run_executable(exe: &Executable, entries: &'static [Entry], opts: RunOpti
     let stack_top = STACK_REGION_BASE + stack_size;
     memory.map_as(STACK_REGION_BASE, stack_size, state::STACK, perm::RW).map_err(|e| e.to_string())?;
 
+    let sdk = crate::services::version::resolve(exe);
     let process: &'static Process = Box::leak(Box::new(Process {
         memory,
         modules: exe.modules.iter().map(|m| (m.name.clone(), m.image.base..m.image.end())).collect(),
@@ -514,6 +533,8 @@ pub fn run_executable(exe: &Executable, entries: &'static [Entry], opts: RunOpti
             all
         },
         title_id: exe.title_id.unwrap_or(0),
+        sdk_version: sdk.version,
+        inferred_sdk: Mutex::new(None),
         code_size: exe.modules.iter().map(|m| m.image.memory.len() as u64).sum(),
         stack_size,
         entries,
