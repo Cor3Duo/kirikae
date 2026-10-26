@@ -34,6 +34,9 @@ fn data_processing(pc: u32, word: u32) -> Result<Insn, DecodeError> {
 fn extract(pc: u32, word: u32) -> Result<Insn, DecodeError> {
     let q = word & 0x40 != 0;
     let index = (word >> 8) & 0xf;
+    if !q && index & 0b1000 != 0 {
+        return Err(DecodeError::Unallocated);
+    }
     let vd = double((word >> 12) & 0xf, word & 0x0040_0000 != 0);
     let vn = double((word >> 16) & 0xf, word & 0x80 != 0);
     let vm = double(word & 0xf, word & 0x20 != 0);
@@ -103,6 +106,9 @@ fn three_same(pc: u32, word: u32) -> Result<Insn, DecodeError> {
         (true, true, _, 0b1000) => (Opcode::Vceq, esize),
         _ => return Err(DecodeError::Unsupported),
     };
+    if size == 3 && !matches!(opcode, Opcode::Vadd | Opcode::Vsub) && style != 8 {
+        return Err(DecodeError::Unallocated);
+    }
     let dest = double(vd, word & 0x0040_0000 != 0);
     let first = double(vn, nbit);
     let second = double(vm, mbit);
@@ -142,6 +148,14 @@ fn two_register(pc: u32, word: u32) -> Result<Insn, DecodeError> {
         (1, 0b1111, 2) => (Opcode::VnegF, 32),
         _ => return Err(DecodeError::Unsupported),
     };
+    let undefined = match opcode {
+        Opcode::Vrev64 | Opcode::Vrev32 | Opcode::Vrev16 => opc2 + size >= 3,
+        Opcode::Vabs | Opcode::Vneg => size == 3,
+        _ => false,
+    };
+    if undefined {
+        return Err(DecodeError::Unallocated);
+    }
     let dest = double(vd, word & 0x0040_0000 != 0);
     let source = double(vm, mbit);
     if q && (dest.number() & 1 != 0 || source.number() & 1 != 0) {
@@ -175,10 +189,12 @@ fn modified_immediate(pc: u32, word: u32) -> Result<Insn, DecodeError> {
         0b0110 => (32, u64::from(imm8) << 24),
         0b1000 => (16, u64::from(imm8)),
         0b1010 => (16, u64::from(imm8) << 8),
-        0b1100 => (32, (u64::from(imm8) << 8) | 0xff),
+        0b1100 if cmode & 1 == 0 => (32, (u64::from(imm8) << 8) | 0xff),
+        0b1100 => (32, (u64::from(imm8) << 16) | 0xffff),
         _ => (8, u64::from(imm8)),
     };
-    let opcode = match (cmode & 1 == 1, complement) {
+    let logical = cmode & 1 == 1 && cmode < 0b1100;
+    let opcode = match (logical, complement) {
         (false, false) => Opcode::VmovImm,
         (false, true) => Opcode::VmvnImm,
         (true, false) => Opcode::VorrImm,
@@ -246,7 +262,7 @@ fn structure(pc: u32, word: u32) -> Result<Insn, DecodeError> {
         return Err(DecodeError::Unsupported);
     }
     let load = word & 0x0020_0000 != 0;
-    if !load && word & 0x0010_0000 != 0 {
+    if word & 0x0010_0000 != 0 {
         return Err(DecodeError::Unallocated);
     }
     let kind = (word >> 8) & 0xf;
@@ -254,6 +270,15 @@ fn structure(pc: u32, word: u32) -> Result<Insn, DecodeError> {
         return Err(DecodeError::Unsupported);
     };
     let size = (word >> 6) & 3;
+    let alignment = (word >> 4) & 3;
+    let undefined = match kind {
+        0b0111 | 0b0110 | 0b0100 | 0b0101 => alignment & 0b10 != 0,
+        0b1010 | 0b1000 | 0b1001 => alignment == 0b11,
+        _ => false,
+    };
+    if undefined {
+        return Err(DecodeError::Unallocated);
+    }
     let esize = match (size, structure.interleave) {
         (0, _) => 8,
         (1, _) => 16,
@@ -261,7 +286,6 @@ fn structure(pc: u32, word: u32) -> Result<Insn, DecodeError> {
         (_, 1) => 64,
         _ => return Err(DecodeError::Unallocated),
     };
-    let alignment = (word >> 4) & 3;
     let align = (alignment != 0).then(|| (esize / 8) << alignment);
     let base = reg((word >> 16) & 0xf);
     let first = double((word >> 12) & 0xf, word & 0x0040_0000 != 0);

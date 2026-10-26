@@ -806,6 +806,10 @@ impl fmt::Display for Insn {
         f.write_str(&self.mnemonic())?;
         let quad = self.shape.is_some_and(|shape| shape.q);
         let mut first = true;
+        if self.opcode == Opcode::Msr {
+            f.write_str(" APSR_nzcvq")?;
+            first = false;
+        }
         for operand in self.operands.iter() {
             if matches!(operand, Operand::Convert(_)) {
                 continue;
@@ -837,6 +841,9 @@ impl fmt::Display for Insn {
                 }
                 other => write!(f, "{other}")?,
             }
+        }
+        if self.opcode == Opcode::Mrs {
+            f.write_str(", apsr")?;
         }
         Ok(())
     }

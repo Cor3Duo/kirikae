@@ -132,7 +132,7 @@ fn media_multiply(pc: u32, word: u32, cond: Cond, group: u32) -> Result<Insn, De
                 opcode,
                 false,
                 vec![
-                    Operand::Regs { lo: rd, hi: ra },
+                    Operand::Regs { lo: ra, hi: rd },
                     Operand::Reg(rn),
                     Operand::Reg(rm),
                 ],

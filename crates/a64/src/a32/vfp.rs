@@ -192,6 +192,9 @@ fn vblock(
     if base == Reg::PC {
         return Err(DecodeError::Unpredictable);
     }
+    let stack = base == Reg::SP
+        && writeback
+        && matches!((mode, load), (BlockMode::DecrementBefore, false) | (BlockMode::IncrementAfter, true));
     let block = VBlock {
         first,
         words,
@@ -199,9 +202,9 @@ fn vblock(
         base,
         mode,
         writeback,
-        implicit_base: base == Reg::SP,
+        implicit_base: stack,
     };
-    let opcode = match (base == Reg::SP, mode, load) {
+    let opcode = match (stack, mode, load) {
         (true, BlockMode::DecrementBefore, false) => Opcode::Vpush,
         (true, BlockMode::IncrementAfter, true) => Opcode::Vpop,
         (_, _, true) => Opcode::Vldm,
@@ -399,7 +402,10 @@ fn register_transfer(pc: u32, word: u32, cond: Cond) -> Result<Insn, DecodeError
         let Some(sys) = VfpSys::from_field(field) else {
             return Err(DecodeError::Unsupported);
         };
-        if word & 0xf != 0 || (cp != 0b1010 && cp != 0b1011) {
+        if cp != 0b1010 {
+            return element_transfer(pc, word, cond, rt, vn);
+        }
+        if word & 0xef != 0 {
             return Err(DecodeError::Unpredictable);
         }
         if op {
@@ -431,7 +437,7 @@ fn register_transfer(pc: u32, word: u32, cond: Cond) -> Result<Insn, DecodeError
     }
     match cp {
         0b1010 => {
-            if (word >> 21) & 0b111 != 0 || word & 0x60 != 0 {
+            if (word >> 21) & 0b111 != 0 || word & 0x6f != 0 {
                 return Err(DecodeError::Unpredictable);
             }
             let sd = s(vn, (word >> 7) & 1 != 0);
@@ -456,6 +462,9 @@ fn element_transfer(pc: u32, word: u32, cond: Cond, rt: Reg, vn: u32) -> Result<
     let bit7 = (word >> 7) & 1 != 0;
     let bit6 = (word >> 6) & 1 != 0;
     let bit5 = (word >> 5) & 1 != 0;
+    if word & 0xf != 0 {
+        return Err(DecodeError::Unpredictable);
+    }
     let dm = DReg::from_parts(vn as u8, bit7);
     let (esize, lane) = if bit22 {
         (
@@ -476,7 +485,7 @@ fn element_transfer(pc: u32, word: u32, cond: Cond, rt: Reg, vn: u32) -> Result<
             if bit6 || bit5 != (esize == 16) {
                 return Err(DecodeError::Unpredictable);
             }
-            if rt == Reg::PC {
+            if rt == Reg::PC || (bit21 && dm.number() & 1 != 0) {
                 return Err(DecodeError::Unpredictable);
             }
             return Ok(vinsn(

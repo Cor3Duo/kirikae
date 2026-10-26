@@ -196,3 +196,23 @@ fn hints_are_conditional_and_unknown_hints_are_nops() {
         assert_eq!(decode(0x1000, word).err(), Some(DecodeError::Unallocated), "{word:#010x}");
     }
 }
+
+#[test]
+fn cases_found_by_the_llvm_differential_match_the_assembler() {
+    check(&[
+        (0xf3878d5f, "vmov.i32 q4, #0xffffff"),
+        (0xf2c15d38, "vmvn.i32 d21, #0x18ffff"),
+        (0xe7430714, "smlald r0, r3, r4, r7"),
+        (0xeef20b70, "vmov.u8 r0, d2[7]"),
+        (0xec8d8b1e, "vstmia sp, {d8-d22}"),
+        (0xe10f0000, "mrs r0, apsr"),
+        (0xe128f000, "msr APSR_nzcvq, r0"),
+    ]);
+}
+
+#[test]
+fn undefined_encodings_found_by_the_llvm_differential_are_refused() {
+    for word in [0xf3774618u32, 0xf2f5680c, 0xf37a4340, 0xf23468b6, 0xf279399b, 0xf43d5a3f, 0xf43eb60e, 0xeea7ab19, 0xeef2baf0, 0xee734b16] {
+        assert!(decode(0x1000, word).is_err(), "{word:#010x}");
+    }
+}
