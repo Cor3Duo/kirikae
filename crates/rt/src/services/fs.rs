@@ -13,21 +13,36 @@ const PATH_ALREADY_EXISTS: u32 = 0x402;
 const TARGET_NOT_FOUND: u32 = 0x7d402;
 const DIRECTORY_NOT_EMPTY: u32 = 0x4d002;
 const OUT_OF_RANGE: u32 = 0x3e402;
+const INVALID_BIS_PARTITION: u32 = 0x2ee202;
 
 const ENTRY_DIRECTORY: u8 = 0;
 const ENTRY_FILE: u8 = 1;
 const DIRECTORY_ENTRY_SIZE: usize = 0x310;
 const SAVE_SPACE: u64 = 4 << 30;
 
-pub fn saves_root(title: u64) -> PathBuf {
+fn data_root() -> PathBuf {
     if let Some(dir) = std::env::var_os("KIRIKAE_SAVES") {
-        return PathBuf::from(dir).join(format!("{title:016x}"));
+        return PathBuf::from(dir);
     }
     let base = std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join("kirikae").join("saves").join(format!("{title:016x}"))
+    base.join("kirikae").join("saves")
+}
+
+pub fn saves_root(title: u64) -> PathBuf {
+    data_root().join(format!("{title:016x}"))
+}
+
+fn bis_partition(id: u32) -> Option<&'static str> {
+    match id {
+        28 => Some("calibration"),
+        29 => Some("safe"),
+        30 => Some("user"),
+        31 => Some("system"),
+        _ => None,
+    }
 }
 
 fn host_path(c: &Cpu, root: &Path, x: Option<&Buf>) -> Option<PathBuf> {
@@ -61,6 +76,13 @@ impl Service for FsProxy {
                     }
                 },
                 None => Reply::err(TARGET_NOT_FOUND),
+            },
+            11 => match bis_partition(req.u32(0)) {
+                Some(name) => match host_path(c, &data_root().join("nand").join(name), req.x.first()) {
+                    Some(root) => Reply::ok().object(Arc::new(HostFs::new(root))),
+                    None => Reply::err(PATH_NOT_FOUND),
+                },
+                None => Reply::err(INVALID_BIS_PARTITION),
             },
             18 => {
                 let root = saves_root(p.title_id).join("sdcard");
@@ -446,6 +468,12 @@ impl Service for HostDir {
 mod tests {
     use super::*;
     use kirikae_loader::romfs;
+
+    #[test]
+    fn only_fat_bis_partitions_open() {
+        assert_eq!((28..=31).map(bis_partition).collect::<Vec<_>>(), [Some("calibration"), Some("safe"), Some("user"), Some("system")]);
+        assert!([0, 1, 20, 27, 32, 33].into_iter().all(|id| bis_partition(id).is_none()));
+    }
 
     #[test]
     fn serves_a_built_romfs() {
