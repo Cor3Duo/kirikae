@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::cpu::Cpu;
 use crate::services::stub::unimplemented;
@@ -66,12 +66,41 @@ impl Service for AddOnContentManager {
     }
 
     fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
+        if let 100 | 101 = req.cmd {
+            return Reply::ok().object(Arc::new(PurchaseEventManager::new(c)));
+        }
         match self.command(req, c.process().title_id) {
             Some(Command::Reply(r)) => r,
             Some(Command::Event(with_pid)) => {
                 Reply::ok().copy_handle(self.event(c, usize::from(with_pid)))
             }
             None => unimplemented("aoc:u", c, req),
+        }
+    }
+}
+
+struct PurchaseEventManager {
+    purchased: u32,
+}
+
+impl PurchaseEventManager {
+    fn new(c: &Cpu) -> PurchaseEventManager {
+        PurchaseEventManager {
+            purchased: c.process().create_event(false),
+        }
+    }
+}
+
+impl Service for PurchaseEventManager {
+    fn name(&self) -> String {
+        "aoc:u/IPurchaseEventManager".into()
+    }
+
+    fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
+        match req.cmd {
+            0 | 1 => Reply::ok(),
+            2 => Reply::ok().copy_handle(self.purchased),
+            _ => unimplemented("aoc:u/IPurchaseEventManager", c, req),
         }
     }
 }
@@ -166,8 +195,31 @@ mod tests {
     }
 
     #[test]
+    fn both_purchase_event_managers_are_objects_with_a_real_event() {
+        for cmd in [100, 101] {
+            let created = crate::services::harness::call_service("aoc:u", Some(TITLE_ID), Request { cmd, ..Default::default() });
+            assert_eq!((created.result, created.objects), (0, 1), "command {cmd}");
+        }
+    }
+
+    extern "C" fn purchase_event(c: &mut Cpu) {
+        let manager = AddOnContentManager::new().call(c, &Request { cmd: 100, ..Default::default() });
+        let event = manager.objects[0].call(c, &Request { cmd: 2, ..Default::default() });
+        let handle = event.copy_handles.first().copied().unwrap_or(0);
+        let is_event = matches!(c.process().handles.lock().unwrap().get(handle), Some(crate::kernel::KObject::Event(_)));
+        crate::services::harness::record("aoc/purchase_event", &[u64::from(event.result), u64::from(is_event)]);
+        c.halt();
+    }
+
+    #[test]
+    fn the_purchase_event_manager_hands_out_a_kernel_event() {
+        crate::services::harness::run(vec![crate::abi::Entry { addr: crate::services::harness::ENTRY, func: purchase_event }]);
+        assert_eq!(crate::services::harness::observed("aoc/purchase_event"), vec![0, 1]);
+    }
+
+    #[test]
     fn unknown_commands_are_not_handled() {
-        for cmd in [13, 100, 301] {
+        for cmd in [13, 102, 301] {
             assert!(command(cmd).is_none(), "command {cmd}");
         }
     }
