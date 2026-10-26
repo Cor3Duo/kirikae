@@ -534,8 +534,10 @@ impl Code {
 
     report = build_report()
     service_groups = {g["name"]: g for g in report["sections"][0]["groups"]}
-    for name in ("bsd:u", "bsd:s", "bsd:a", "mii:e", "ns:am2", "ns/IReadOnlyApplicationControlDataInterface"):
+    for name in ("omm", "omm/ICradleFirmwareUpdater", "pdm:qry", "hwopus", "nfp:user"):
         check(service_groups.get(name, {}).get("referenced", False), f"{name} is counted against its reference")
+    for name in ("bsd:u", "ns:am2"):
+        check(name not in service_groups, f"{name} is not served, so it is not counted")
     bsd = service_groups.get("bsd:u") or {}
     check(10004 not in bsd.get("undocumented", []), "winsock errno codes stay out of the bsd command list")
     check(
