@@ -84,7 +84,7 @@ impl Renderer {
             (TexDim::D2, true, 1 | 5 | 7) => vk::ImageViewType::TYPE_2D_ARRAY,
             (TexDim::Cube, false, 3 | 8) => vk::ImageViewType::CUBE,
             (TexDim::Cube, true, 3 | 8) => vk::ImageViewType::CUBE_ARRAY,
-            (TexDim::D3, false, 2) => vk::ImageViewType::TYPE_3D,
+            (TexDim::D3, false, 2 | 5) => vk::ImageViewType::TYPE_3D,
             _ => return Err(format!("texture type {} (shader {dim:?}{})", header.texture_type, if array { " array" } else { "" })),
         };
         let layers = match header.texture_type {
@@ -127,7 +127,7 @@ impl Renderer {
             eprintln!("gpu: texture {handle} -> tic {tic_index:#x}: {:#x} {}x{}x{} type {} levels {} view {}..={} {:?} swizzle {:?} types {:?} mip {} filter {}{} reduction {} wrap {:?} lod {}..{} bias {}{}", header.address, header.width, header.height, header.depth, header.texture_type, header.levels, header.min_level, header.max_level, format.vk, header.swizzle, header.data_types, sampler_state.mip, if sampler_state.mag_linear { "L" } else { "N" }, if sampler_state.min_linear { "L" } else { "N" }, sampler_state.reduction, sampler_state.address, sampler_state.min_lod as f32 / 256.0, sampler_state.max_lod as f32 / 256.0, sampler_state.lod_bias as f32 / 256.0, sampler_state.compare.map_or(String::new(), |c| format!(" compare {c}")));
         }
         if view_type == vk::ImageViewType::TYPE_3D {
-            let view = self.volume(gpu, mem, cpu, &header, &format)?;
+            let view = if header.texture_type == 5 { self.array_volume(gpu, mem, cpu, &header, &format)? } else { self.volume(gpu, mem, cpu, &header, &format)? };
             return Ok((view, self.sampler(&sampler_state)));
         }
         let tex_key = TexKey { tic, tsc, dim, array, shadow };
