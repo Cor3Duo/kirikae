@@ -25,13 +25,9 @@ pub fn run(entries: Vec<Entry>) {
 }
 
 pub fn run_with_title(entries: Vec<Entry>, title_id: Option<u64>) {
-    run_with_sdk(entries, None, title_id);
-}
-
-pub fn run_with_sdk(entries: Vec<Entry>, sdk_text: Option<&str>, title_id: Option<u64>) {
     let entries: &'static [Entry] = Box::leak(entries.into_boxed_slice());
     let exe = kirikae_loader::Executable {
-        modules: sdk_text.map(sdk_module).into_iter().collect(),
+        modules: Vec::new(),
         entry: entries[0].addr,
         title_id,
         main_stack_size: None,
@@ -40,24 +36,6 @@ pub fn run_with_sdk(entries: Vec<Entry>, sdk_text: Option<&str>, title_id: Optio
     };
     let result = run_executable(&exe, entries, RunOptions { capture_output: true }).expect("the fake guest runs");
     assert_eq!(result.exit_code, 0, "the guest entry did not halt cleanly");
-}
-
-fn sdk_module(text: &str) -> kirikae_loader::Module {
-    let base = kirikae_loader::LOAD_BASE;
-    let mut memory = vec![0u8; 0x1000];
-    memory[..text.len()].copy_from_slice(text.as_bytes());
-    kirikae_loader::Module {
-        name: "sdk".into(),
-        image: kirikae_loader::Image {
-            base,
-            memory,
-            text: base..base + 0x1000,
-            ro: base + 0x1000..base + 0x1000,
-            data: base + 0x1000..base + 0x1000,
-            bss: base + 0x1000..base + 0x1000,
-            entry: base,
-        },
-    }
 }
 
 pub struct Called {
@@ -146,18 +124,6 @@ mod tests {
         let opened = call_service("lm", None, Request { cmd: 0, ..Default::default() });
         assert_eq!((opened.result, opened.objects, opened.copy_handles), (0, 1, 0));
         assert!(opened.data.is_empty());
-    }
-
-    extern "C" fn read_the_sdk_module(c: &mut Cpu) {
-        let text = c.process().memory.read(kirikae_loader::LOAD_BASE, 4).unwrap_or_default();
-        record("sdk", &[u64::from(text == b"SDK-")]);
-        c.halt();
-    }
-
-    #[test]
-    fn run_with_sdk_maps_a_module_carrying_the_given_text() {
-        run_with_sdk(vec![Entry { addr: ENTRY, func: read_the_sdk_module }], Some("SDK-text"), None);
-        assert_eq!(observed("sdk"), vec![1]);
     }
 
     #[test]
