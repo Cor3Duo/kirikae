@@ -13,11 +13,16 @@ pub const MESSAGE_SIZE: u64 = 0x100;
 static RECORDED: Mutex<BTreeMap<&'static str, Vec<u64>>> = Mutex::new(BTreeMap::new());
 
 pub fn record(key: &'static str, values: &[u64]) {
-    RECORDED.lock().unwrap().insert(key, values.to_vec());
+    assert!(
+        key.split_once('/').is_some_and(|(module, name)| !module.is_empty() && !name.is_empty()),
+        "harness keys are `module/name` so parallel tests never share one: {key}"
+    );
+    let previous = RECORDED.lock().unwrap().insert(key, values.to_vec());
+    assert!(previous.is_none(), "{key} was recorded twice before being observed");
 }
 
 pub fn observed(key: &str) -> Vec<u64> {
-    RECORDED.lock().unwrap().get(key).cloned().unwrap_or_default()
+    RECORDED.lock().unwrap().remove(key).unwrap_or_default()
 }
 
 pub fn run(entries: Vec<Entry>) {
@@ -104,18 +109,18 @@ mod tests {
         let msg = crate::ipc::client::cmif(TYPE_REQUEST, 41, &[], None, false, &[]);
         let reply = send(c, handle, &msg);
         let (result, data, _) = crate::ipc::client::cmif_response(&reply, false);
-        record("echo", &[u64::from(result), u64::from(u32::from_le_bytes(data[..4].try_into().unwrap()))]);
+        record("harness/echo", &[u64::from(result), u64::from(u32::from_le_bytes(data[..4].try_into().unwrap()))]);
         c.halt();
     }
 
     #[test]
     fn a_session_answers_a_request_sent_through_the_tls_buffer() {
         run(vec![Entry { addr: ENTRY, func: echo_over_ipc }]);
-        assert_eq!(observed("echo"), vec![0, 42]);
+        assert_eq!(observed("harness/echo"), vec![0, 42]);
     }
 
     extern "C" fn title_of_the_process(c: &mut Cpu) {
-        record("title", &[c.process().title_id]);
+        record("harness/title", &[c.process().title_id]);
         c.halt();
     }
 
@@ -127,8 +132,21 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "module/name")]
+    fn a_key_without_a_module_prefix_is_refused() {
+        record("event", &[1]);
+    }
+
+    #[test]
+    fn observing_a_key_consumes_it() {
+        record("harness/consumed", &[7]);
+        assert_eq!(observed("harness/consumed"), vec![7]);
+        assert!(observed("harness/consumed").is_empty());
+    }
+
+    #[test]
     fn the_fake_process_carries_the_given_title() {
         run_with_title(vec![Entry { addr: ENTRY, func: title_of_the_process }], Some(0x0100_0000_0000_0001));
-        assert_eq!(observed("title"), vec![0x0100_0000_0000_0001]);
+        assert_eq!(observed("harness/title"), vec![0x0100_0000_0000_0001]);
     }
 }
