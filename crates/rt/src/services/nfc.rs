@@ -7,7 +7,8 @@ use crate::services::{Reply, Request, Service};
 const STATE_NON_INITIALIZED: u32 = 0;
 const STATE_INITIALIZED: u32 = 1;
 const DEVICE_STATE_UNAVAILABLE: u32 = 5;
-const INVALID_ARGUMENT: u32 = 0x2EE202;
+const DEVICE_NOT_FOUND: u32 = (64 << 9) | 127;
+const UNMAPPED: u32 = u32::MAX;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -73,7 +74,7 @@ impl NfcSession {
             kind,
             state: Mutex::new(NfcState {
                 initialized: false,
-                enabled: false,
+                enabled: true,
             }),
         }
     }
@@ -101,24 +102,14 @@ impl NfcSession {
         Reply::ok().u8(u8::from(self.state.lock().unwrap().enabled))
     }
 
-    fn refuse_detection(&self) -> Reply {
-        Reply::err(INVALID_ARGUMENT)
-    }
-}
-
-impl Service for NfcSession {
-    fn name(&self) -> String {
-        "nfc/ISession".into()
-    }
-
-    fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
-        let cmd = match self.kind {
-            Kind::User | Kind::System => match req.cmd {
+    fn remap(&self, cmd: u32) -> u32 {
+        match self.kind {
+            Kind::User | Kind::System => match cmd {
                 0 | 400 => 0,
                 1 | 401 => 1,
                 2 | 402 => 2,
                 3 | 403 => 3,
-                100 | 500 => 100,
+                100 | 500 if self.kind == Kind::System => 100,
                 404 => 4,
                 405 => 5,
                 406 => 6,
@@ -134,9 +125,9 @@ impl Service for NfcSession {
                 1300 => 1300,
                 1301 => 1301,
                 1302 => 1302,
-                _ => req.cmd,
+                _ => UNMAPPED,
             },
-            Kind::Mifare => match req.cmd {
+            Kind::Mifare => match cmd {
                 0 => 0,
                 1 => 1,
                 2 => 4,
@@ -151,10 +142,23 @@ impl Service for NfcSession {
                 11 => 5,
                 12 => 6,
                 13 => 7,
-                _ => req.cmd,
+                _ => UNMAPPED,
             },
-        };
-        match cmd {
+        }
+    }
+
+    fn refuse_detection(&self) -> Reply {
+        Reply::err(DEVICE_NOT_FOUND)
+    }
+}
+
+impl Service for NfcSession {
+    fn name(&self) -> String {
+        "nfc/ISession".into()
+    }
+
+    fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
+        match self.remap(req.cmd) {
             0 => self.set_initialized(true),
             1 => self.set_initialized(false),
             2 => self.state(),
@@ -162,15 +166,15 @@ impl Service for NfcSession {
             100 => self.set_enabled(req.data.first().is_some_and(|&b| b != 0)),
             4 => Reply::ok().u32(0),
             5 => Reply::ok().u32(DEVICE_STATE_UNAVAILABLE),
-            6 => Reply::err(INVALID_ARGUMENT),
+            6 => Reply::err(DEVICE_NOT_FOUND),
             7 => event(c, "nfc.availability"),
             8 | 9 => self.refuse_detection(),
-            10 => Reply::err(INVALID_ARGUMENT),
+            10 => Reply::err(DEVICE_NOT_FOUND),
             11 => event(c, "nfc.activate"),
             12 => event(c, "nfc.deactivate"),
             510 => Reply::ok(),
-            1000 | 1001 => Reply::err(INVALID_ARGUMENT),
-            1300 => Reply::err(INVALID_ARGUMENT),
+            1000 | 1001 => Reply::err(DEVICE_NOT_FOUND),
+            1300 => Reply::err(DEVICE_NOT_FOUND),
             1301 | 1302 => Reply::ok(),
             _ => unimplemented_named("nfc", nfc_command_name(req.cmd), c, req),
         }
@@ -226,15 +230,28 @@ mod tests {
         assert_eq!(u32_of(&session.state()), STATE_INITIALIZED);
         session.set_initialized(false);
         assert_eq!(u32_of(&session.state()), STATE_NON_INITIALIZED);
+        assert_eq!(session.is_enabled().data, vec![1], "NFC is on by default on a real console");
+        session.set_enabled(false);
         assert_eq!(session.is_enabled().data, vec![0]);
-        session.set_enabled(true);
-        assert_eq!(session.is_enabled().data, vec![1]);
     }
 
     #[test]
     fn detection_is_refused_with_the_documented_error() {
         let session = NfcSession::new(Kind::Mifare);
         session.set_initialized(true);
-        assert_eq!(session.refuse_detection().result, INVALID_ARGUMENT);
+        assert_eq!(session.refuse_detection().result, DEVICE_NOT_FOUND);
+        assert_eq!(DEVICE_NOT_FOUND, 0x807f);
+    }
+
+    #[test]
+    fn each_interface_only_answers_its_own_commands() {
+        let user = NfcSession::new(Kind::User);
+        let system = NfcSession::new(Kind::System);
+        assert_eq!(user.remap(405), 5);
+        assert_eq!(user.remap(5), UNMAPPED, "IUser has no command 5");
+        assert_eq!(user.remap(100), UNMAPPED, "SetNfcEnabled is a system command");
+        assert_eq!(system.remap(500), 100);
+        assert_eq!(NfcSession::new(Kind::Mifare).remap(2), 4);
+        assert_eq!(NfcSession::new(Kind::Mifare).remap(99), UNMAPPED);
     }
 }
