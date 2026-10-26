@@ -10,7 +10,7 @@ pub struct Module {
     pub image: Image,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Executable {
     pub modules: Vec<Module>,
     pub entry: u64,
@@ -130,7 +130,7 @@ pub fn exefs_from_nsp(path: &Path) -> Result<(Files, u64, Option<RomFs>), Error>
         let nca = nca::parse(&mut r, entry.offset)?;
         if let Some((files, title, romfs)) = program(&mut r, nca, path)? {
             let nacp = control_file(&mut r, &entries, None);
-            return Ok((with_metadata(files, metas.first().map(|(_, b)| b), nacp), title, romfs));
+            return Ok((with_metadata(files, metas.first().map(|(_, b)| b), nacp), title & !0xfff, romfs));
         }
     }
     Err(Error::Malformed("no program NCA with an ExeFS"))
@@ -470,6 +470,17 @@ mod tests {
         let path = std::env::temp_dir().join(unique);
         std::fs::write(&path, bytes).expect("the synthetic package is writable");
         path
+    }
+
+    #[test]
+    fn a_package_without_content_meta_reports_the_application_title() {
+        let update = nca(nca::CONTENT_PROGRAM, APP_ID | 0x800, &[("main", &nso_with(&[0x2222_0000, 0xD65F_03C0]))]);
+        let name = format!("{:02x}", 0x22).repeat(16) + ".nca";
+        let path = write_package(&pfs0(&[(name.as_str(), update.as_slice())]));
+        let result = exefs_from_nsp(&path);
+        let _ = std::fs::remove_file(&path);
+        let (_, title, _) = result.expect("a program-only package loads");
+        assert_eq!(title, APP_ID);
     }
 
     #[test]

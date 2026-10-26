@@ -473,7 +473,7 @@ pub struct RunResult {
 pub fn run(file: &[u8], entries: &'static [Entry], opts: RunOptions) -> Result<RunResult, String> {
     let image = kirikae_loader::load(file, LOAD_BASE).map_err(|e| e.to_string())?;
     let entry = image.entry;
-    let exe = Executable { modules: vec![Module { name: "main".into(), image }], entry, title_id: None, main_stack_size: None, system_resource_size: 0, romfs: None, nacp: None, title_version: 0 };
+    let exe = Executable { modules: vec![Module { name: "main".into(), image }], entry, ..Default::default() };
     run_executable(&exe, entries, opts)
 }
 
