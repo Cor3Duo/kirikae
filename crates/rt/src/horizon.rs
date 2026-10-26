@@ -376,6 +376,18 @@ fn get_info(c: &mut Cpu) {
     c.x[1] = value;
 }
 
+const BREAK_INFO_SHOWN: u64 = 0x40;
+
+fn describe_break_info(bytes: &[u8]) -> String {
+    let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let mut text = hex.join(" ");
+    if let Ok(word) = <[u8; 4]>::try_from(bytes) {
+        let result = u32::from_le_bytes(word);
+        text += &format!(" (result {:#x} = 2{:03}-{:04})", result, result & 0x1ff, (result >> 9) & 0x1fff);
+    }
+    text
+}
+
 fn break_(c: &mut Cpu) {
     if c.x[0] & 0x8000_0000 != 0 {
         c.x[0] = 0;
@@ -391,6 +403,13 @@ fn break_(c: &mut Cpu) {
         c.x[2],
         p.describe(c.pc - 4)
     );
+    if c.x[1] != 0
+        && c.x[2] != 0
+        && let Some(bytes) = p.memory.read(c.x[1], c.x[2].min(BREAK_INFO_SHOWN))
+    {
+        let shown = if c.x[2] > BREAK_INFO_SHOWN { format!(" (first {BREAK_INFO_SHOWN:#x} of {:#x} bytes)", c.x[2]) } else { String::new() };
+        let _ = writeln!(std::io::stderr(), "kirikae:   info{shown}: {}", describe_break_info(&bytes));
+    }
     let mut fp = c.x[29];
     for _ in 0..16 {
         let (Some(next), Some(lr)) = (p.memory.read(fp, 8), p.memory.read(fp + 8, 8)) else { break };
@@ -719,5 +738,12 @@ mod tests {
         assert_eq!(got[2], 0xee01, "65 signaled handles are refused, not truncated");
         assert_eq!(got[3], RESULT_SUCCESS, "64 handles still wait");
         assert_eq!(got[4], 0, "the signaled event is the first handle");
+    }
+
+    #[test]
+    fn break_info_is_shown_as_bytes_and_a_four_byte_info_as_a_result_code() {
+        assert_eq!(describe_break_info(&[0x01, 0x02, 0xff]), "01 02 ff");
+        assert_eq!(describe_break_info(&0x4a2u32.to_le_bytes()), "a2 04 00 00 (result 0x4a2 = 2162-0002)");
+        assert_eq!(describe_break_info(&0x4a8u32.to_le_bytes()), "a8 04 00 00 (result 0x4a8 = 2168-0002)");
     }
 }
