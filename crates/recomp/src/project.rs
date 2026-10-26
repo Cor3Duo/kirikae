@@ -24,6 +24,7 @@ pub struct BuildOptions {
     pub jobs: usize,
     pub fast_regs: bool,
     pub profile: Option<PathBuf>,
+    pub no_profile: bool,
     pub plugins: Vec<PathBuf>,
 }
 
@@ -37,6 +38,7 @@ impl BuildOptions {
             jobs: std::thread::available_parallelism().map_or(4, |n| n.get()),
             fast_regs: false,
             profile: None,
+            no_profile: false,
             plugins: Vec::new(),
         }
     }
@@ -156,6 +158,121 @@ pub fn seeds(exe: &Executable) -> Vec<u64> {
     s
 }
 
+const PROFILE_HEADER: &str = "# kirikae:";
+
+pub fn default_profile(out_dir: &Path, name: &str) -> PathBuf {
+    out_dir.join(format!("{name}.profile"))
+}
+
+pub fn guest_tag_path(profile: &Path) -> PathBuf {
+    let mut tag = profile.as_os_str().to_os_string();
+    tag.push(".guest");
+    PathBuf::from(tag)
+}
+
+pub fn guest_identity(modules: &[kirikae_loader::Module]) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |bytes: &[u8]| {
+        for &byte in bytes {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    feed(&(modules.len() as u64).to_le_bytes());
+    for m in modules {
+        feed(m.name.as_bytes());
+        feed(&[0]);
+        feed(&(m.image.memory.len() as u64).to_le_bytes());
+        feed(&m.image.memory);
+    }
+    format!("{hash:016x}")
+}
+
+pub fn parse_profile(text: &str) -> Result<Vec<u64>, String> {
+    let header = text.lines().next().ok_or("empty profile")?;
+    if !header.starts_with(PROFILE_HEADER) {
+        return Err(format!("not a kirikae profile (expected a `{PROFILE_HEADER}` header)"));
+    }
+    if !text.ends_with('\n') {
+        return Err("profile does not end with a newline (truncated?)".into());
+    }
+    let mut addresses = Vec::new();
+    for (index, line) in text.lines().enumerate().skip(1) {
+        let data = line.split('#').next().unwrap_or_default().trim();
+        if data.is_empty() {
+            continue;
+        }
+        let mut fields = data.split_whitespace();
+        let raw = fields.next().unwrap_or_default();
+        let address = u64::from_str_radix(raw.trim_start_matches("0x"), 16)
+            .map_err(|_| format!("line {}: `{raw}` is not a hex address", index + 1))?;
+        if let Some(count) = fields.next() {
+            count.parse::<u64>().map_err(|_| format!("line {}: `{count}` is not an entry count", index + 1))?;
+        }
+        if fields.next().is_some() {
+            return Err(format!("line {}: too many fields", index + 1));
+        }
+        addresses.push(address);
+    }
+    Ok(addresses)
+}
+
+fn check_guest_tag(profile: &Path, identity: &str) -> Result<bool, String> {
+    let tag = guest_tag_path(profile);
+    match fs::read_to_string(&tag) {
+        Ok(text) => {
+            let found = text.trim();
+            if found.is_empty() {
+                return Err(format!("{}: empty guest tag", tag.display()));
+            }
+            if found != identity {
+                return Err(format!("{}: profile belongs to guest {found}, but this dump is {identity}", profile.display()));
+            }
+            Ok(false)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(format!("{}: {e}", tag.display())),
+    }
+}
+
+fn write_guest_tag(profile: &Path, identity: &str) -> Result<(), String> {
+    write(guest_tag_path(profile), format!("{identity}\n").as_bytes())
+}
+
+pub fn load_profile(profile: &Path, space: &CodeSpace, identity: &str) -> Result<Vec<u64>, String> {
+    let text = fs::read_to_string(profile).map_err(|e| format!("{}: {e}", profile.display()))?;
+    let parsed = parse_profile(&text).map_err(|e| format!("{}: {e}", profile.display()))?;
+    let total = parsed.len();
+    let addresses: Vec<u64> = parsed.into_iter().filter(|&a| space.is_code(a)).collect();
+    if addresses.len() != total {
+        eprintln!(
+            "kirikae: {}: {} of {total} addresses are outside this dump's modules (code loaded at run time) and are not compiled",
+            profile.display(),
+            total - addresses.len()
+        );
+    }
+    if check_guest_tag(profile, identity)? {
+        write_guest_tag(profile, identity)?;
+        eprintln!("kirikae: tagged {} as guest {identity}", profile.display());
+    }
+    Ok(addresses)
+}
+
+fn profile_input(opts: &BuildOptions, out_dir: &Path, name: &str) -> Option<PathBuf> {
+    if opts.no_profile {
+        let default = default_profile(out_dir, name);
+        if default.is_file() {
+            eprintln!("kirikae: --no-profile: ignoring {}", default.display());
+        }
+        return None;
+    }
+    if let Some(profile) = &opts.profile {
+        return Some(profile.clone());
+    }
+    let default = default_profile(out_dir, name);
+    default.is_file().then_some(default)
+}
+
 pub fn build(source: &Source, opts: &BuildOptions) -> Result<BuildReport, String> {
     let exe = from_source(source).map_err(|e| e.to_string())?;
     let name = package_name(&opts.name);
@@ -166,6 +283,9 @@ pub fn build(source: &Source, opts: &BuildOptions) -> Result<BuildReport, String
     }
     if !plugins.is_empty() && opts.backend != Backend::Cranelift {
         return Err("plugins need the Cranelift backend".into());
+    }
+    if opts.no_profile && opts.profile.is_some() {
+        return Err("--no-profile cannot be combined with --profile".into());
     }
     let out_dir = std::path::absolute(&opts.out_dir).map_err(|e| e.to_string())?;
     let project = out_dir.join(format!("{name}-build"));
@@ -188,15 +308,11 @@ pub fn build(source: &Source, opts: &BuildOptions) -> Result<BuildReport, String
             let space = CodeSpace::new(exe.modules.iter().map(|m| &m.image).collect());
             let t0 = Instant::now();
             let mut roots = seeds(&exe);
-            let profile = opts.profile.clone().unwrap_or_else(|| out_dir.join(format!("{name}.profile")));
-            match fs::read_to_string(&profile) {
-                Ok(text) => {
-                    let extra: Vec<u64> = kirikae_rt::coverage::parse(&text).into_iter().map(|(a, _)| a).filter(|&a| space.is_code(a)).collect();
-                    eprintln!("kirikae: {} interpreted addresses from {} become functions", extra.len(), profile.display());
-                    roots.extend(extra);
-                }
-                Err(e) if opts.profile.is_some() => return Err(format!("{}: {e}", profile.display())),
-                Err(_) => {}
+            let identity = guest_identity(&exe.modules);
+            if let Some(profile) = profile_input(opts, &out_dir, &name) {
+                let extra = load_profile(&profile, &space, &identity)?;
+                eprintln!("kirikae: {} interpreted addresses from {} become functions", extra.len(), profile.display());
+                roots.extend(extra);
             }
             let (entries, reachable) = find_entries(&space, &roots);
             eprintln!(
@@ -257,6 +373,41 @@ pub fn build(source: &Source, opts: &BuildOptions) -> Result<BuildReport, String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kirikae_loader::{Image, Module};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+
+    const HEADER: &str = "# kirikae: addresses the interpreter ran, for `kirikae build` (address, times entered)\n";
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "kirikae-profile-{tag}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn module(name: &str, words: &[u32]) -> Module {
+        let base = 0x0800_0000;
+        let mut memory = Vec::new();
+        for word in words {
+            memory.extend_from_slice(&word.to_le_bytes());
+        }
+        let end = base + memory.len() as u64;
+        Module {
+            name: name.into(),
+            image: Image { base, memory, text: base..end, ro: end..end, data: end..end, bss: end..end, entry: base },
+        }
+    }
+
+    fn write_profile(dir: &Path, text: &str) -> PathBuf {
+        let path = dir.join("game.profile");
+        fs::write(&path, text).unwrap();
+        path
+    }
 
     #[test]
     fn package_names() {
@@ -264,5 +415,124 @@ mod tests {
         assert_eq!(package_name("0100ABCD"), "game-0100abcd");
         assert_eq!(package_name("hello.nro"), "hello-nro");
         assert_eq!(package_name("My Homebrew: Demo"), "my-homebrew-demo");
+    }
+
+    #[test]
+    fn complete_profile_is_read() {
+        let dir = temp_dir("complete");
+        let module = module("main", &[0xd503_201f, 0xd65f_03c0, 0xaa1f_03e0]);
+        let space = CodeSpace::new(vec![&module.image]);
+        let profile = write_profile(&dir, &format!("{HEADER}8000000 3\n8000008 1\n"));
+        let identity = guest_identity(std::slice::from_ref(&module));
+        assert_eq!(load_profile(&profile, &space, &identity).unwrap(), vec![0x0800_0000, 0x0800_0008]);
+        assert_eq!(fs::read_to_string(guest_tag_path(&profile)).unwrap().trim(), identity);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn profile_without_payload_is_read() {
+        let dir = temp_dir("empty");
+        let module = module("main", &[0xd65f_03c0]);
+        let space = CodeSpace::new(vec![&module.image]);
+        let profile = write_profile(&dir, HEADER);
+        let identity = guest_identity(std::slice::from_ref(&module));
+        assert!(load_profile(&profile, &space, &identity).unwrap().is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn truncated_profile_is_refused() {
+        let dir = temp_dir("truncated");
+        let text = format!("{HEADER}8000000 3\n8000004 1");
+        assert!(parse_profile(&text).unwrap_err().contains("newline"));
+        let path = write_profile(&dir, &text);
+        assert!(parse_profile(&fs::read_to_string(&path).unwrap()).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn corrupt_profile_is_refused() {
+        let dir = temp_dir("corrupt");
+        let profile = write_profile(&dir, &format!("{HEADER}8000000 3\nnothex 1\n"));
+        let module = module("main", &[0xd65f_03c0]);
+        let space = CodeSpace::new(vec![&module.image]);
+        let identity = guest_identity(std::slice::from_ref(&module));
+        let message = load_profile(&profile, &space, &identity).unwrap_err();
+        assert!(message.contains("nothex"), "{message}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn non_profile_file_is_refused() {
+        let dir = temp_dir("foreign");
+        let path = write_profile(&dir, "8000000 3\n");
+        assert!(parse_profile(&fs::read_to_string(&path).unwrap()).unwrap_err().contains("header"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn missing_default_is_no_input_but_missing_named_fails() {
+        let dir = temp_dir("missing");
+        let module = module("main", &[0xd65f_03c0]);
+        let space = CodeSpace::new(vec![&module.image]);
+        let identity = guest_identity(std::slice::from_ref(&module));
+        let mut opts = BuildOptions::new(&dir, "game");
+        assert_eq!(profile_input(&opts, &dir, "game"), None);
+
+        opts.profile = Some(dir.join("named.profile"));
+        let named = profile_input(&opts, &dir, "game").unwrap();
+        assert!(load_profile(&named, &space, &identity).unwrap_err().contains("named.profile"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn no_profile_ignores_the_default() {
+        let dir = temp_dir("noprofile");
+        write_profile(&dir, &format!("{HEADER}8000000 1\n"));
+        let mut opts = BuildOptions::new(&dir, "game");
+        assert_eq!(profile_input(&opts, &dir, "game"), Some(dir.join("game.profile")));
+        opts.no_profile = true;
+        assert_eq!(profile_input(&opts, &dir, "game"), None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn addresses_outside_the_modules_are_skipped() {
+        let dir = temp_dir("stray");
+        let module = module("main", &[0xd65f_03c0]);
+        let space = CodeSpace::new(vec![&module.image]);
+        let identity = guest_identity(std::slice::from_ref(&module));
+        let profile = write_profile(&dir, &format!("{HEADER}8000000 1\n8000010 1\n"));
+        assert_eq!(load_profile(&profile, &space, &identity).unwrap(), vec![0x8000000]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn guest_tag_round_trips_and_refuses_another_dump() {
+        let dir = temp_dir("guest");
+        let here = module("main", &[0xd503_201f, 0xd65f_03c0]);
+        let there = module("main", &[0xd503_201f, 0xaa1f_03e0]);
+        let space = CodeSpace::new(vec![&here.image]);
+        let mine = guest_identity(std::slice::from_ref(&here));
+        let other = guest_identity(std::slice::from_ref(&there));
+        let profile = write_profile(&dir, &format!("{HEADER}8000000 1\n"));
+        assert_eq!(load_profile(&profile, &space, &mine).unwrap(), vec![0x0800_0000]);
+        let tag = guest_tag_path(&profile);
+        assert_eq!(tag, dir.join("game.profile.guest"));
+        assert_eq!(load_profile(&profile, &space, &mine).unwrap(), vec![0x0800_0000]);
+
+        let message = load_profile(&profile, &space, &other).unwrap_err();
+        assert!(message.contains(&mine) && message.contains(&other), "{message}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn identity_follows_the_images() {
+        let a = module("main", &[0xd503_201f, 0xd65f_03c0]);
+        let b = module("main", &[0xd503_201f, 0xaa1f_03e0]);
+        let renamed = module("other", &[0xd503_201f, 0xd65f_03c0]);
+        assert_eq!(guest_identity(std::slice::from_ref(&a)), guest_identity(std::slice::from_ref(&a.clone())));
+        assert_ne!(guest_identity(std::slice::from_ref(&a)), guest_identity(std::slice::from_ref(&b)));
+        assert_ne!(guest_identity(std::slice::from_ref(&a)), guest_identity(std::slice::from_ref(&renamed)));
     }
 }
