@@ -3,9 +3,6 @@ use super::{Env, bits};
 const CRYPTO3_MASK: u32 = 0xffe0_fc00;
 const CRYPTO2_MASK: u32 = 0xffff_fc00;
 
-const CRC32_POLY: u32 = 0xedb8_8320;
-const CRC32C_POLY: u32 = 0x82f6_3b78;
-
 const fn gf_mul(mut a: u8, mut b: u8) -> u8 {
     let mut p = 0u8;
     let mut i = 0;
@@ -284,43 +281,12 @@ fn sha256_su1(d: u128, n: u128, m: u128) -> u128 {
     v4([r0, r1, r2, r3])
 }
 
-fn crc_update(mut crc: u32, data: u64, bytes: u32, poly: u32) -> u32 {
-    for i in 0..bytes {
-        crc ^= (data >> (8 * i)) as u8 as u32;
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ (poly & (crc & 1).wrapping_neg());
-        }
-    }
-    crc
-}
-
-fn crc_kind(w: u32) -> Option<(u32, u32)> {
-    let kind = match w & CRYPTO3_MASK {
-        0x1ac0_4000 => (CRC32_POLY, 1),
-        0x1ac0_4400 => (CRC32_POLY, 2),
-        0x1ac0_4800 => (CRC32_POLY, 4),
-        0x9ac0_4c00 => (CRC32_POLY, 8),
-        0x1ac0_5000 => (CRC32C_POLY, 1),
-        0x1ac0_5400 => (CRC32C_POLY, 2),
-        0x1ac0_5800 => (CRC32C_POLY, 4),
-        0x9ac0_5c00 => (CRC32C_POLY, 8),
-        _ => return None,
-    };
-    Some(kind)
-}
-
 pub fn exec<E: Env + ?Sized>(e: &mut E, w: u32) -> bool {
     if !supported(w) {
         return false;
     }
     let (rn, rd) = (bits(w, 5, 5), bits(w, 0, 5));
     let rm = bits(w, 16, 5);
-
-    if let Some((poly, bytes)) = crc_kind(w) {
-        let crc = crc_update(e.x(rn) as u32, e.x(rm), bytes, poly);
-        e.set_x(rd, crc as u64);
-        return true;
-    }
 
     let aes = w & CRYPTO2_MASK;
     if matches!(aes, 0x4e28_4800 | 0x4e28_5800 | 0x4e28_6800 | 0x4e28_7800) {
@@ -367,14 +333,6 @@ pub fn supported(w: u32) -> bool {
             | 0x5e00_4000
             | 0x5e00_5000
             | 0x5e00_6000
-            | 0x1ac0_4000
-            | 0x1ac0_4400
-            | 0x1ac0_4800
-            | 0x9ac0_4c00
-            | 0x1ac0_5000
-            | 0x1ac0_5400
-            | 0x1ac0_5800
-            | 0x9ac0_5c00
     ) || matches!(w & CRYPTO2_MASK, 0x5e28_0800 | 0x5e28_1800 | 0x5e28_2800)
 }
 
@@ -472,24 +430,36 @@ mod tests {
     }
 
     #[test]
-    fn aesd_and_aesimc_are_not_dropped_by_the_decoder() {
-        let state = [
-            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
-            0xee, 0xff,
-        ];
-        let key = [0x0fu8; 16];
-        let expected = aesd(state, key);
-        let mut e = TestEnv::default();
-        e.v[0] = from_bytes(state);
-        e.v[1] = from_bytes(key);
-        assert!(exec(&mut e, 0x4e28_5800 | 1 << 5));
-        assert_eq!(to_bytes(e.v[0]), expected);
+    fn aesd_and_aesimc_decrypt_the_fips_197_vector() {
+        const RCON: [u8; 10] = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36];
+        let mut w: Vec<[u8; 4]> = (0..4).map(|i| [4 * i, 4 * i + 1, 4 * i + 2, 4 * i + 3]).collect();
+        for i in 4..44 {
+            let mut t = w[i - 1];
+            if i % 4 == 0 {
+                t = [SBOX[t[1] as usize] ^ RCON[i / 4 - 1], SBOX[t[2] as usize], SBOX[t[3] as usize], SBOX[t[0] as usize]];
+            }
+            w.push(std::array::from_fn(|b| w[i - 4][b] ^ t[b]));
+        }
+        let round_key = |r: usize| -> [u8; 16] { std::array::from_fn(|b| w[4 * r + b / 4][b % 4]) };
+        let run = |word: u32, rd: [u8; 16], rn: [u8; 16]| {
+            let mut e = TestEnv::default();
+            e.v[0] = from_bytes(rd);
+            e.v[1] = from_bytes(rn);
+            assert!(exec(&mut e, word | 1 << 5));
+            to_bytes(e.v[0])
+        };
+        let xor = |a: [u8; 16], b: [u8; 16]| -> [u8; 16] { std::array::from_fn(|i| a[i] ^ b[i]) };
 
-        let expected = aesimc(state);
-        let mut e = TestEnv::default();
-        e.v[1] = from_bytes(state);
-        assert!(exec(&mut e, 0x4e28_7800 | 1 << 5));
-        assert_eq!(to_bytes(e.v[0]), expected);
+        let cipher = [
+            0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b, 0x04, 0x30, 0xd8, 0xcd, 0xb7, 0x80, 0x70, 0xb4, 0xc5, 0x5a,
+        ];
+        let mut s = run(0x4e28_5800, cipher, round_key(10));
+        for r in (1..10).rev() {
+            s = run(0x4e28_7800, [0; 16], xor(s, round_key(r)));
+            s = run(0x4e28_5800, s, [0; 16]);
+        }
+        let plain: [u8; 16] = std::array::from_fn(|i| (i as u8) * 0x11);
+        assert_eq!(xor(s, round_key(0)), plain);
     }
 
     #[test]
@@ -523,15 +493,6 @@ mod tests {
     const SHA1SU1: u32 = 0x5e28_1800;
     const SHA256SU0: u32 = 0x5e28_2800;
 
-    const CRC32B: u32 = 0x1ac0_4000;
-    const CRC32H: u32 = 0x1ac0_4400;
-    const CRC32W: u32 = 0x1ac0_4800;
-    const CRC32X: u32 = 0x9ac0_4c00;
-    const CRC32CB: u32 = 0x1ac0_5000;
-    const CRC32CH: u32 = 0x1ac0_5400;
-    const CRC32CW: u32 = 0x1ac0_5800;
-    const CRC32CX: u32 = 0x9ac0_5c00;
-
     #[test]
     fn arm_arm_encodings() {
         for base in [SHA1C, SHA1P, SHA1M, SHA1SU0, SHA256H, SHA256H2, SHA256SU1] {
@@ -545,19 +506,12 @@ mod tests {
             assert_eq!(w, base | 2 << 5 | 3);
             assert!(supported(w), "{w:#010x} should be supported");
         }
-        for base in [
-            CRC32B, CRC32H, CRC32W, CRC32X, CRC32CB, CRC32CH, CRC32CW, CRC32CX,
-        ] {
-            let w = three(base, 3, 2, 1);
-            assert!(supported(w), "{w:#010x} should be supported");
-        }
 
         assert!(!supported(0x5e00_7000));
         assert!(!supported(SHA1H - 0x800));
         assert!(!supported(SHA1SU1 - 0x800));
         assert!(!supported(SHA256SU0 - 0x800));
-        assert!(!supported(0x1ac0_6000));
-        assert!(!supported(0x1ac0_4c00));
+        assert!(!supported(0x1ac0_4000));
     }
 
     const SHA1_INIT: [u32; 5] = [
@@ -816,77 +770,6 @@ mod tests {
                 b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
             )),
             "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
-        );
-    }
-
-    fn crc_checksum(op: u32, tail: u32, width: u32, msg: &[u8]) -> u32 {
-        let mut e = TestEnv::default();
-        e.x[1] = 0xffff_ffff;
-        let mut consumed = 0;
-        while consumed + width as usize <= msg.len() {
-            let mut data = 0u64;
-            for i in 0..width as usize {
-                data |= (msg[consumed + i] as u64) << (8 * i);
-            }
-            e.x[2] = data;
-            assert!(exec(&mut e, three(op, 1, 1, 2)));
-            consumed += width as usize;
-        }
-        for &byte in &msg[consumed..] {
-            e.x[2] = byte as u64;
-            assert!(exec(&mut e, three(tail, 1, 1, 2)));
-        }
-        e.x[1] as u32 ^ 0xffff_ffff
-    }
-
-    #[test]
-    fn crc32_matches_the_known_check_value_across_widths() {
-        for (op, tail, width) in [
-            (CRC32B, CRC32B, 1),
-            (CRC32H, CRC32B, 2),
-            (CRC32W, CRC32B, 4),
-            (CRC32X, CRC32B, 8),
-        ] {
-            assert_eq!(
-                crc_checksum(op, tail, width, b"123456789"),
-                0xcbf4_3926,
-                "CRC-32 at width {width}"
-            );
-        }
-        for (op, tail, width) in [
-            (CRC32CB, CRC32CB, 1),
-            (CRC32CH, CRC32CB, 2),
-            (CRC32CW, CRC32CB, 4),
-            (CRC32CX, CRC32CB, 8),
-        ] {
-            assert_eq!(
-                crc_checksum(op, tail, width, b"123456789"),
-                0xe306_9283,
-                "CRC-32C at width {width}"
-            );
-        }
-    }
-
-    #[test]
-    fn crc32_accumulates_least_significant_byte_first() {
-        let bytes = 0x8070_6050_4030_2010u64;
-        assert_eq!(
-            crc_update(0x1234_5678, bytes, 8, CRC32_POLY),
-            (0..8).fold(0x1234_5678, |c, i| crc_update(
-                c,
-                bytes >> (8 * i),
-                1,
-                CRC32_POLY
-            ))
-        );
-        assert_eq!(
-            crc_update(0x1234_5678, bytes, 4, CRC32C_POLY),
-            (0..4).fold(0x1234_5678, |c, i| crc_update(
-                c,
-                bytes >> (8 * i),
-                1,
-                CRC32C_POLY
-            ))
         );
     }
 }
