@@ -132,7 +132,7 @@ fn program<R: Read + Seek>(r: &mut R, nca: nca::Nca, path: &Path) -> Result<Opti
 
 #[derive(Clone, Debug)]
 pub enum Source {
-    Single(Vec<u8>),
+    Single(Vec<u8>, Option<RomFs>),
     ExeFs(Files, Option<u64>, Option<RomFs>),
 }
 
@@ -161,15 +161,22 @@ pub fn read_source(path: &Path) -> Result<Source, Error> {
         let (files, title, romfs) = exefs_from_nsp(path)?;
         return Ok(Source::ExeFs(files, Some(title), romfs));
     }
-    Ok(Source::Single(std::fs::read(path)?))
+    let bytes = std::fs::read(path)?;
+    let romfs = nro::is_nro(&bytes).then(|| nro::asset_romfs(&bytes)).flatten().map(|(offset, size)| RomFs {
+        path: std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()),
+        offset,
+        size,
+        compression: None,
+    });
+    Ok(Source::Single(bytes, romfs))
 }
 
 pub fn from_source(source: &Source) -> Result<Executable, Error> {
     match source {
         Source::ExeFs(files, title, romfs) => from_exefs(files, *title, romfs.clone()),
-        Source::Single(bytes) if nro::is_nro(bytes) => Ok(single("main", nro::load(bytes, LOAD_BASE)?)),
-        Source::Single(bytes) if nso::is_nso(bytes) => Ok(single("main", nso::load(bytes, LOAD_BASE)?)),
-        Source::Single(_) => Err(Error::BadMagic),
+        Source::Single(bytes, romfs) if nro::is_nro(bytes) => Ok(Executable { romfs: romfs.clone(), ..single("main", nro::load(bytes, LOAD_BASE)?) }),
+        Source::Single(bytes, _) if nso::is_nso(bytes) => Ok(single("main", nso::load(bytes, LOAD_BASE)?)),
+        Source::Single(..) => Err(Error::BadMagic),
     }
 }
 
@@ -182,7 +189,7 @@ const PACK_MAGIC: &[u8; 8] = b"KRKPKG02";
 pub fn pack(source: &Source) -> Vec<u8> {
     type Parts<'a> = (u8, u64, Vec<(&'a str, &'a [u8])>, Option<&'a RomFs>);
     let (kind, title, files, romfs): Parts = match source {
-        Source::Single(b) => (0, 0, vec![("main", b.as_slice())], None),
+        Source::Single(b, r) => (0, 0, vec![("main", b.as_slice())], r.as_ref()),
         Source::ExeFs(f, t, r) => (1, t.unwrap_or(0), f.iter().map(|(n, b)| (n.as_str(), b.as_slice())).collect(), r.as_ref()),
     };
     let mut out = PACK_MAGIC.to_vec();
@@ -244,7 +251,7 @@ pub fn unpack_source(blob: &[u8]) -> Result<Source, Error> {
         Some(RomFs { path, offset, size, compression: (cl != 0).then_some((co, cl)) })
     };
     match kind {
-        0 => Ok(Source::Single(files.pop().ok_or_else(bad)?.1)),
+        0 => Ok(Source::Single(files.pop().ok_or_else(bad)?.1, romfs)),
         1 => Ok(Source::ExeFs(files, (title != 0).then_some(title), romfs)),
         _ => Err(bad()),
     }
