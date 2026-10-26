@@ -167,6 +167,7 @@ impl Renderer {
                 let hash = texture_hash(gpu, mem, &header, &format, levels, layers).unwrap_or(0);
                 let frame = crate::display::FRAMES.load(std::sync::atomic::Ordering::Relaxed);
                 self.images.get_mut(&key).unwrap().source = Some(Source { hash, checked: frame, volatile: false });
+                entry.refresh = Some(key);
                 key
             }
         };
