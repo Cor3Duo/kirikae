@@ -501,7 +501,8 @@ pub fn fmuladd32x2(addend: u64, a: u64, b: u64, fpcr: u64) -> u64 {
 #[inline(always)]
 fn crc_reflected(acc: u64, data: u64, size: u64, poly: u32) -> u64 {
     let mut crc = acc as u32;
-    for i in 0..1u64 << size {
+    // `size` is the instruction's two-bit sz field; anything above it would loop up to 2^63 times.
+    for i in 0..1u64 << (size & 3) {
         crc ^= (data >> (8 * i)) as u8 as u32;
         for _ in 0..8 {
             crc = (crc >> 1) ^ (poly & (crc & 1).wrapping_neg());
