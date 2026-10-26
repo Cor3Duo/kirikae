@@ -319,7 +319,7 @@ impl Npads {
 fn acquire_style_set_event(
     sched: &crate::sched::Scheduler,
     events: &Mutex<HashMap<u32, Arc<Event>>>,
-    handles: &mut crate::kernel::HandleTable,
+    handles: &Mutex<crate::kernel::HandleTable>,
     id: u32,
 ) -> u32 {
     let event = events
@@ -329,7 +329,7 @@ fn acquire_style_set_event(
         .or_insert_with(|| Arc::new(Event { signaled: AtomicBool::new(false) }))
         .clone();
     sched.store_event(&event, true);
-    handles.insert(KObject::Event(event))
+    handles.lock().unwrap().insert(KObject::Event(event))
 }
 
 fn npads(c: &Cpu) -> Arc<Npads> {
@@ -390,8 +390,7 @@ impl Service for Hid {
             106 => {
                 let p = c.process();
                 let n = npads(c);
-                let mut handles = p.handles.lock().unwrap();
-                let handle = acquire_style_set_event(&p.sched, &n.events, &mut handles, req.u32(0));
+                let handle = acquire_style_set_event(&p.sched, &n.events, &p.handles, req.u32(0));
                 Reply::ok().copy_handle(handle)
             }
             108 => {
@@ -517,13 +516,29 @@ mod tests {
     fn every_acquire_gets_a_fresh_handle_for_the_same_event() {
         let sched = crate::sched::Scheduler::default();
         let events = Mutex::new(HashMap::new());
-        let mut handles = HandleTable::default();
-        let first = acquire_style_set_event(&sched, &events, &mut handles, 0);
-        let second = acquire_style_set_event(&sched, &events, &mut handles, 0);
+        let handles = Mutex::new(HandleTable::default());
+        let first = acquire_style_set_event(&sched, &events, &handles, 0);
+        let second = acquire_style_set_event(&sched, &events, &handles, 0);
         assert_ne!(first, second, "each client gets its own handle");
+        let handles = handles.lock().unwrap();
         let signaled = |h| matches!(handles.get(h), Some(KObject::Event(e)) if e.signaled.load(Relaxed));
         assert!(signaled(first) && signaled(second));
         assert_eq!(events.lock().unwrap().len(), 1, "one event per npad id");
+    }
+
+    #[test]
+    fn acquiring_the_style_set_event_never_holds_the_handle_table_while_signaling() {
+        let sched = crate::sched::Scheduler::default();
+        let events = Mutex::new(HashMap::new());
+        let handles = Mutex::new(HandleTable::default());
+        std::thread::scope(|s| {
+            let st = sched.lock();
+            let acquirer = s.spawn(|| acquire_style_set_event(&sched, &events, &handles, 0));
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            assert!(handles.try_lock().is_ok(), "the handle table is free while the scheduler lock is taken");
+            drop(st);
+            acquirer.join().unwrap();
+        });
     }
 
     #[test]
