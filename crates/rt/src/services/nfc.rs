@@ -119,7 +119,7 @@ impl NfcSession {
                 410 => 10,
                 411 => 11,
                 412 => 12,
-                510 => 510,
+                510 if self.kind == Kind::System => 510,
                 1000 => 1000,
                 1001 => 1001,
                 1300 => 1300,
@@ -217,6 +217,36 @@ fn nfc_command_name(cmd: u32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::abi::Entry;
+    use crate::process::{RunOptions, run_executable};
+
+    static OPENED: Mutex<Vec<(String, usize)>> = Mutex::new(Vec::new());
+
+    extern "C" fn open_all(c: &mut Cpu) {
+        for name in ["nfc:user", "nfc:sys", "nfc:mf:u"] {
+            let service = crate::services::open(name);
+            let reply = service.call(c, &Request { cmd: 0, ..Default::default() });
+            OPENED.lock().unwrap().push((service.name(), reply.objects.len()));
+        }
+        c.halt();
+    }
+
+    #[test]
+    fn every_port_opens_a_session() {
+        let entries: &'static [Entry] = Box::leak(vec![Entry { addr: 0x1000_0000, func: open_all }].into_boxed_slice());
+        let exe = kirikae_loader::Executable {
+            modules: Vec::new(),
+            entry: entries[0].addr,
+            title_id: None,
+            main_stack_size: None,
+            system_resource_size: 0,
+            romfs: None,
+        };
+        let result = run_executable(&exe, entries, RunOptions { capture_output: true }).expect("the fake guest runs");
+        assert_eq!(result.exit_code, 0);
+        let opened = OPENED.lock().unwrap().clone();
+        assert_eq!(opened, vec![("nfc:user".to_string(), 1), ("nfc:sys".to_string(), 1), ("nfc:mf:u".to_string(), 1)]);
+    }
 
     fn u32_of(reply: &Reply) -> u32 {
         u32::from_le_bytes(reply.data[..4].try_into().unwrap())
@@ -250,6 +280,8 @@ mod tests {
         assert_eq!(user.remap(405), 5);
         assert_eq!(user.remap(5), UNMAPPED, "IUser has no command 5");
         assert_eq!(user.remap(100), UNMAPPED, "SetNfcEnabled is a system command");
+        assert_eq!(user.remap(510), UNMAPPED, "OutputTestWave is a system command");
+        assert_eq!(system.remap(510), 510);
         assert_eq!(system.remap(500), 100);
         assert_eq!(NfcSession::new(Kind::Mifare).remap(2), 4);
         assert_eq!(NfcSession::new(Kind::Mifare).remap(99), UNMAPPED);
