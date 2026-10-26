@@ -76,6 +76,36 @@ fn mii_database_command_name(cmd: u32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::abi::Entry;
+    use crate::process::{RunOptions, run_executable};
+    use std::sync::Mutex;
+
+    static OPENED: Mutex<Vec<(String, usize)>> = Mutex::new(Vec::new());
+
+    extern "C" fn open_both(c: &mut Cpu) {
+        for name in ["mii:u", "mii:e"] {
+            let service = crate::services::open(name);
+            let reply = service.call(c, &Request { cmd: 0, ..Default::default() });
+            OPENED.lock().unwrap().push((service.name(), reply.objects.len()));
+        }
+        c.halt();
+    }
+
+    #[test]
+    fn both_ports_open_the_database() {
+        let entries: &'static [Entry] = Box::leak(vec![Entry { addr: 0x1000_0000, func: open_both }].into_boxed_slice());
+        let exe = kirikae_loader::Executable {
+            modules: Vec::new(),
+            entry: entries[0].addr,
+            title_id: None,
+            main_stack_size: None,
+            system_resource_size: 0,
+            romfs: None,
+        };
+        let result = run_executable(&exe, entries, RunOptions { capture_output: true }).expect("the fake guest runs");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(*OPENED.lock().unwrap(), vec![("mii:u".to_string(), 1), ("mii:e".to_string(), 1)]);
+    }
 
     #[test]
     fn the_character_info_has_the_documented_size() {

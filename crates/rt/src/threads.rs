@@ -13,6 +13,8 @@ use crate::sched;
 pub const PROCESS_ID: u64 = 0x81;
 const DEFAULT_CORE: i32 = 0;
 const CORE_MASK: u64 = 0b1111;
+const MAX_WAIT_OBJECTS: u32 = 0x40;
+const RESULT_TOO_MANY_HANDLES: u64 = 0xee01;
 
 static NEXT_THREAD_ID: AtomicU64 = AtomicU64::new(MAIN_THREAD_ID + 1);
 
@@ -268,8 +270,12 @@ pub fn wait_synchronization(c: &mut Cpu) {
 
 fn wait_for_objects(c: &mut Cpu) {
     let p = c.process();
-    let (list, count, timeout) = (c.x[1], c.x[2].min(64), c.x[3] as i64);
-    let raw = p.memory.read(list, count * 4).unwrap_or_default();
+    let (list, count, timeout) = (c.x[1], c.x[2] as u32, c.x[3] as i64);
+    if count > MAX_WAIT_OBJECTS {
+        c.x[0] = RESULT_TOO_MANY_HANDLES;
+        return;
+    }
+    let raw = p.memory.read(list, u64::from(count) * 4).unwrap_or_default();
     let handles: Vec<u32> = raw.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)).collect();
     let mut objects = Vec::new();
     for h in &handles {
