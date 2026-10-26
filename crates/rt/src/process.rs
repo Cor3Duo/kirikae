@@ -182,6 +182,10 @@ impl Process {
         }
     }
 
+    pub fn inferred_sdk_version(&self) -> Option<Version> {
+        *self.inferred_sdk.lock().unwrap()
+    }
+
     pub fn service_state<T: std::any::Any + Send + Sync>(&self, key: &'static str, init: impl FnOnce() -> T) -> Arc<T> {
         let mut map = self.service_state.lock().unwrap();
         if let Some(s) = map.get(key) {
