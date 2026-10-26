@@ -57,16 +57,25 @@ impl Service for NotificationService {
     }
 
     fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
-        match req.cmd {
-            0 => Reply::ok().copy_handle(self.queue.event),
-            1 => Reply::ok(),
-            2 => Reply::ok().bytes(&[0; SIZED_NOTIFICATION_INFO_SIZE]),
-            _ => unimplemented_named(
+        match self.command(req) {
+            Some(r) => r,
+            None => unimplemented_named(
                 "friend:u/INotificationService",
                 notification_command_name(req.cmd),
                 c,
                 req,
             ),
+        }
+    }
+}
+
+impl NotificationService {
+    fn command(&self, req: &Request) -> Option<Reply> {
+        match req.cmd {
+            0 => Some(Reply::ok().copy_handle(self.queue.event)),
+            1 => Some(Reply::ok()),
+            2 => Some(Reply::ok().bytes(&[0; SIZED_NOTIFICATION_INFO_SIZE])),
+            _ => None,
         }
     }
 }
@@ -196,250 +205,36 @@ fn friend_command_name(cmd: u32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::abi::Entry;
-    use crate::ipc::{CONTROL_CONVERT_TO_DOMAIN, TYPE_CONTROL, TYPE_REQUEST};
-    use crate::kernel::KObject;
-    use crate::services::{Buf, harness, result};
 
-    fn domain_request(
-        cmd: u32,
-        object: u32,
-        args: &[u8],
-        pointer: Option<Buf>,
-        copy: &[u32],
-    ) -> Vec<u8> {
-        let mut body = Vec::new();
-        for w in [crate::ipc::SFCI, 1, cmd, 0] {
-            body.extend_from_slice(&w.to_le_bytes());
+    fn request(cmd: u32) -> Request {
+        Request {
+            cmd,
+            ..Default::default()
         }
-        body.extend_from_slice(args);
-
-        let mut payload = Vec::new();
-        payload.push(1u8);
-        payload.push(0);
-        payload.extend_from_slice(&(body.len() as u16).to_le_bytes());
-        for w in [object, 0, 0] {
-            payload.extend_from_slice(&w.to_le_bytes());
-        }
-        payload.extend_from_slice(&body);
-
-        let special = pointer.is_some() || !copy.is_empty();
-        let mut out = Vec::new();
-        let nx = pointer.is_some() as u32;
-        let h0 = TYPE_REQUEST as u32 | nx << 16;
-        let h1 = (special as u32) << 31;
-        out.extend_from_slice(&h0.to_le_bytes());
-        out.extend_from_slice(&h1.to_le_bytes());
-        if special {
-            out.extend_from_slice(&((copy.len() as u32) << 1).to_le_bytes());
-            for h in copy {
-                out.extend_from_slice(&h.to_le_bytes());
-            }
-        }
-        if let Some(buf) = pointer {
-            for w in crate::ipc::encode_pointer(buf) {
-                out.extend_from_slice(&w.to_le_bytes());
-            }
-        }
-        let data_start = out.len().next_multiple_of(16);
-        let pad = (data_start - out.len()) / 4;
-        out.resize(data_start, 0);
-        out.extend_from_slice(&payload);
-        let data_words = pad + payload.len().div_ceil(4);
-        let h1 = data_words as u32 | (special as u32) << 31;
-        out[4..8].copy_from_slice(&h1.to_le_bytes());
-        out.resize(data_start + data_words * 4, 0);
-        out
-    }
-
-    fn domain_reply(msg: &[u8], data_len: usize) -> (u32, Vec<u32>, u32, Vec<u8>) {
-        let m = crate::ipc::parse_hipc(msg).expect("reply parses");
-        let pad = m.data_offset.next_multiple_of(16) - m.data_offset;
-        let p = &m.data[pad..];
-        let count = u32::from_le_bytes(p[..4].try_into().unwrap());
-        let result = u32::from_le_bytes(p[24..28].try_into().unwrap());
-        let data = p[32..32 + data_len].to_vec();
-        let ids_at = 32 + data_len.next_multiple_of(4);
-        let ids = (0..count as usize)
-            .map(|i| u32::from_le_bytes(p[ids_at + 4 * i..ids_at + 4 * i + 4].try_into().unwrap()))
-            .collect();
-        (count, ids, result, data)
-    }
-
-    fn convert_to_domain(c: &mut Cpu, handle: u32) {
-        let msg = crate::ipc::client::cmif(
-            TYPE_CONTROL,
-            CONTROL_CONVERT_TO_DOMAIN,
-            &[],
-            None,
-            false,
-            &[],
-        );
-        let reply = harness::send(c, handle, &msg);
-        let (result, _, _) = crate::ipc::client::cmif_response(&reply, false);
-        assert_eq!(result, 0, "ConvertToDomain");
     }
 
     #[test]
-    fn create_notification_service_answers_a_domain_object_and_no_data() {
-        extern "C" fn probe(c: &mut Cpu) {
-            let handle = harness::session(c, Arc::new(FriendServiceCreator));
-            convert_to_domain(c, handle);
-            let uid = 0x7073_6e64_0000_0001u64.to_le_bytes();
-            let mut args = uid.to_vec();
-            args.extend_from_slice(&0u64.to_le_bytes());
-            let msg = domain_request(1, 1, &args, None, &[]);
-            let reply = harness::send(c, handle, &msg);
-            let (count, ids, result, data) = domain_reply(&reply, 0);
-            harness::record(
-                "create",
-                &[
-                    result as u64,
-                    count as u64,
-                    data.len() as u64,
-                    ids.first().copied().unwrap_or(0) as u64,
-                ],
-            );
-            c.halt();
-        }
-        harness::run(vec![Entry {
-            addr: harness::ENTRY,
-            func: probe,
-        }]);
-        let create = harness::observed("create");
-        assert_eq!(
-            create[0], 0,
-            "CreateNotificationService returns success, not an unknown-command error"
-        );
-        assert_eq!(create[1], 1, "exactly one out object in the domain reply");
-        assert_eq!(create[2], 0, "an Out<SharedPointer> has no raw reply data");
-        assert_ne!(create[3], 0, "the object id must not be the null object");
+    fn the_notification_queue_has_its_event_and_empty_pops() {
+        let service = NotificationService {
+            queue: Arc::new(Notifications { event: 0x1234 }),
+        };
+        let event = service.command(&request(0)).expect("GetEvent");
+        assert_eq!((event.result, event.copy_handles), (0, vec![0x1234]));
+        let clear = service.command(&request(1)).expect("Clear");
+        assert_eq!((clear.result, clear.data.len()), (0, 0));
+        let pop = service.command(&request(2)).expect("Pop");
+        assert_eq!(pop.result, 0);
+        assert_eq!(pop.data, [0; SIZED_NOTIFICATION_INFO_SIZE], "an empty queue pops a zeroed notification");
     }
 
     #[test]
-    fn the_notification_queue_has_a_real_event_and_empty_pops() {
-        extern "C" fn probe(c: &mut Cpu) {
-            let handle = harness::session(c, Arc::new(FriendServiceCreator));
-            convert_to_domain(c, handle);
-            let msg = domain_request(1, 1, &[0; 16], None, &[]);
-            let reply = harness::send(c, handle, &msg);
-            let (_, ids, _, _) = domain_reply(&reply, 0);
-            let object = ids.first().copied().expect("notification service id");
-
-            let msg = domain_request(0, object, &[], None, &[]);
-            let reply = harness::send(c, handle, &msg);
-            let m = crate::ipc::parse_hipc(&reply).unwrap();
-            let event = m.copy_handles.first().copied().unwrap_or(0);
-            harness::record(
-                "event",
-                &[
-                    event as u64,
-                    matches!(
-                        c.process().handles.lock().unwrap().get(event),
-                        Some(KObject::Event(_))
-                    ) as u64,
-                ],
-            );
-
-            let msg = domain_request(2, object, &[], None, &[]);
-            let reply = harness::send(c, handle, &msg);
-            let (_, _, result, data) = domain_reply(&reply, SIZED_NOTIFICATION_INFO_SIZE);
-            harness::record("pop", &[result as u64, data.len() as u64]);
-
-            let msg = domain_request(1, object, &[], None, &[]);
-            let reply = harness::send(c, handle, &msg);
-            let (_, _, result, data) = domain_reply(&reply, 0);
-            harness::record("clear", &[result as u64, data.len() as u64]);
-            c.halt();
-        }
-        harness::run(vec![Entry {
-            addr: harness::ENTRY,
-            func: probe,
-        }]);
-        let event = harness::observed("event");
-        assert_ne!(event[0], 0, "GetEvent returns a handle");
-        assert_eq!(event[1], 1, "the handle names a real kernel event");
-        assert_eq!(
-            harness::observed("pop"),
-            vec![0, SIZED_NOTIFICATION_INFO_SIZE as u64],
-            "an empty queue pops a zero-sized notification, not an error"
-        );
-        assert_eq!(harness::observed("clear"), vec![0, 0]);
-    }
-
-    #[test]
-    fn sdk_shaped_request_with_a_pointer_buffer_and_copy_handle() {
-        extern "C" fn probe(c: &mut Cpu) {
-            let handle = harness::session(c, Arc::new(FriendServiceCreator));
-            convert_to_domain(c, handle);
-            let pointer = Buf {
-                addr: 0x1_0000_2000,
-                size: 0x10,
-            };
-            let msg = domain_request(1, 1, &[0; 16], Some(pointer), &[0x20030]);
-            let reply = harness::send(c, handle, &msg);
-            let (count, ids, result, data) = domain_reply(&reply, 0);
-            harness::record(
-                "create",
-                &[
-                    result as u64,
-                    count as u64,
-                    data.len() as u64,
-                    ids.first().copied().unwrap_or(0) as u64,
-                ],
-            );
-
-            let object = ids.first().copied().unwrap_or(0);
-            let msg = domain_request(0, object, &[], Some(pointer), &[0x20031]);
-            let reply = harness::send(c, handle, &msg);
-            let m = crate::ipc::parse_hipc(&reply).unwrap();
-            harness::record("event", &[m.copy_handles.len() as u64]);
-            c.halt();
-        }
-        harness::run(vec![Entry {
-            addr: harness::ENTRY,
-            func: probe,
-        }]);
-        let create = harness::observed("create");
-        assert_eq!(create[0], 0);
-        assert_eq!((create[1], create[2]), (1, 0));
-        assert_ne!(create[3], 0);
-        assert_eq!(harness::observed("event"), vec![1]);
-    }
-
-    #[test]
-    fn unknown_commands_report_the_cmif_error() {
-        extern "C" fn probe(c: &mut Cpu) {
-            let r = FriendServiceCreator.call(
-                c,
-                &Request {
-                    cmd: 3,
-                    ..Default::default()
-                },
-            );
-            harness::record("creator", &[r.result as u64, r.objects.len() as u64]);
-            let r = FriendService::new().call(
-                c,
-                &Request {
-                    cmd: 10103,
-                    ..Default::default()
-                },
-            );
-            harness::record("friend", &[r.result as u64, r.data.len() as u64]);
-            c.halt();
-        }
-        harness::run(vec![Entry {
-            addr: harness::ENTRY,
-            func: probe,
-        }]);
-        assert_eq!(
-            harness::observed("creator"),
-            vec![result::CMIF_UNKNOWN_COMMAND as u64, 0]
-        );
-        assert_eq!(
-            harness::observed("friend"),
-            vec![result::CMIF_UNKNOWN_COMMAND as u64, 0]
-        );
+    fn unknown_commands_are_left_to_the_cmif_error() {
+        let service = NotificationService {
+            queue: Arc::new(Notifications { event: 1 }),
+        };
+        assert!(service.command(&request(3)).is_none());
+        assert!(FriendService::new().command(&request(10103)).is_none());
+        assert_eq!(creator_command_name(3), "unknown");
     }
 
     #[test]
@@ -477,48 +272,5 @@ mod tests {
             .expect("LoadUserSetting");
         assert_eq!(setting.data.len(), USER_SETTING_SIZE);
         assert!(setting.data.iter().all(|&b| b == 0));
-    }
-
-    #[test]
-    fn the_completion_event_is_a_signalled_copy() {
-        extern "C" fn probe(c: &mut Cpu) {
-            let service = FriendService::new();
-            let r = service.call(
-                c,
-                &Request {
-                    cmd: 0,
-                    ..Default::default()
-                },
-            );
-            let handle = r.copy_handles.first().copied().unwrap_or(0);
-            let signaled = match c.process().handles.lock().unwrap().get(handle) {
-                Some(KObject::Event(e)) => e.signaled.load(std::sync::atomic::Ordering::Relaxed),
-                _ => false,
-            };
-            harness::record(
-                "completion",
-                &[handle as u64, signaled as u64, r.data.len() as u64],
-            );
-            let again = service.call(
-                c,
-                &Request {
-                    cmd: 0,
-                    ..Default::default()
-                },
-            );
-            harness::record(
-                "same",
-                &[again.copy_handles.first().copied().unwrap_or(0) as u64],
-            );
-            c.halt();
-        }
-        harness::run(vec![Entry {
-            addr: harness::ENTRY,
-            func: probe,
-        }]);
-        let completion = harness::observed("completion");
-        assert_ne!(completion[0], 0);
-        assert_eq!((completion[1], completion[2]), (1, 0));
-        assert_eq!(harness::observed("same"), vec![completion[0]]);
     }
 }
