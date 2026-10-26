@@ -226,7 +226,10 @@ fn check_guest_tag(profile: &Path, identity: &str) -> Result<bool, String> {
                 return Err(format!("{}: empty guest tag", tag.display()));
             }
             if found != identity {
-                return Err(format!("{}: profile belongs to guest {found}, but this dump is {identity}", profile.display()));
+                return Err(format!(
+                    "{}: profile belongs to guest {found}, but this dump is {identity} (a different dump or game version); delete the profile and its .guest file, or build with --no-profile",
+                    profile.display()
+                ));
             }
             Ok(false)
         }
@@ -523,6 +526,7 @@ mod tests {
 
         let message = load_profile(&profile, &space, &other).unwrap_err();
         assert!(message.contains(&mine) && message.contains(&other), "{message}");
+        assert!(message.contains("--no-profile") && message.contains("delete"), "{message}");
         fs::remove_dir_all(dir).unwrap();
     }
 
