@@ -7,6 +7,7 @@ const NAME_SIZE: usize = 0x200;
 const PUBLISHER_SIZE: usize = 0x100;
 
 const ISBN: usize = 0x3000;
+const SUPPORTED_LANGUAGE_FLAG: usize = 0x302c;
 const DISPLAY_VERSION: usize = 0x3060;
 const ADD_ON_CONTENT_BASE_ID: usize = 0x3070;
 const SAVE_DATA_OWNER_ID: usize = 0x3078;
@@ -48,14 +49,11 @@ impl Nacp {
                 "control.nacp is shorter than 0x4000 bytes",
             ));
         }
-        let language_flag = (0..LANGUAGE_COUNT)
-            .filter(|i| {
-                let at = language_entry(*i).unwrap_or(0);
-                let name = &bytes[at..at + NAME_SIZE];
-                let publisher = &bytes[at + NAME_SIZE..at + LANGUAGE_ENTRY_SIZE];
-                name.iter().any(|&b| b != 0) || publisher.iter().any(|&b| b != 0)
-            })
-            .fold(0u32, |mask, i| mask | 1 << i);
+        let language_flag = u32::from_le_bytes(
+            bytes[SUPPORTED_LANGUAGE_FLAG..SUPPORTED_LANGUAGE_FLAG + 4]
+                .try_into()
+                .unwrap_or_default(),
+        );
         Ok(Nacp {
             raw: bytes[..NACP_SIZE].to_vec(),
             display_version: c_string(&bytes[DISPLAY_VERSION..DISPLAY_VERSION + 0x10]),
@@ -112,6 +110,7 @@ mod tests {
             bytes[at + NAME_SIZE..at + NAME_SIZE + 4].copy_from_slice(b"Pub!");
         }
         bytes[DISPLAY_VERSION..DISPLAY_VERSION + 5].copy_from_slice(b"1.2.3");
+        bytes[SUPPORTED_LANGUAGE_FLAG..SUPPORTED_LANGUAGE_FLAG + 4].copy_from_slice(&0b1011u32.to_le_bytes());
         bytes[ADD_ON_CONTENT_BASE_ID..ADD_ON_CONTENT_BASE_ID + 8]
             .copy_from_slice(&0x0100_0000_1000_0000u64.to_le_bytes());
         bytes[SAVE_DATA_OWNER_ID..SAVE_DATA_OWNER_ID + 8]
@@ -137,8 +136,8 @@ mod tests {
         assert_eq!(nacp.publisher(2), "Pub!");
         assert_eq!(nacp.name(LANGUAGE_COUNT), "");
         assert_eq!(
-            nacp.supported_language_flag, 0b111,
-            "the three non-empty entries"
+            nacp.supported_language_flag, 0b1011,
+            "the stored flag, not the non-empty entries"
         );
         assert_eq!(nacp.raw.len(), NACP_SIZE);
         assert_eq!(&nacp.raw[..6], b"Sample");

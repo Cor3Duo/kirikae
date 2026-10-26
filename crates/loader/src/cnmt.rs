@@ -3,18 +3,19 @@ use crate::Error;
 pub const HEADER_SIZE: usize = 0x20;
 pub const CONTENT_INFO_SIZE: usize = 0x38;
 
-pub const META_APPLICATION: u8 = 1;
-pub const META_PATCH: u8 = 2;
-pub const META_ADD_ON_CONTENT: u8 = 3;
-pub const META_DELTA: u8 = 4;
-pub const META_DATA_PATCH: u8 = 5;
+pub const META_APPLICATION: u8 = 0x80;
+pub const META_PATCH: u8 = 0x81;
+pub const META_ADD_ON_CONTENT: u8 = 0x82;
+pub const META_DELTA: u8 = 0x83;
+pub const META_DATA_PATCH: u8 = 0x84;
 
-pub const CONTENT_PROGRAM: u8 = 0;
-pub const CONTENT_META: u8 = 1;
-pub const CONTENT_CONTROL: u8 = 2;
-pub const CONTENT_MANUAL: u8 = 3;
-pub const CONTENT_DATA: u8 = 4;
-pub const CONTENT_PUBLIC_DATA: u8 = 5;
+pub const CONTENT_META: u8 = 0;
+pub const CONTENT_PROGRAM: u8 = 1;
+pub const CONTENT_DATA: u8 = 2;
+pub const CONTENT_CONTROL: u8 = 3;
+pub const CONTENT_HTML_DOCUMENT: u8 = 4;
+pub const CONTENT_LEGAL_INFORMATION: u8 = 5;
+pub const CONTENT_DELTA_FRAGMENT: u8 = 6;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContentInfo {
@@ -28,6 +29,7 @@ pub struct Cnmt {
     pub version: u32,
     pub meta_type: u8,
     pub application_id: Option<u64>,
+    pub patch_id: Option<u64>,
     pub required_system_version: Option<u32>,
     pub contents: Vec<ContentInfo>,
 }
@@ -56,26 +58,26 @@ impl Cnmt {
         let meta_type = bytes[0xc];
         let extended = u16_at(bytes, 0xe) as usize;
         let content_count = u16_at(bytes, 0x10) as usize;
-        let (application_id, required_system_version) = match meta_type {
+        let (application_id, patch_id, required_system_version) = match meta_type {
             META_APPLICATION => {
                 let ext = bytes
                     .get(HEADER_SIZE..HEADER_SIZE + extended.max(0xc))
                     .ok_or(Error::Malformed("CNMT application header is truncated"))?;
-                (Some(u64_at(ext, 0)), Some(u32_at(ext, 8)))
+                (Some(id), Some(u64_at(ext, 0)), Some(u32_at(ext, 8)))
             }
             META_PATCH => {
                 let ext = bytes
                     .get(HEADER_SIZE..HEADER_SIZE + extended.max(0xc))
                     .ok_or(Error::Malformed("CNMT patch header is truncated"))?;
-                (Some(u64_at(ext, 0)), Some(u32_at(ext, 8)))
+                (Some(u64_at(ext, 0)), None, Some(u32_at(ext, 8)))
             }
             META_ADD_ON_CONTENT => {
                 let ext = bytes
                     .get(HEADER_SIZE..HEADER_SIZE + extended.max(0xc))
                     .ok_or(Error::Malformed("CNMT add-on-content header is truncated"))?;
-                (Some(u64_at(ext, 0)), None)
+                (Some(u64_at(ext, 0)), None, None)
             }
-            _ => (None, None),
+            _ => (None, None, None),
         };
         let entries_at = HEADER_SIZE + extended;
         let entries_len = content_count
@@ -98,6 +100,7 @@ impl Cnmt {
             version,
             meta_type,
             application_id,
+            patch_id,
             required_system_version,
             contents,
         })
@@ -170,15 +173,23 @@ mod tests {
     }
 
     #[test]
-    fn an_application_meta_reads_its_patch_id() {
+    fn an_application_meta_is_its_own_application_and_names_its_patch() {
         let mut ext = vec![0u8; 0xc];
         ext[..8].copy_from_slice(&0x0100_0000_0000_0800u64.to_le_bytes());
         ext[8..12].copy_from_slice(&0u32.to_le_bytes());
-        let bytes = cnmt(META_APPLICATION, 0, &ext, &[(0x33, CONTENT_PROGRAM)]);
+        let mut bytes = cnmt(META_APPLICATION, 0, &ext, &[(0x33, CONTENT_PROGRAM)]);
+        bytes[..8].copy_from_slice(&0x0100_0000_0000_0000u64.to_le_bytes());
         let meta = Cnmt::parse(&bytes).unwrap();
-        assert_eq!(meta.application_id, Some(0x0100_0000_0000_0800));
+        assert_eq!(meta.application_id, Some(0x0100_0000_0000_0000));
+        assert_eq!(meta.patch_id, Some(0x0100_0000_0000_0800));
         assert_eq!(meta.version, 0);
         assert_eq!(meta.content(CONTENT_PROGRAM).unwrap().id, [0x33; 16]);
+    }
+
+    #[test]
+    fn the_type_values_are_the_documented_ones() {
+        assert_eq!((META_APPLICATION, META_PATCH, META_ADD_ON_CONTENT), (0x80, 0x81, 0x82));
+        assert_eq!((CONTENT_META, CONTENT_PROGRAM, CONTENT_DATA, CONTENT_CONTROL), (0, 1, 2, 3));
     }
 
     #[test]

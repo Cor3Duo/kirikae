@@ -621,44 +621,104 @@ impl Gpu {
         let (len, lines) = (regs[0x106] as u64, regs[0x107].max(1) as u64);
         let multi_line = launch >> 9 & 1 == 1;
         let lines = if multi_line { lines } else { 1 };
-        let remap = launch >> 10 & 1 == 1;
+        let remap = (launch >> 10 & 1 == 1).then(|| Remap::new(regs));
+        let (in_bytes, out_bytes) = remap.as_ref().map_or((1, 1), |r| (r.src_bytes(), r.dst_bytes()));
+        let convert = |data: Vec<u8>| match &remap {
+            Some(r) => r.apply(&data, (len * lines) as usize),
+            None => data,
+        };
         let src_pitch_layout = launch >> 7 & 1 == 1;
         let dst_pitch_layout = launch >> 8 & 1 == 1;
         if !(src_pitch_layout && dst_pitch_layout) {
             if trace() {
                 eprintln!("gpu: dma block-linear launch {launch:#x} src {src:#x} dst {dst:#x} pitch {pitch_in:#x}/{pitch_out:#x} len {len:#x} lines {lines} regs {:x?}", &regs[0x1c0..0x1d0]);
             }
-            if remap {
-                return;
-            }
-            let side = |pitch_layout: bool, base: u64, at: usize, pitch: u64| {
+            let side = |pitch_layout: bool, base: u64, at: usize, pitch: u64, bytes: u64| {
                 if pitch_layout {
                     Side::Pitch { base, pitch: if multi_line { pitch } else { 0 } }
                 } else {
                     let origin = regs[at + 5];
-                    Side::BlockLinear { base, block_height_log2: regs[at] >> 4 & 0xf, width: regs[at + 1] as u64, x: (origin & 0xffff) as u64, y: (origin >> 16) as u64 }
+                    Side::BlockLinear { base, block_height_log2: regs[at] >> 4 & 0xf, width: regs[at + 1] as u64 * bytes, x: (origin & 0xffff) as u64 * bytes, y: (origin >> 16) as u64 }
                 }
             };
-            let from = side(src_pitch_layout, src, 0x1ca, pitch_in);
-            let to = side(dst_pitch_layout, dst, 0x1c3, pitch_out);
-            let Some(rows) = from.read(self, mem, len, lines) else { return };
-            to.write(self, mem, &rows, len, lines);
+            let from = side(src_pitch_layout, src, 0x1ca, pitch_in, in_bytes);
+            let to = side(dst_pitch_layout, dst, 0x1c3, pitch_out, out_bytes);
+            let rows = if remap.as_ref().is_none_or(Remap::reads_source) { from.read(self, mem, len * in_bytes, lines) } else { Some(Vec::new()) };
+            let Some(rows) = rows else { return };
+            to.write(self, mem, &convert(rows), len * out_bytes, lines);
             return;
         }
         for l in 0..lines {
             let out = dst + l * if multi_line { pitch_out } else { 0 };
-            if remap {
-                let c = regs[0x1c0].to_le_bytes();
-                let fill: Vec<u8> = c.iter().copied().cycle().take((len * 4) as usize).collect();
-                self.write(mem, out, &fill);
-            } else if let Some(line) = {
+            let line = if remap.as_ref().is_none_or(Remap::reads_source) {
                 let from = src + l * if multi_line { pitch_in } else { 0 };
-                self.cpu_access(from, len);
-                self.read(mem, from, len)
-            } {
+                self.cpu_access(from, len * in_bytes);
+                self.read(mem, from, len * in_bytes)
+            } else {
+                Some(Vec::new())
+            };
+            if let Some(line) = line {
+                let line = match &remap {
+                    Some(r) => r.apply(&line, len as usize),
+                    None => line,
+                };
                 self.write(mem, out, &line);
             }
         }
+    }
+}
+
+struct Remap {
+    component: usize,
+    src: usize,
+    dst: usize,
+    swizzle: [u32; 4],
+    constants: [u32; 2],
+}
+
+impl Remap {
+    fn new(regs: &[u32]) -> Remap {
+        let s = regs[0x1c2];
+        Remap {
+            component: (s >> 16 & 3) as usize + 1,
+            src: (s >> 20 & 3) as usize + 1,
+            dst: (s >> 24 & 3) as usize + 1,
+            swizzle: [s & 7, s >> 4 & 7, s >> 8 & 7, s >> 12 & 7],
+            constants: [regs[0x1c0], regs[0x1c1]],
+        }
+    }
+
+    fn src_bytes(&self) -> u64 {
+        (self.component * self.src) as u64
+    }
+
+    fn dst_bytes(&self) -> u64 {
+        (self.component * self.dst) as u64
+    }
+
+    fn reads_source(&self) -> bool {
+        self.swizzle[..self.dst].iter().any(|&s| s < 4)
+    }
+
+    fn apply(&self, input: &[u8], elements: usize) -> Vec<u8> {
+        let c = self.component;
+        let mut out = vec![0u8; elements * self.dst * c];
+        for e in 0..elements {
+            for (k, &s) in self.swizzle[..self.dst].iter().enumerate() {
+                let o = (e * self.dst + k) * c;
+                match s {
+                    0..=3 => {
+                        let i = (e * self.src + s as usize) * c;
+                        if let Some(v) = input.get(i..i + c) {
+                            out[o..o + c].copy_from_slice(v);
+                        }
+                    }
+                    4 | 5 => out[o..o + c].copy_from_slice(&self.constants[s as usize - 4].to_le_bytes()[..c]),
+                    _ => {}
+                }
+            }
+        }
+        out
     }
 }
 

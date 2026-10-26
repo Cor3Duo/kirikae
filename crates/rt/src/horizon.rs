@@ -201,6 +201,13 @@ fn set_heap_size(c: &mut Cpu) {
             return;
         }
         *heap = size;
+    } else if size < *heap {
+        if let Err(e) = p.memory.unmap(HEAP_BASE + size, *heap - size) {
+            drop(heap);
+            fault(c, format!("could not shrink the heap to {size:#x}: {e}"));
+            return;
+        }
+        *heap = size;
     }
     c.x[0] = RESULT_SUCCESS;
     c.x[1] = HEAP_BASE;
@@ -401,4 +408,84 @@ pub fn fault(c: &mut Cpu, message: String) {
     let _ = writeln!(std::io::stderr(), "kirikae: thread {} lr={} sp={:#x}", c.thread.id, p.describe(c.x[30]), c.sp);
     p.terminate(2);
     c.halt();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::abi::{Entry, GuestFn};
+    use crate::process::{RunOptions, run_executable};
+    use std::sync::Mutex;
+
+    static OBSERVED: Mutex<Vec<(&'static str, Vec<u64>)>> = Mutex::new(Vec::new());
+
+    fn record(name: &'static str, values: &[u64]) {
+        OBSERVED.lock().unwrap().push((name, values.to_vec()));
+    }
+
+    fn observed(name: &'static str) -> Vec<u64> {
+        let mut all = OBSERVED.lock().unwrap();
+        let i = all
+            .iter()
+            .position(|(n, _)| *n == name)
+            .expect("the fake guest recorded nothing");
+        all.remove(i).1
+    }
+
+    fn run_guest(f: GuestFn) {
+        let entries: &'static [Entry] = Box::leak(
+            vec![Entry {
+                addr: 0x1000_0000,
+                func: f,
+            }]
+            .into_boxed_slice(),
+        );
+        let exe = kirikae_loader::Executable {
+            modules: Vec::new(),
+            entry: entries[0].addr,
+            title_id: None,
+            main_stack_size: None,
+            system_resource_size: 0,
+            romfs: None,
+            nacp: None,
+            title_version: 0,
+        };
+        let result = run_executable(
+            &exe,
+            entries,
+            RunOptions {
+                capture_output: true,
+            },
+        )
+        .expect("the fake guest runs");
+        assert_eq!(result.exit_code, 0);
+    }
+
+    extern "C" fn shrink(c: &mut Cpu) {
+        let size = |c: &mut Cpu, bytes: u64| {
+            c.x[1] = bytes;
+            dispatch(c, 0x01);
+            c.x[0]
+        };
+        let grown = size(c, HEAP_ALIGN * 2);
+        let mapped = c.process().memory.query(HEAP_BASE + HEAP_ALIGN).state;
+        let shrunk = size(c, HEAP_ALIGN);
+        let tail = c.process().memory.query(HEAP_BASE + HEAP_ALIGN).state;
+        record("heap", &[grown, u64::from(mapped), shrunk, u64::from(tail)]);
+        c.halt();
+    }
+
+    #[test]
+    fn shrinking_the_heap_unmaps_the_tail() {
+        run_guest(shrink);
+        let got = observed("heap");
+        assert_eq!(got[0], RESULT_SUCCESS);
+        assert_eq!(got[1], u64::from(state::HEAP), "the grown page is heap");
+        assert_eq!(got[2], RESULT_SUCCESS, "shrinking succeeds");
+        assert_eq!(
+            got[3],
+            u64::from(state::FREE),
+            "the returned tail is unmapped, not left as heap"
+        );
+    }
 }
