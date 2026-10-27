@@ -9,6 +9,7 @@ pub mod fs;
 #[cfg(test)]
 pub(crate) mod harness;
 pub mod hid;
+pub mod ectx;
 pub mod hwopus;
 pub mod irs;
 pub mod apm;
@@ -29,7 +30,6 @@ pub mod stub;
 pub mod time;
 pub mod vi;
 pub mod bt;
-pub mod ectx;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Buf {
@@ -143,6 +143,9 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "appletOE" => Arc::new(am::AppletOe),
         "irs" => Arc::new(irs::Irs),
         "csrng" => Arc::new(csrng::Csrng),
+        "ectx:aw" => Arc::new(ectx::Ectx::new("ectx:aw")),
+        "ectx:r" => Arc::new(ectx::Ectx::new("ectx:r")),
+        "ectx:w" => Arc::new(ectx::Ectx::new("ectx:w")),
         "omm" => Arc::new(omm::Omm),
         "pctl" => Arc::new(pctl::Pctl { name: "pctl" }),
         "pdm:qry" => Arc::new(pdm::PdmQry),
@@ -173,9 +176,6 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "vi:s" => Arc::new(vi::Vi { name: "vi:s" }),
         "vi:u" => Arc::new(vi::Vi { name: "vi:u" }),
         "bt" => Arc::new(bt::Bt),
-        "ectx:aw" => Arc::new(ectx::Ectx::new("ectx:aw")),
-        "ectx:r" => Arc::new(ectx::Ectx::new("ectx:r")),
-        "ectx:w" => Arc::new(ectx::Ectx::new("ectx:w")),
         _ => Arc::new(stub::Stub::new(name)),
     }
 }
