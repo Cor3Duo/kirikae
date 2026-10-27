@@ -13,6 +13,7 @@ pub mod hwopus;
 pub mod irs;
 pub mod apm;
 pub mod audio;
+pub mod btm;
 pub mod lm;
 pub mod mii;
 pub mod mm;
@@ -29,7 +30,6 @@ pub mod stub;
 pub mod time;
 pub mod vi;
 pub mod bt;
-pub mod btm;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Buf {
@@ -147,6 +147,7 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "pctl" => Arc::new(pctl::Pctl { name: "pctl" }),
         "pdm:qry" => Arc::new(pdm::PdmQry),
         "pctl:s" => Arc::new(pctl::Pctl { name: "pctl:s" }),
+        "btm:u" => Arc::new(btm::BtmU),
         "pctl:r" => Arc::new(pctl::Pctl { name: "pctl:r" }),
         "pctl:a" => Arc::new(pctl::Pctl { name: "pctl:a" }),
         "fsp-srv" => Arc::new(fs::FsProxy),
@@ -173,7 +174,6 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "vi:s" => Arc::new(vi::Vi { name: "vi:s" }),
         "vi:u" => Arc::new(vi::Vi { name: "vi:u" }),
         "bt" => Arc::new(bt::Bt),
-        "btm:u" => Arc::new(btm::BtmU),
         _ => Arc::new(stub::Stub::new(name)),
     }
 }
