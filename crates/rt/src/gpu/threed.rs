@@ -297,7 +297,7 @@ impl Gpu {
         }
         let surface = super::vulkan::color_surface(regs, base);
         let bits = [regs[reg::CLEAR_COLOR], regs[reg::CLEAR_COLOR + 1], regs[reg::CLEAR_COLOR + 2], regs[reg::CLEAR_COLOR + 3]];
-        let rendered = self.with_renderer(|r| r.clear(self, mem, &surface, bits)).is_some();
+        let rendered = self.with_renderer(|r| r.clear(self, mem, regs, &surface, bits)).is_some();
         if rendered && crate::env_var!("KIRIKAE_CPU_CLEARS").is_none() {
             return;
         }

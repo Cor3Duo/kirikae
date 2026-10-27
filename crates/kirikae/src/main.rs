@@ -19,6 +19,8 @@ usage:
         [--profile <file>]                           also compile the addresses a run had to
                                                      interpret (default: <dir>/<name>.profile,
                                                      written by the executable)
+        [--no-profile]                               ignore any profile, including the default
+                                                     one; fails with --profile
   kirikae run <file>                                    run with the interpreter only
   kirikae info <file>                                   modules, segments and decoder coverage
                                                      (NRO, NSO, ExeFS folder, DNSP)
@@ -56,7 +58,7 @@ fn main() -> ExitCode {
     }
 }
 
-const SWITCHES: &[&str] = &["--fast-regs"];
+const SWITCHES: &[&str] = &["--fast-regs", "--no-profile"];
 
 struct Args {
     positional: Vec<String>,
@@ -115,7 +117,7 @@ fn cmd_build(args: &[String]) -> Result<ExitCode, String> {
     if let Some(j) = a.option(&["-j", "--jobs"]) {
         opts.jobs = j.parse().map_err(|_| format!("bad job count `{j}`"))?;
     }
-    opts.profile = a.option(&["--profile"]).map(PathBuf::from);
+    (opts.profile, opts.no_profile) = profile_options(&a)?;
     opts.plugins = a.options.iter().filter(|(k, _)| k == "--plugin").map(|(_, v)| PathBuf::from(v)).collect();
     opts.fast_regs = a.option(&["--fast-regs"]).is_some() || std::env::var("KIRIKAE_FAST_REGS").is_ok_and(|v| v == "1");
     if opts.fast_regs && opts.backend != Backend::Cranelift {
@@ -132,6 +134,15 @@ fn cmd_build(args: &[String]) -> Result<ExitCode, String> {
         started.elapsed().as_secs_f64()
     );
     Ok(ExitCode::SUCCESS)
+}
+
+fn profile_options(a: &Args) -> Result<(Option<PathBuf>, bool), String> {
+    let profile = a.option(&["--profile"]).map(PathBuf::from);
+    let no_profile = a.option(&["--no-profile"]).is_some();
+    if no_profile && profile.is_some() {
+        return Err("--no-profile cannot be combined with --profile".into());
+    }
+    Ok((profile, no_profile))
 }
 
 fn cmd_run(args: &[String]) -> Result<ExitCode, String> {
@@ -397,5 +408,28 @@ fn cmd_dev(args: &[String]) -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
         _ => Err("dev commands: simd-cases, simd-check, romfs-ls, romfs-find, extract, module-dump, syms".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_args(list: &[&str]) -> Args {
+        let args: Vec<String> = list.iter().map(|s| (*s).to_string()).collect();
+        parse(&args).unwrap()
+    }
+
+    #[test]
+    fn no_profile_is_a_switch() {
+        let a = parse_args(&["game.nro", "--no-profile"]);
+        assert_eq!(a.positional, vec!["game.nro"]);
+        assert_eq!(profile_options(&a).unwrap(), (None, true));
+    }
+
+    #[test]
+    fn no_profile_rejects_profile_flags() {
+        let a = parse_args(&["game.nro", "--no-profile", "--profile", "p"]);
+        assert!(profile_options(&a).unwrap_err().contains("--profile"));
     }
 }
