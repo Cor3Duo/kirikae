@@ -14,6 +14,7 @@ pub mod hid;
 pub mod ectx;
 pub mod hwopus;
 pub mod irs;
+pub mod caps;
 pub mod apm;
 pub mod audio;
 pub mod lm;
@@ -155,6 +156,8 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "ectx:w" => Arc::new(ectx::Ectx::new("ectx:w")),
         "omm" => Arc::new(omm::Omm),
         "pctl" => Arc::new(pctl::Pctl { name: "pctl" }),
+        "caps:su" => Arc::new(caps::CapsSu),
+        "caps:u" => Arc::new(caps::CapsU),
         "pdm:qry" => Arc::new(pdm::PdmQry),
         "pctl:s" => Arc::new(pctl::Pctl { name: "pctl:s" }),
         "pctl:r" => Arc::new(pctl::Pctl { name: "pctl:r" }),
