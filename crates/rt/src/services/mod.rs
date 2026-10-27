@@ -16,7 +16,6 @@ pub mod audio;
 pub mod lm;
 pub mod mii;
 pub mod mm;
-pub mod nfc;
 pub mod nfp;
 pub mod nvdrv;
 pub mod omm;
@@ -26,6 +25,7 @@ pub mod pl;
 pub mod ro;
 pub mod set;
 pub mod sm;
+pub mod nfc;
 pub mod stub;
 pub mod time;
 pub mod vi;
@@ -144,9 +144,6 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "irs" => Arc::new(irs::Irs),
         "csrng" => Arc::new(csrng::Csrng),
         "omm" => Arc::new(omm::Omm),
-        "nfc:user" => Arc::new(nfc::Nfc::user()),
-        "nfc:sys" => Arc::new(nfc::Nfc::system()),
-        "nfc:mf:u" => Arc::new(nfc::Nfc::mifare()),
         "pctl" => Arc::new(pctl::Pctl { name: "pctl" }),
         "pdm:qry" => Arc::new(pdm::PdmQry),
         "pctl:s" => Arc::new(pctl::Pctl { name: "pctl:s" }),
@@ -166,6 +163,9 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "nvdrv:t" => Arc::new(nvdrv::Nvdrv { name: "nvdrv:t" }),
         "audren:u" => Arc::new(audio::AudioRendererManager),
         "audout:u" => Arc::new(audio::AudioOutManager),
+        "nfc:user" => Arc::new(nfc::Nfc::user()),
+        "nfc:sys" => Arc::new(nfc::Nfc::system()),
+        "nfc:mf:u" => Arc::new(nfc::Nfc::mifare()),
         "pl:u" => Arc::new(pl::Pl),
         "ldr:ro" | "ro:1" => Arc::new(ro::Ro),
         "set" => Arc::new(set::Set),
