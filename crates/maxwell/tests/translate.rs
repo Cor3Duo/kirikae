@@ -227,6 +227,17 @@ fn texture_gathers() {
 }
 
 #[test]
+fn texture_gather_per_texel_offsets() {
+    let tld4 = 0xc838_0000_0000_0000u64 | 2 << 54 | 7 << 36 | 0xf << 31 | 1 << 29 | PT | 2 << 20 | 4;
+    let code = program(fragment_header(1), &[mov32i(0, 0), mov32i(1, 0), mov32i(2, 0x01ff_0100), mov32i(3, 0xff01_0000), tld4, EXIT]);
+    let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
+    assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
+    let text = disassemble(&shader.spirv);
+    assert_eq!(text.matches("OpImageGather").count(), 4, "{text}");
+    assert_eq!(text.matches("Offset %").count(), 4, "{text}");
+}
+
+#[test]
 fn compute_shared_memory() {
     let sts = 0xef58_0000_0000_0000u64 | 5 << 48 | 0x10 << 20 | PT | 2;
     let bar = 0xf0a8_1000_0000_0000u64 | PT;
