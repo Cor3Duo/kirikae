@@ -55,8 +55,7 @@ impl Ssl {
         Reply::ok().object(Arc::new(SslContext::new()))
     }
 
-    fn get_certificates(&self, c: &Cpu, req: &Request) -> Reply {
-        let _ = (c, req);
+    fn get_certificates(&self) -> Reply {
         if self.interface_version.load(Relaxed) >= 1 {
             Reply::ok().u32(0)
         } else {
@@ -105,7 +104,7 @@ impl Service for Ssl {
         match req.cmd {
             0 => self.create_context(),
             1 => Reply::ok().u32(self.context_count.load(Relaxed)),
-            2 => self.get_certificates(c, req),
+            2 => self.get_certificates(),
             3 => Reply::ok().u32(0),
             5 => self.set_interface_version(req),
             6 => self.flush_session_cache(),
@@ -360,12 +359,8 @@ mod tests {
             .into_boxed_slice(),
         );
         let exe = kirikae_loader::Executable {
-            modules: Vec::new(),
             entry: entries[0].addr,
-            title_id: None,
-            main_stack_size: None,
-            system_resource_size: 0,
-            romfs: None,
+            ..Default::default()
         };
         let result = run_executable(
             &exe,
