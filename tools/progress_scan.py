@@ -7,6 +7,7 @@ HORIZON = ROOT / "crates/rt/src/horizon.rs"
 REFERENCE = ROOT / "tools/reference/horizon.txt"
 MAXWELL_OPCODES = ROOT / "crates/maxwell/src/opcodes.rs"
 MAXWELL_TRANSLATE = ROOT / "crates/maxwell/src/translate.rs"
+
 SHADER_CLASSES = {
     "floating point": "fadd fadd32i fmul fmul32i ffma ffma32i fmnmx fset fsetp fcmp fchk fswzadd mufu rro dadd dmul dfma dmnmx dset dsetp",
     "half precision": "hadd2 hadd2_32i hmul2 hmul2_32i hfma2 hfma2_32i hset2 hsetp2",
@@ -16,18 +17,6 @@ SHADER_CLASSES = {
     "memory": "ld ldc ldg lds ldl st stg sts stl atom atoms atomcas red cctl cctll ald ast ipa out al2p isberd pixld",
     "textures and surfaces": "tex texs tld tlds tld4 tld4s txq txd txa tmml tmmls suld sust sured suatom",
     "control flow": "bra brx ssy sync pbk brk cont pcnt exit kil bar membar depbar nop cal jcal ret jmp jmx pret sam rtt bpt preexit ide ret",
-}
-
-SHADER_STAGES = {
-    "vertex": (),
-    "fragment": ("ipa", "pixld", "kil", "out"),
-    "compute": ("bar", "membar", "cctl", "cctll", "cctlt"),
-}
-
-SHADER_FAMILIES = {
-    "atomics": "atom atoms atomcas red sured suatom",
-    "texture": "tex texs tld tlds tld4 tld4s txq txd txa tmml tmmls suld sust isberd",
-    "control": "bra brx ssy sync pbk brk cont pcnt exit kil bar membar depbar nop cal jcal ret jmp jmx pret sam rtt bpt preexit ide",
 }
 
 NV_DEVICES = {
@@ -59,11 +48,6 @@ NV_SHORT = {
 }
 FAMILY = {"appletOE": "am", "fsp-srv": "fs"}
 RUNTIME_ALIASES = {}
-
-SILENT_STUBS = {
-    "hwopus": "decodes packet headers but writes silence",
-    "nfp": "fake amiibo service, no NFC device",
-}
 
 def strip_comments(src):
     out, i, n = [], 0, len(src)
@@ -225,18 +209,10 @@ def arms_in(src, regex, constants):
 SERVICE_DISPATCH = r"match (?:req\.cmd|\(self\.name, req\.cmd\)|cmd)\s*\{"
 CALLEE = re.compile(r"(?<!fn )(?<![\w.])(?:(self)\.(\w+)|([a-z_]\w*)::(\w+)|([a-z_]\w*))\s*\(")
 
-
 def command_arms(scope, sources, consts_of, struct):
-    """Arms of an inherent `fn command` used by services whose `call` delegates to it.
-
-    `scope` is the module scope of the file that holds the `impl Service`; a split service may
-    keep the inherent impl in a sibling file, so the lookup is not limited to one file.
-    """
     return struct_method_arms(scope, sources, consts_of, struct, "command")
 
-
 def method_body(scope, sources, struct, method):
-    """`(file, body)` of `impl <struct> { fn <method> }`, wherever the module split put it."""
     for path in scope:
         src = sources[path]
         for m in re.finditer(r"impl\s+" + re.escape(struct) + r"\s*\{", src):
@@ -246,31 +222,21 @@ def method_body(scope, sources, struct, method):
                 return path, body
     return None
 
-
 def struct_method_arms(scope, sources, consts_of, struct, method):
-    """Arms of `impl <struct> { fn <method> }`, wherever the module split put that impl."""
     found = method_body(scope, sources, struct, method)
     if not found:
         return {}
     path, body = found
     return arms_in(body, SERVICE_DISPATCH, consts_of[path])
 
-
 def module_scope(path, sources):
-    """Where a service's helpers may live, in resolution order.
-
-    `foo.rs` keeps its submodules in `foo/`, and `foo/mod.rs` keeps them next to itself; a service
-    split from one file into a folder is therefore still one module.
-    """
     folder = path.parent / path.stem
     scope = [path]
     scope += sorted(p for p in sources if p.parent == folder and p != path)
     scope += sorted(p for p in sources if p.parent == path.parent and p != path and p.parent != folder)
     return scope
 
-
 def module_source(path, name, sources):
-    """The file of module `name` as seen from `path`: a sibling, or inside its module folder."""
     for cand in (
         path.parent / f"{name}.rs",
         path.parent / name / "mod.rs",
@@ -281,24 +247,18 @@ def module_source(path, name, sources):
             return cand
     return None
 
-
 def local_scope(path, sources):
-    """The file and the folder of its submodules: where an unqualified free function lives."""
     folder = path.parent / path.stem
     return [path] + sorted(p for p in sources if p.parent == folder and p != path)
 
-
 def free_fn_body(scope, sources, name):
-    """`(file, body)` of `fn <name>` in scope, for a `call` that delegates to a free function."""
     for path in scope:
         body = fn_body(sources[path], name)
         if body:
             return path, body
     return None
 
-
 def callee_bodies(block, path, sources, struct):
-    """`(name, file, body)` of every helper the block calls, resolved inside the service's module."""
     scope = module_scope(path, sources)
     local = local_scope(path, sources)
     out = []
@@ -316,15 +276,7 @@ def callee_bodies(block, path, sources, struct):
             out.append((name, found[0], found[1]))
     return out
 
-
 def delegated_arms(block, path, sources, consts_of, struct, depth=3):
-    """Arms of the helpers a `call` delegates to, when the dispatch lives in another function.
-
-    Handles `self.object(req.cmd)`, `module::open(req.cmd, ..)` and `host_command(.., req, ..)`,
-    including a second hop such as `object` falling through to `applet_manager`. Every helper
-    that carries a command table contributes its arms; unrelated helper calls resolve to
-    functions without one and add nothing.
-    """
     merged = {}
     if depth <= 0:
         return merged
@@ -335,12 +287,10 @@ def delegated_arms(block, path, sources, consts_of, struct, depth=3):
         merge_arms(merged, delegated_arms(body, target, sources, consts_of, struct, depth - 1))
     return merged
 
-
 def merge_arms(dst, src):
     for iface, ids in src.items():
         dst.setdefault(iface, {}).update(ids)
     return dst
-
 
 def fn_body(src, name):
     m = re.search(r"\bfn " + re.escape(name) + r"\s*\(", src)
@@ -350,20 +300,13 @@ def fn_body(src, name):
     return src[brace : matching(src, brace) + 1]
 
 def arc_struct(arm):
-    """The service struct of an `Arc::new(path::Type { .. })` arm, ignoring `::new`."""
     m = re.match(r"\s*Arc::new\(\s*([A-Za-z_][\w:]*)", arm)
     if not m:
         return None
     segments = [s for s in m.group(1).split("::") if s and s[0].isupper()]
     return segments[-1] if segments else None
 
-
 def service_registry(src):
-    """`Struct -> [service names]` from the registry that `services::open` delegates to.
-
-    The registry function was renamed from `open` to `host_object`; resolving only the old name
-    silently dropped every service whose `name()` returns a field instead of a literal.
-    """
     body = fn_body(src, "host_object") or fn_body(src, "open")
     if not body:
         return {}
@@ -379,11 +322,8 @@ def service_registry(src):
             names_of.setdefault(struct, []).append(name)
     return names_of
 
-
 def nvdrv_scope(services, sources):
-    """`nvdrv.rs` and every file of its `nvdrv/` folder: the ioctl arms may move either way."""
     return [p for p in sorted(sources) if p == services / "nvdrv.rs" or p.parent == services / "nvdrv"]
-
 
 def scan_code(services=None, horizon=None):
     services = Path(services or SERVICES)
@@ -517,9 +457,6 @@ def shader_groups():
             }
         )
     return out
-
-def read_text(path):
-    return path.read_text(encoding="utf-8") if path.is_file() else ""
 
 def family(section, iface):
     if section == "svc":
