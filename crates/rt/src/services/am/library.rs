@@ -246,14 +246,7 @@ mod tests {
             }]
             .into_boxed_slice(),
         );
-        let exe = kirikae_loader::Executable {
-            modules: Vec::new(),
-            entry: entries[0].addr,
-            title_id: None,
-            main_stack_size: None,
-            system_resource_size: 0,
-            romfs: None,
-        };
+        let exe = kirikae_loader::Executable { entry: entries[0].addr, ..Default::default() };
         let result = run_executable(
             &exe,
             entries,
