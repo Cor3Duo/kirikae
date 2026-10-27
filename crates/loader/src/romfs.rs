@@ -282,6 +282,23 @@ fn sorted_entries(dir: &std::path::Path) -> std::io::Result<Vec<std::fs::DirEntr
     Ok(v)
 }
 
+pub fn empty() -> Vec<u8> {
+    let (dir_buckets, file_buckets) = (table_size(1), table_size(0));
+    let dir_hash_at = DATA_START;
+    let dir_meta_at = dir_hash_at + 4 * dir_buckets as u64;
+    let file_hash_at = dir_meta_at + 0x18;
+    let file_meta_at = file_hash_at + 4 * file_buckets as u64;
+    let mut out = vec![0u8; DATA_START as usize];
+    for (k, v) in [HEADER, dir_hash_at, 4 * dir_buckets as u64, dir_meta_at, 0x18, file_hash_at, 4 * file_buckets as u64, file_meta_at, 0, DATA_START].iter().enumerate() {
+        out[8 * k..8 * k + 8].copy_from_slice(&v.to_le_bytes());
+    }
+    let root = hash(0, &[]) as usize % dir_buckets;
+    out.extend((0..dir_buckets).flat_map(|b| if b == root { 0 } else { EMPTY }.to_le_bytes()));
+    out.extend([0, EMPTY, EMPTY, EMPTY, EMPTY, 0].iter().flat_map(|v| v.to_le_bytes()));
+    out.extend((0..file_buckets).flat_map(|_| EMPTY.to_le_bytes()));
+    out
+}
+
 pub fn build(dir: &std::path::Path, out: &std::path::Path) -> Result<u64, Error> {
     use std::io::Write;
     let mut dirs = vec![Dir { name: Vec::new(), parent: 0, path: dir.to_path_buf(), dirs: Vec::new(), files: Vec::new(), offset: 0 }];
@@ -402,6 +419,18 @@ pub fn build(dir: &std::path::Path, out: &std::path::Path) -> Result<u64, Error>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_matches_a_built_empty_directory() {
+        let dir = std::env::temp_dir().join(format!("kirikae-romfs-empty-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let image = dir.join("image.bin");
+        let size = build(&dir.join("src"), &image).unwrap();
+        let built = std::fs::read(&image).unwrap();
+        assert_eq!(built.len() as u64, size);
+        assert_eq!(empty(), built);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn reads_across_stored_zero_and_lz4_blocks() {
