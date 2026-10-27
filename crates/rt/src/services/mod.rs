@@ -11,6 +11,7 @@ pub mod fs;
 #[cfg(test)]
 pub(crate) mod harness;
 pub mod hid;
+pub mod ectx;
 pub mod hwopus;
 pub mod irs;
 pub mod apm;
@@ -149,6 +150,9 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "aoc:u" => Arc::new(aoc::AddOnContentManager::new()),
         "irs" => Arc::new(irs::Irs),
         "csrng" => Arc::new(csrng::Csrng),
+        "ectx:aw" => Arc::new(ectx::Ectx::new("ectx:aw")),
+        "ectx:r" => Arc::new(ectx::Ectx::new("ectx:r")),
+        "ectx:w" => Arc::new(ectx::Ectx::new("ectx:w")),
         "omm" => Arc::new(omm::Omm),
         "pctl" => Arc::new(pctl::Pctl { name: "pctl" }),
         "pdm:qry" => Arc::new(pdm::PdmQry),
