@@ -107,9 +107,10 @@ impl Service for SelfController {
 
     fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
         match req.cmd {
-            1 | 2 | 10..=19 | 50 | 62 | 65 | 68 | 69 | 72 | 100 => {
+            1 | 2 | 10..=18 | 50 | 62 | 65 | 68 | 69 | 72 | 100 => {
                 crate::services::stub::plain_ok()
             }
+            19 => Reply::ok(),
             9 => Reply::ok().copy_handle(c.process().create_event(true)),
             91 => Reply::ok().copy_handle(c.process().create_event(false)),
             40 => Reply::ok().u64(1),
@@ -187,4 +188,22 @@ fn language_code() -> u64 {
     let mut b = [0u8; 8];
     b[..LANGUAGE.len()].copy_from_slice(LANGUAGE);
     u64::from_le_bytes(b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::abi::Entry;
+    use crate::services::harness;
+
+    #[test]
+    fn set_album_image_orientation_succeeds_with_no_output() {
+        extern "C" fn probe(c: &mut Cpu) {
+            let reply = SelfController.call(c, &Request { cmd: 19, data: 3u32.to_le_bytes().to_vec(), ..Default::default() });
+            harness::record("am/album_orientation", &[reply.result as u64, reply.data.len() as u64]);
+            c.halt();
+        }
+        harness::run(vec![Entry { addr: harness::ENTRY, func: probe }]);
+        assert_eq!(harness::observed("am/album_orientation"), vec![0, 0]);
+    }
 }
