@@ -6,6 +6,7 @@ pub mod acc;
 pub mod friend;
 pub mod am;
 pub mod csrng;
+pub mod aoc;
 pub mod fs;
 #[cfg(test)]
 pub(crate) mod harness;
@@ -145,6 +146,7 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "friend:u" => Arc::new(friend::FriendServiceCreator),
         "apm" | "apm:am" => Arc::new(apm::Apm),
         "appletOE" => Arc::new(am::AppletOe),
+        "aoc:u" => Arc::new(aoc::AddOnContentManager::new()),
         "irs" => Arc::new(irs::Irs),
         "csrng" => Arc::new(csrng::Csrng),
         "omm" => Arc::new(omm::Omm),
