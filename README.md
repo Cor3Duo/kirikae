@@ -11,7 +11,7 @@
 [![CI](https://github.com/Cor3Duo/kirikae/actions/workflows/ci.yml/badge.svg)](https://github.com/Cor3Duo/kirikae/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 [![Rust 2024](https://img.shields.io/badge/rust-2024%20edition-orange?logo=rust)](https://www.rust-lang.org)
-[![Platform: Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0078D6)](#requirements)
+[![Platform: Windows x64 | Linux x64](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20Linux%20x64-0078D6)](#requirements)
 [![Vulkan 1.3](https://img.shields.io/badge/Vulkan-1.3-AC162C?logo=vulkan)](#requirements)
 [![Codegen: Cranelift](https://img.shields.io/badge/codegen-Cranelift-4b32c3)](https://cranelift.dev)
 [![Latest release](https://img.shields.io/github/v/release/Cor3Duo/kirikae?label=release)](https://github.com/Cor3Duo/kirikae/releases/latest)
@@ -140,16 +140,18 @@ homebrew `.nro` files.
 
 ### Download
 
-Grab the latest `kirikae-<version>-windows-x64.zip` from [Releases](https://github.com/Cor3Duo/kirikae/releases/latest)
-and extract it anywhere: it holds `kirikae-gui.exe`, `kirikae.exe` and the `runtime/` sources games are
-compiled against (keep them together). You still need Rust and the MSVC build tools, see
-[Requirements](#requirements). To build from source instead, see [Command line](#command-line).
+Grab the latest `kirikae-<version>-windows-x64.zip` or `kirikae-<version>-linux-x64.tar.gz` from
+[Releases](https://github.com/Cor3Duo/kirikae/releases/latest) and extract it anywhere: it holds
+`kirikae-gui`, `kirikae` (with `.exe` on Windows) and the `runtime/` sources games are compiled against
+(keep them together). You still need Rust and the MSVC build tools on Windows, or Rust, a C toolchain and
+the ALSA and udev headers on Linux (glibc 2.35 or newer), see [Requirements](#requirements). To build from
+source instead, see [Command line](#command-line).
 
 ### Graphical interface
 
-Run `kirikae-gui.exe`, pick (or drag in) the game files and an output folder, and press **Recompile**.
+Run `kirikae-gui`, pick (or drag in) the game files and an output folder, and press **Recompile**.
 Progress shows up in the log, and every finished game gets a button to open its folder. The GUI drives
-the `kirikae.exe` sitting next to it.
+the `kirikae` sitting next to it.
 
 ### Command line
 
@@ -174,9 +176,10 @@ kirikae dev module-dump game.dnsp sdk sdk.bin         # a module's loaded image,
 
 ### Release package
 
-`python tools/package_release.py` builds `kirikae.exe` and `kirikae-gui.exe` and packs
-`dist/kirikae-<version>-windows-x64.zip`, with the runtime sources under `runtime/` (games are compiled
-against them; `KIRIKAE_RUNTIME=<kirikae-rt folder>` points somewhere else).
+`python tools/package_release.py` builds `kirikae` and `kirikae-gui` and packs
+`dist/kirikae-<version>-windows-x64.zip` on Windows or `dist/kirikae-<version>-linux-x64.tar.gz` on Linux,
+with the runtime sources under `runtime/` (games are compiled against them;
+`KIRIKAE_RUNTIME=<kirikae-rt folder>` points somewhere else).
 
 ## Features
 
