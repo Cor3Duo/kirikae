@@ -423,8 +423,13 @@ pub(super) fn pipeline_cache_file(props: &vk::PhysicalDeviceProperties) -> Optio
     if let Some(p) = crate::env_var!("KIRIKAE_PIPELINE_CACHE") {
         return (!p.is_empty()).then(|| p.into());
     }
-    let base = crate::env_var!("LOCALAPPDATA")?;
-    Some(std::path::Path::new(&base).join("kirikae").join(format!("pipelines-{:04x}-{:04x}.bin", props.vendor_id, props.device_id)))
+    let base = cache_dir(crate::env_var!("LOCALAPPDATA"), crate::env_var!("XDG_CACHE_HOME"), crate::env_var!("HOME"))?;
+    Some(base.join("kirikae").join(format!("pipelines-{:04x}-{:04x}.bin", props.vendor_id, props.device_id)))
+}
+
+fn cache_dir(local: Option<&std::ffi::OsStr>, xdg: Option<&std::ffi::OsStr>, home: Option<&std::ffi::OsStr>) -> Option<std::path::PathBuf> {
+    let set = |v: Option<&std::ffi::OsStr>| v.filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
+    set(local).or_else(|| set(xdg)).or_else(|| set(home).map(|h| h.join(".cache")))
 }
 
 pub(super) fn remove_stale_saves(file: &std::path::Path) {
@@ -473,5 +478,14 @@ mod tests {
         data[16] = 8;
         assert!(!pipeline_cache_matches(&data, &props));
         assert!(!pipeline_cache_matches(&data[..20], &props));
+    }
+
+    #[test]
+    fn pipeline_cache_directory() {
+        let os = |s: &'static str| Some(std::ffi::OsStr::new(s));
+        assert_eq!(cache_dir(os("C:\\Local"), os("/xdg"), os("/home/u")), Some("C:\\Local".into()));
+        assert_eq!(cache_dir(None, os("/xdg"), os("/home/u")), Some("/xdg".into()));
+        assert_eq!(cache_dir(None, os(""), os("/home/u")), Some(std::path::Path::new("/home/u").join(".cache")));
+        assert_eq!(cache_dir(None, None, None), None);
     }
 }
