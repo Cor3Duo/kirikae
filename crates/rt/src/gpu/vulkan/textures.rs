@@ -87,6 +87,8 @@ impl Renderer {
             (TexDim::Cube, false, 3 | 8) => vk::ImageViewType::CUBE,
             (TexDim::Cube, true, 3 | 8) => vk::ImageViewType::CUBE_ARRAY,
             (TexDim::D3, false, 2 | 5) => vk::ImageViewType::TYPE_3D,
+            (TexDim::D1, false, 0) => vk::ImageViewType::TYPE_1D,
+            (TexDim::D1, true, 4) => vk::ImageViewType::TYPE_1D_ARRAY,
             _ => return Err(format!("texture type {} (shader {dim:?}{})", header.texture_type, if array { " array" } else { "" })),
         };
         let layers = match header.texture_type {
@@ -127,6 +129,10 @@ impl Renderer {
         let cpu = gpu.translate(header.address).ok_or("texture not mapped")?;
         if crate::gpu::trace() {
             eprintln!("gpu: texture {handle} -> tic {tic_index:#x}: {:#x} {}x{}x{} type {} levels {} view {}..={} {:?} swizzle {:?} types {:?} mip {} filter {}{} reduction {} wrap {:?} lod {}..{} bias {}{}", header.address, header.width, header.height, header.depth, header.texture_type, header.levels, header.min_level, header.max_level, format.vk, header.swizzle, header.data_types, sampler_state.mip, if sampler_state.mag_linear { "L" } else { "N" }, if sampler_state.min_linear { "L" } else { "N" }, sampler_state.reduction, sampler_state.address, sampler_state.min_lod as f32 / 256.0, sampler_state.max_lod as f32 / 256.0, sampler_state.lod_bias as f32 / 256.0, sampler_state.compare.map_or(String::new(), |c| format!(" compare {c}")));
+        }
+        if matches!(view_type, vk::ImageViewType::TYPE_1D | vk::ImageViewType::TYPE_1D_ARRAY) {
+            let view = self.line(gpu, mem, cpu, &header, &format, array)?;
+            return Ok((view, self.sampler(&sampler_state)));
         }
         if view_type == vk::ImageViewType::TYPE_3D {
             let view = if header.texture_type == 5 { self.array_volume(gpu, mem, cpu, &header, &format)? } else { self.volume(gpu, mem, cpu, &header, &format)? };
@@ -174,14 +180,7 @@ impl Renderer {
             }
         };
         self.lap(14, &mut lap);
-        let swizzle = header.swizzle.map(|s| match s {
-            0 => vk::ComponentSwizzle::ZERO,
-            2 => vk::ComponentSwizzle::R,
-            3 => vk::ComponentSwizzle::G,
-            4 => vk::ComponentSwizzle::B,
-            5 => vk::ComponentSwizzle::A,
-            _ => vk::ComponentSwizzle::ONE,
-        });
+        let swizzle = swizzle(&header);
         let view_format = if same_class(key.format, format.vk) { format.vk } else { key.format };
         let swizzle = if aspect_of(view_format) == vk::ImageAspectFlags::COLOR {
             swizzle
@@ -518,6 +517,17 @@ pub(super) fn depth_twin_format(f: vk::Format) -> Option<vk::Format> {
         vk::Format::R32_SFLOAT => Some(vk::Format::D32_SFLOAT),
         _ => None,
     }
+}
+
+pub(super) fn swizzle(header: &TextureHeader) -> [vk::ComponentSwizzle; 4] {
+    header.swizzle.map(|s| match s {
+        0 => vk::ComponentSwizzle::ZERO,
+        2 => vk::ComponentSwizzle::R,
+        3 => vk::ComponentSwizzle::G,
+        4 => vk::ComponentSwizzle::B,
+        5 => vk::ComponentSwizzle::A,
+        _ => vk::ComponentSwizzle::ONE,
+    })
 }
 
 pub(super) fn read_texture(gpu: &Gpu, mem: &GuestMemory, h: &TextureHeader, f: &TexFormat, levels: u32, layers: u32) -> Vec<(u32, u32, Vec<u8>)> {

@@ -6,7 +6,7 @@ use crate::gpu::fxhash::FastMap as HashMap;
 use crate::gpu::tic::{Layout, TextureHeader};
 use crate::mem::GuestMemory;
 use super::images::{ImageKey, same_class};
-use super::textures::{ARRAY_VOLUME, CROP, SOURCE_RECHECK, read_texture};
+use super::textures::{ARRAY_VOLUME, CROP, SOURCE_RECHECK, read_texture, swizzle};
 use super::tiling::{deswizzle_3d, fit_block, layer_size, volume_size};
 use super::{Renderer, find_memory, hash64};
 
@@ -137,14 +137,7 @@ impl Renderer {
     }
 
     fn volume_view(&mut self, key: (u64, vk::Format), header: &TextureHeader, format: &TexFormat) -> Result<vk::ImageView, String> {
-        let swizzle = header.swizzle.map(|s| match s {
-            0 => vk::ComponentSwizzle::ZERO,
-            2 => vk::ComponentSwizzle::R,
-            3 => vk::ComponentSwizzle::G,
-            4 => vk::ComponentSwizzle::B,
-            5 => vk::ComponentSwizzle::A,
-            _ => vk::ComponentSwizzle::ONE,
-        });
+        let swizzle = swizzle(header);
         let v = self.volumes.get_mut(&key).unwrap();
         if let Some(&view) = v.views.get(&swizzle) {
             return Ok(view);
