@@ -1,3 +1,4 @@
+pub mod a32;
 pub mod asm;
 pub mod bits;
 pub mod ir;
