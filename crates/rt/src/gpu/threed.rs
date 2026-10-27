@@ -36,6 +36,7 @@ pub mod reg {
     pub const PRIMITIVE_RESTART: usize = 0x591;
     pub const DRAW_INDEX_BUFFER: u32 = 0x5f8;
     pub const DRAW_INDEX_BUFFER_INLINE: std::ops::RangeInclusive<u32> = 0x5f9..=0x5fe;
+    pub const TOPOLOGY_CONTROL: usize = 0x652;
     pub const TOPOLOGY_OVERRIDE: usize = 0x65c;
     pub const CLEAR_SURFACE: u32 = 0x674;
     pub const REPORT_SEMAPHORE: usize = 0x6c0;
@@ -209,7 +210,7 @@ impl Gpu {
     }
 
     pub(super) fn draw(&self, mem: &GuestMemory, regs: &[u32], cbs: &[[Option<(u64, u32)>; CB_SLOTS]; 5], mut draw: Draw) {
-        draw.topology = topology(regs[reg::TOPOLOGY_OVERRIDE], draw.topology);
+        draw.topology = topology(regs[reg::TOPOLOGY_CONTROL], regs[reg::TOPOLOGY_OVERRIDE], draw.topology);
         let n = self.stats.draws.fetch_add(1, Ordering::Relaxed);
         if crate::nvn::exec::CHECK.load(Ordering::Relaxed) {
             crate::nvn::exec::cp_draw(regs, cbs, &draw);
@@ -339,12 +340,19 @@ impl Gpu {
     }
 }
 
-fn topology(forced: u32, begin: u32) -> u32 {
-    match forced {
-        0 => begin,
-        1 => 0,
-        2 => 1,
-        v => v,
+fn topology(control: u32, forced: u32, begin: u32) -> u32 {
+    if control & 1 == 0 {
+        return begin;
+    }
+    match forced & 0xffff {
+        0x1 | 0x1001 => 0,
+        0x2 | 0x1002 | 0x100f | 0x1018 | 0x101b => 1,
+        0x3 | 0x1010 | 0x1011 => 3,
+        0x4 | 0x1003 | 0x1012 | 0x101a => 4,
+        0x5 | 0x1013 | 0x1014 => 5,
+        0x1015..=0x1017 => 6,
+        v @ 0xa..=0xe => v,
+        _ => begin,
     }
 }
 
@@ -353,11 +361,29 @@ mod tests {
     use super::topology;
 
     #[test]
+    fn topology_override_needs_the_control_bit() {
+        assert_eq!(topology(0, 4, 7), 7);
+        assert_eq!(topology(2, 4, 7), 7);
+        assert_eq!(topology(1, 4, 7), 4);
+    }
+
+    #[test]
     fn topology_override_wins() {
-        assert_eq!(topology(0, 7), 7);
-        assert_eq!(topology(4, 0), 4);
-        assert_eq!(topology(5, 0), 5);
-        assert_eq!(topology(1, 4), 0);
-        assert_eq!(topology(2, 4), 1);
+        assert_eq!(topology(1, 1, 4), 0);
+        assert_eq!(topology(1, 2, 4), 1);
+        assert_eq!(topology(1, 3, 4), 3);
+        assert_eq!(topology(1, 5, 0), 5);
+        assert_eq!(topology(1, 0xe, 0), 0xe);
+        assert_eq!(topology(1, 0xffff_0004, 0), 4);
+    }
+
+    #[test]
+    fn legacy_topologies() {
+        assert_eq!(topology(1, 0x1001, 4), 0);
+        assert_eq!(topology(1, 0x1010, 4), 3);
+        assert_eq!(topology(1, 0x1014, 4), 5);
+        assert_eq!(topology(1, 0x1015, 4), 6);
+        assert_eq!(topology(1, 0x1016, 4), 6);
+        assert_eq!(topology(1, 0x101b, 4), 1);
     }
 }
