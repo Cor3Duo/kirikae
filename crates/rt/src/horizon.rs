@@ -5,7 +5,7 @@ use crate::arbiter;
 use crate::cpu::Cpu;
 use crate::kernel::{KObject, Session};
 use crate::threads;
-use crate::mem::{perm, state, PhysicalError, PAGE};
+use crate::mem::{attr, perm, state, PhysicalError, PAGE};
 use crate::services::sm::Sm;
 
 pub const TICK_HZ: u64 = 19_200_000;
@@ -66,7 +66,7 @@ fn dispatch(c: &mut Cpu, imm: u16) {
     }
     match imm {
         0x01 => set_heap_size(c),
-        0x03 => ok(c),
+        0x03 => set_memory_attribute(c),
         0x02 => set_memory_permission(c),
         0x04 => map_memory(c),
         0x05 => unmap_memory(c),
@@ -252,6 +252,23 @@ fn set_memory_permission(c: &mut Cpu) {
     };
 }
 
+fn set_memory_attribute(c: &mut Cpu) {
+    let (addr, size, mask, value) = (c.x[0], c.x[1], c.x[2] as u32, c.x[3] as u32);
+    c.x[0] = if !addr.is_multiple_of(PAGE) {
+        RESULT_INVALID_ADDRESS
+    } else if size == 0 || !size.is_multiple_of(PAGE) {
+        RESULT_INVALID_SIZE
+    } else if addr.checked_add(size).is_none() {
+        RESULT_INVALID_MEMORY_STATE
+    } else if (mask | value) & !attr::SETTABLE != 0 || value & !mask != 0 || (mask ^ value) & attr::PERMISSION_LOCKED != 0 {
+        RESULT_INVALID_COMBINATION
+    } else if c.process().memory.set_attribute(addr, addr + size, mask, value, &[state::HEAP, state::CODE_MUTABLE]) {
+        RESULT_SUCCESS
+    } else {
+        RESULT_INVALID_MEMORY_STATE
+    };
+}
+
 fn physical_range(c: &mut Cpu) -> Option<(u64, u64)> {
     let (addr, size) = (c.x[0], c.x[1]);
     let error = if !addr.is_multiple_of(PAGE) {
@@ -309,6 +326,7 @@ fn query_memory(c: &mut Cpu) {
     info[0..8].copy_from_slice(&r.range.start.to_le_bytes());
     info[8..16].copy_from_slice(&(r.range.end - r.range.start).to_le_bytes());
     info[16..20].copy_from_slice(&r.state.to_le_bytes());
+    info[20..24].copy_from_slice(&r.attr.to_le_bytes());
     info[24..28].copy_from_slice(&r.perm.to_le_bytes());
     if !c.process().memory.write(out, &info) {
         fault(c, format!("svcQueryMemory output {out:#x} is not mapped"));
@@ -358,6 +376,18 @@ fn get_info(c: &mut Cpu) {
     c.x[1] = value;
 }
 
+const BREAK_INFO_SHOWN: u64 = 0x40;
+
+fn describe_break_info(bytes: &[u8]) -> String {
+    let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let mut text = hex.join(" ");
+    if let Ok(word) = <[u8; 4]>::try_from(bytes) {
+        let result = u32::from_le_bytes(word);
+        text += &format!(" (result {:#x} = 2{:03}-{:04})", result, result & 0x1ff, (result >> 9) & 0x1fff);
+    }
+    text
+}
+
 fn break_(c: &mut Cpu) {
     if c.x[0] & 0x8000_0000 != 0 {
         c.x[0] = 0;
@@ -373,6 +403,13 @@ fn break_(c: &mut Cpu) {
         c.x[2],
         p.describe(c.pc - 4)
     );
+    if c.x[1] != 0
+        && c.x[2] != 0
+        && let Some(bytes) = p.memory.read(c.x[1], c.x[2].min(BREAK_INFO_SHOWN))
+    {
+        let shown = if c.x[2] > BREAK_INFO_SHOWN { format!(" (first {BREAK_INFO_SHOWN:#x} of {:#x} bytes)", c.x[2]) } else { String::new() };
+        let _ = writeln!(std::io::stderr(), "kirikae:   info{shown}: {}", describe_break_info(&bytes));
+    }
     let mut fp = c.x[29];
     for _ in 0..16 {
         let (Some(next), Some(lr)) = (p.memory.read(fp, 8), p.memory.read(fp + 8, 8)) else { break };
@@ -459,6 +496,39 @@ mod tests {
         assert_eq!(result.exit_code, 0);
     }
 
+    #[derive(Clone, Copy)]
+    struct Info {
+        start: u64,
+        size: u64,
+        state: u32,
+        attr: u32,
+        perm: u32,
+    }
+
+    fn query_info(c: &mut Cpu, out: u64, addr: u64) -> Info {
+        c.x[0] = out;
+        c.x[2] = addr;
+        dispatch(c, 0x06);
+        assert_eq!(c.x[0], RESULT_SUCCESS, "svcQueryMemory succeeds");
+        let b = c.process().memory.read(out, 0x28).expect("the MemoryInfo output is mapped");
+        Info {
+            start: u64::from_le_bytes(b[0..8].try_into().unwrap()),
+            size: u64::from_le_bytes(b[8..16].try_into().unwrap()),
+            state: u32::from_le_bytes(b[16..20].try_into().unwrap()),
+            attr: u32::from_le_bytes(b[20..24].try_into().unwrap()),
+            perm: u32::from_le_bytes(b[24..28].try_into().unwrap()),
+        }
+    }
+
+    fn set_attr(c: &mut Cpu, addr: u64, size: u64, mask: u32, value: u32) -> u64 {
+        c.x[0] = addr;
+        c.x[1] = size;
+        c.x[2] = u64::from(mask);
+        c.x[3] = u64::from(value);
+        dispatch(c, 0x03);
+        c.x[0]
+    }
+
     extern "C" fn shrink(c: &mut Cpu) {
         let size = |c: &mut Cpu, bytes: u64| {
             c.x[1] = bytes;
@@ -485,5 +555,195 @@ mod tests {
             u64::from(state::FREE),
             "the returned tail is unmapped, not left as heap"
         );
+    }
+
+    extern "C" fn attribute_round_trip(c: &mut Cpu) {
+        let base = HEAP_BASE;
+        let out = base + 0x3000;
+        c.process().memory.map_as(base, 0x4000, state::HEAP, perm::RW).unwrap();
+        assert!(c.process().memory.write(base + PAGE, b"kept"));
+        let set = set_attr(c, base + PAGE, PAGE, attr::UNCACHED, attr::UNCACHED);
+        let mid = query_info(c, out, base + PAGE);
+        let left = query_info(c, out, base);
+        let right = query_info(c, out, base + 3 * PAGE);
+        let kept = c.process().memory.read(base + PAGE, 4).expect("the page is still mapped");
+        let clear = set_attr(c, base + PAGE, PAGE, attr::UNCACHED, 0);
+        let cleared = query_info(c, out, base + PAGE);
+        let merged = query_info(c, out, base);
+        record(
+            "attribute_round_trip",
+            &[
+                set,
+                u64::from(mid.attr),
+                u64::from(mid.state),
+                u64::from(mid.perm),
+                u64::from(left.attr),
+                u64::from(right.attr),
+                clear,
+                u64::from(cleared.attr),
+                merged.start,
+                merged.size,
+                u64::from(u32::from_le_bytes(kept.try_into().unwrap())),
+            ],
+        );
+        c.halt();
+    }
+
+    #[test]
+    fn the_uncached_attribute_round_trips_through_query_memory() {
+        run_guest(attribute_round_trip);
+        let got = observed("attribute_round_trip");
+        assert_eq!(got[0], RESULT_SUCCESS, "setting the uncached bit succeeds");
+        assert_eq!(got[1], u64::from(attr::UNCACHED), "QueryMemory reports the attribute");
+        assert_eq!(got[2], u64::from(state::HEAP), "the state is untouched");
+        assert_eq!(got[3], u64::from(perm::RW), "the permission is untouched");
+        assert_eq!(got[4], 0, "only the requested page reports the attribute");
+        assert_eq!(got[5], 0);
+        assert_eq!(got[6], RESULT_SUCCESS, "clearing the uncached bit succeeds");
+        assert_eq!(got[7], 0, "QueryMemory reports the cleared bit");
+        assert_eq!(got[8], HEAP_BASE, "clearing merges the page back into its neighbours");
+        assert_eq!(got[9], 0x4000);
+        assert_eq!(got[10], u64::from(u32::from_le_bytes(*b"kept")), "the change leaves the data alone");
+    }
+
+    extern "C" fn permission_locked(c: &mut Cpu) {
+        let base = HEAP_BASE;
+        let out = base + 0x2000;
+        c.process().memory.map_as(base, 0x3000, state::HEAP, perm::RW).unwrap();
+        let set = set_attr(c, base, PAGE, attr::PERMISSION_LOCKED, attr::PERMISSION_LOCKED);
+        let after_set = query_info(c, out, base);
+        let clear = set_attr(c, base, PAGE, attr::PERMISSION_LOCKED, 0);
+        let after_clear = query_info(c, out, base);
+        let set_both = set_attr(c, base, PAGE, attr::SETTABLE, attr::SETTABLE);
+        let after_both = query_info(c, out, base);
+        let clear_lock = set_attr(c, base, PAGE, attr::SETTABLE, attr::UNCACHED);
+        let after_refused = query_info(c, out, base);
+        record(
+            "attribute_permission_locked",
+            &[
+                set,
+                u64::from(after_set.attr),
+                clear,
+                u64::from(after_clear.attr),
+                set_both,
+                u64::from(after_both.attr),
+                clear_lock,
+                u64::from(after_refused.attr),
+            ],
+        );
+        c.halt();
+    }
+
+    #[test]
+    fn permission_locked_can_be_set_but_not_cleared() {
+        run_guest(permission_locked);
+        let got = observed("attribute_permission_locked");
+        assert_eq!(got[0], RESULT_SUCCESS, "setting PermissionLocked succeeds");
+        assert_eq!(got[1], u64::from(attr::PERMISSION_LOCKED));
+        assert_eq!(got[2], RESULT_INVALID_COMBINATION, "clearing PermissionLocked is refused");
+        assert_eq!(got[3], u64::from(attr::PERMISSION_LOCKED), "the refused call changes nothing");
+        assert_eq!(got[4], RESULT_SUCCESS, "setting both bits succeeds");
+        assert_eq!(got[5], u64::from(attr::SETTABLE));
+        assert_eq!(got[6], RESULT_INVALID_COMBINATION, "uncached cannot be set while dropping the lock");
+        assert_eq!(got[7], u64::from(attr::SETTABLE), "the refused call changes nothing");
+    }
+
+    extern "C" fn bad_arguments(c: &mut Cpu) {
+        let base = HEAP_BASE;
+        let out = base;
+        c.process().memory.map_as(base, 0x2000, state::HEAP, perm::RW).unwrap();
+        let misaligned = set_attr(c, base + 1, PAGE, attr::UNCACHED, attr::UNCACHED);
+        let bad_size = set_attr(c, base, 0x800, attr::UNCACHED, attr::UNCACHED);
+        let zero_size = set_attr(c, base, 0, attr::UNCACHED, attr::UNCACHED);
+        let not_subset = set_attr(c, base, PAGE, attr::UNCACHED, attr::UNCACHED | attr::PERMISSION_LOCKED);
+        let unsupported = set_attr(c, base, PAGE, 0x1, 0x1);
+        let unmapped = set_attr(c, base + 0x2000, PAGE, attr::UNCACHED, attr::UNCACHED);
+        let partial = set_attr(c, base + PAGE, 2 * PAGE, attr::UNCACHED, attr::UNCACHED);
+        let first = query_info(c, out, base);
+        let second = query_info(c, out, base + PAGE);
+        record(
+            "attribute_bad_arguments",
+            &[
+                misaligned,
+                bad_size,
+                zero_size,
+                not_subset,
+                unsupported,
+                unmapped,
+                partial,
+                u64::from(first.attr),
+                u64::from(second.attr),
+                u64::from(first.state),
+                u64::from(second.perm),
+            ],
+        );
+        c.halt();
+    }
+
+    #[test]
+    fn bad_arguments_are_refused_with_the_documented_results() {
+        run_guest(bad_arguments);
+        let got = observed("attribute_bad_arguments");
+        assert_eq!(got[0], RESULT_INVALID_ADDRESS);
+        assert_eq!(got[1], RESULT_INVALID_SIZE);
+        assert_eq!(got[2], RESULT_INVALID_SIZE);
+        assert_eq!(got[3], RESULT_INVALID_COMBINATION, "value is not a subset of mask");
+        assert_eq!(got[4], RESULT_INVALID_COMBINATION, "the locked bit cannot be set by this SVC");
+        assert_eq!(got[5], RESULT_INVALID_MEMORY_STATE, "an unmapped page is refused");
+        assert_eq!(got[6], RESULT_INVALID_MEMORY_STATE, "a range with an unmapped page is refused");
+        assert_eq!(got[7], 0, "the mapped pages keep their attribute");
+        assert_eq!(got[8], 0);
+        assert_eq!(got[9], u64::from(state::HEAP));
+        assert_eq!(got[10], u64::from(perm::RW));
+    }
+
+    extern "C" fn wait_on_handle_lists(c: &mut Cpu) {
+        c.x[1] = HEAP_ALIGN;
+        dispatch(c, 0x01);
+        let list = c.x[1];
+
+        dispatch(c, 0x45);
+        let (writable, readable) = (c.x[1], c.x[2]);
+        c.x[0] = writable;
+        dispatch(c, 0x11);
+
+        let handles: Vec<u8> = (0..=0x40).flat_map(|_| (readable as u32).to_le_bytes()).collect();
+        let written = c.process().memory.write(list, &handles);
+
+        let wait = |c: &mut Cpu, list: u64, count: u64| {
+            c.x[0] = 0;
+            c.x[1] = list;
+            c.x[2] = count;
+            c.x[3] = 0;
+            dispatch(c, 0x18);
+            (c.x[0], c.x[1])
+        };
+        let unmapped = wait(c, 0xdead_0000, 0x41);
+        let too_many = wait(c, list, 0x41);
+        let maximum = wait(c, list, 0x40);
+
+        record(
+            "wait_lists",
+            &[u64::from(written), unmapped.0, too_many.0, maximum.0, maximum.1],
+        );
+        c.halt();
+    }
+
+    #[test]
+    fn waiting_on_more_than_64_handles_is_refused() {
+        run_guest(wait_on_handle_lists);
+        let got = observed("wait_lists");
+        assert_eq!(got[0], 1, "the handle list is mapped");
+        assert_eq!(got[1], 0xee01, "the list is not read when the count is too high");
+        assert_eq!(got[2], 0xee01, "65 signaled handles are refused, not truncated");
+        assert_eq!(got[3], RESULT_SUCCESS, "64 handles still wait");
+        assert_eq!(got[4], 0, "the signaled event is the first handle");
+    }
+
+    #[test]
+    fn break_info_is_shown_as_bytes_and_a_four_byte_info_as_a_result_code() {
+        assert_eq!(describe_break_info(&[0x01, 0x02, 0xff]), "01 02 ff");
+        assert_eq!(describe_break_info(&0x4a2u32.to_le_bytes()), "a2 04 00 00 (result 0x4a2 = 2162-0002)");
+        assert_eq!(describe_break_info(&0x4a8u32.to_le_bytes()), "a8 04 00 00 (result 0x4a8 = 2168-0002)");
     }
 }

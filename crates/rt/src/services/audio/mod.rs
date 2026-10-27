@@ -14,6 +14,9 @@ use crate::services::stub::unimplemented;
 use crate::services::{Reply, Request, Service};
 
 const HEADER_SIZE: usize = 0x40;
+const EFFECT_ENABLED: usize = 2;
+const EFFECT_STATE_ENABLED: u8 = 3;
+const EFFECT_STATE_DISABLED: u8 = 4;
 const MEMORY_POOL_IN: usize = 0x20;
 const MEMORY_POOL_OUT: usize = 0x10;
 const VOICE_OUT: usize = mixer::VOICE_OUT;
@@ -257,7 +260,18 @@ impl Renderer {
         } else {
             0
         };
-        let effects_size = section(&mut out, vec![0; effects_bytes]);
+        let mut effect_status = vec![0; effects_bytes];
+        let effects_in = part(effects_at, u(0x14));
+        if params.effects > 0 {
+            let (stride_in, stride_out) = (effects_in.len() / params.effects as usize, effects_bytes / params.effects as usize);
+            for i in 0..params.effects as usize {
+                if stride_out > 0 {
+                    let enabled = effects_in.get(i * stride_in + EFFECT_ENABLED).is_some_and(|&b| b != 0);
+                    effect_status[i * stride_out] = if enabled { EFFECT_STATE_ENABLED } else { EFFECT_STATE_DISABLED };
+                }
+            }
+        }
+        let effects_size = section(&mut out, effect_status);
         let sinks_size = section(&mut out, vec![0; params.sinks as usize * SINK_OUT]);
         let performance_size = section(&mut out, vec![0; PERFORMANCE_OUT]);
         let behavior_size = section(&mut out, vec![0; BEHAVIOR_OUT]);

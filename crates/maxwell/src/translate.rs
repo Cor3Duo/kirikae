@@ -261,6 +261,15 @@ pub fn translate(code_with_header: &[u8], opts: &Options, env: &dyn Env) -> Resu
 }
 
 impl<'a> Translator<'a> {
+    fn kill(&mut self) -> R {
+        if let Some(pc_var) = self.pc_var {
+            let exit = self.u(EXIT_BLOCK);
+            self.b.store(pc_var, exit, None, [])?;
+        }
+        self.b.kill()?;
+        Ok(())
+    }
+
     fn new(opts: &'a Options, header: Header) -> Self {
         let mut b = Builder::new();
         b.set_version(1, 3);
@@ -933,7 +942,7 @@ impl<'a> Translator<'a> {
                 let cond = self.flow_condition(i)?;
                 match cond {
                     None => {
-                        self.b.kill()?;
+                        self.kill()?;
                         self.b.begin_block(None)?;
                         Ok(())
                     }
@@ -942,7 +951,7 @@ impl<'a> Translator<'a> {
                         self.b.selection_merge(merge, SelectionControl::NONE)?;
                         self.b.branch_conditional(c, then, merge, [])?;
                         self.b.begin_block(Some(then))?;
-                        self.b.kill()?;
+                        self.kill()?;
                         self.b.begin_block(Some(merge))?;
                         Ok(())
                     }
@@ -2643,7 +2652,7 @@ impl<'a> Translator<'a> {
         self.b.selection_merge(merge, SelectionControl::NONE)?;
         self.b.branch_conditional(fail, then, merge, [])?;
         self.b.begin_block(Some(then))?;
-        self.b.kill()?;
+        self.kill()?;
         self.b.begin_block(Some(merge))?;
         Ok(())
     }
