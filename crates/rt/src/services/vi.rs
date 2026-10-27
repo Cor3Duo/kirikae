@@ -254,7 +254,6 @@ fn transact(c: &Cpu, id: i32, code: u32, input: &[u8]) -> Vec<u8> {
                 0 => WIDTH as i32,
                 1 => HEIGHT as i32,
                 2 => 1,
-                3 => 1,
                 _ => 0,
             };
             w.i32(v);
