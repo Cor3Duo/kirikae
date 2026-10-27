@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::cpu::Cpu;
 use crate::input::PadState;
-use crate::kernel::SharedMemory;
+use crate::kernel::{Event, KObject, SharedMemory};
 use crate::process::Process;
 use crate::services::stub::unimplemented;
 use crate::services::{Reply, Request, Service};
@@ -118,7 +118,7 @@ struct Npads {
     handle: u32,
     started: AtomicBool,
     inner: Mutex<Inner>,
-    events: Mutex<HashMap<u32, u32>>,
+    events: Mutex<HashMap<u32, Arc<Event>>>,
 }
 
 #[derive(Default)]
@@ -309,11 +309,27 @@ impl Npads {
         }
         let events = self.events.lock().unwrap();
         for id in changed {
-            if let Some(&e) = events.get(&id) {
-                p.set_event(e, true);
+            if let Some(e) = events.get(&id) {
+                p.sched.store_event(e, true);
             }
         }
     }
+}
+
+fn acquire_style_set_event(
+    sched: &crate::sched::Scheduler,
+    events: &Mutex<HashMap<u32, Arc<Event>>>,
+    handles: &Mutex<crate::kernel::HandleTable>,
+    id: u32,
+) -> u32 {
+    let event = events
+        .lock()
+        .unwrap()
+        .entry(id)
+        .or_insert_with(|| Arc::new(Event { signaled: AtomicBool::new(false) }))
+        .clone();
+    sched.store_event(&event, true);
+    handles.lock().unwrap().insert(KObject::Event(event))
 }
 
 fn npads(c: &Cpu) -> Arc<Npads> {
@@ -374,8 +390,8 @@ impl Service for Hid {
             106 => {
                 let p = c.process();
                 let n = npads(c);
-                let e = *n.events.lock().unwrap().entry(req.u32(0)).or_insert_with(|| p.create_event(true));
-                Reply::ok().copy_handle(e)
+                let handle = acquire_style_set_event(&p.sched, &n.events, &p.handles, req.u32(0));
+                Reply::ok().copy_handle(handle)
             }
             108 => {
                 const LEDS: [u64; 8] = [0x1, 0x3, 0x7, 0xf, 0x9, 0x5, 0xd, 0x6];
@@ -433,6 +449,7 @@ impl Service for AppletResource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::HandleTable;
     use crate::input::button;
 
     fn u32_at(m: &[u8], off: u64) -> u32 {
@@ -493,5 +510,56 @@ mod tests {
         let hl = hh + field::LIFOS + field::LIFO_SIZE;
         let t = u64_at(&mem.borrow(), hl + 0x10);
         assert_eq!(u64_at(&mem.borrow(), hl + 0x20 + t * COMMON_STORAGE + 0x10), button::A);
+    }
+
+    #[test]
+    fn every_acquire_gets_a_fresh_handle_for_the_same_event() {
+        let sched = crate::sched::Scheduler::default();
+        let events = Mutex::new(HashMap::new());
+        let handles = Mutex::new(HandleTable::default());
+        let first = acquire_style_set_event(&sched, &events, &handles, 0);
+        let second = acquire_style_set_event(&sched, &events, &handles, 0);
+        assert_ne!(first, second, "each client gets its own handle");
+        let handles = handles.lock().unwrap();
+        let signaled = |h| matches!(handles.get(h), Some(KObject::Event(e)) if e.signaled.load(Relaxed));
+        assert!(signaled(first) && signaled(second));
+        assert_eq!(events.lock().unwrap().len(), 1, "one event per npad id");
+    }
+
+    #[test]
+    fn acquiring_the_style_set_event_never_holds_the_handle_table_while_signaling() {
+        let sched = crate::sched::Scheduler::default();
+        let events = Mutex::new(HashMap::new());
+        let handles = Mutex::new(HandleTable::default());
+        std::thread::scope(|s| {
+            let st = sched.lock();
+            let acquirer = s.spawn(|| acquire_style_set_event(&sched, &events, &handles, 0));
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            assert!(handles.try_lock().is_ok(), "the handle table is free while the scheduler lock is taken");
+            drop(st);
+            acquirer.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn signaling_a_style_set_event_wakes_a_blocked_waiter() {
+        let sched = crate::sched::Scheduler::default();
+        let event = Event { signaled: AtomicBool::new(false) };
+        std::thread::scope(|s| {
+            let waiter = s.spawn(|| {
+                let mut st = sched.lock();
+                while !event.signaled.load(Relaxed) {
+                    let (next, wait) = sched.changed.wait_timeout(st, std::time::Duration::from_secs(5)).unwrap();
+                    if wait.timed_out() {
+                        return false;
+                    }
+                    st = next;
+                }
+                true
+            });
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            sched.store_event(&event, true);
+            assert!(waiter.join().unwrap(), "the waiter was not woken");
+        });
     }
 }

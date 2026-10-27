@@ -184,7 +184,12 @@ against them; `KIRIKAE_RUNTIME=<kirikae-rt folder>` points somewhere else).
 had to take over and writes the list to `<name>.profile` every 10 s (`KIRIKAE_PROFILE=<file>` moves
 it, `0` turns it off). The next `kirikae build` into the same folder reads it (or the one given with
 `--profile`) and compiles those addresses as functions: one play session is usually enough for
-interpretation to disappear. Only use a profile with the same game and version.
+interpretation to disappear. The profile is parsed strictly (a truncated or malformed file is an
+error), and addresses outside the dump's modules, such as code loaded at run time, are skipped with
+a count. On first use the build writes `<profile>.guest` with a hash of the dump's modules and then
+refuses a profile whose tag names another dump, for example after a game update: delete the profile
+and its `.guest` file, or pass `--no-profile` to build without any profile, including the default
+one.
 
 **Game coverage reports.** The executable logs every IPC command, SVC, `nvdrv` ioctl and shader
 instruction the game uses, with its status (`implemented`, `stub`, `missing`), into

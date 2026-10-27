@@ -153,14 +153,11 @@ impl Process {
     }
 
     pub fn set_event(&self, handle: u32, signaled: bool) -> bool {
-        let Some(KObject::Event(e)) = self.handles.lock().unwrap().get(handle) else { return false };
-        let _st = self.sched.lock();
-        if signaled && !e.signaled.swap(true, Ordering::Relaxed) {
-            self.sched.notify();
-        } else {
-            e.signaled.store(signaled, Ordering::Relaxed);
-            self.sched.touch();
-        }
+        let e = match self.handles.lock().unwrap().get(handle) {
+            Some(KObject::Event(e)) => e.clone(),
+            _ => return false,
+        };
+        self.sched.store_event(&e, signaled);
         true
     }
 

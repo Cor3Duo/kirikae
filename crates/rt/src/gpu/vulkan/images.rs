@@ -344,21 +344,50 @@ impl Renderer {
         if mask.is_empty() {
             return;
         }
+        let Some(area) = clear_area(regs, key) else { return };
         self.begin();
         self.end_rendering();
         let depth = f32::from_bits(regs[0x364]).clamp(0.0, 1.0);
         let depth = if key.format == vk::Format::D16_UNORM { (depth * 65535.0 + 0.25).floor() / 65535.0 } else { depth };
         let value = vk::ClearDepthStencilValue { depth, stencil: regs[0x368] & 0xff };
-        let range = [vk::ImageSubresourceRange { aspect_mask: mask, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 }];
-        let image = self.images[&key].image;
-        unsafe { self.device.cmd_clear_depth_stencil_image(self.cmd, image, vk::ImageLayout::GENERAL, &value, &range) };
+        match area {
+            Some(rect) => {
+                let view = self.view(key, key.format, IDENTITY);
+                let op = |on: bool| if on { vk::AttachmentLoadOp::CLEAR } else { vk::AttachmentLoadOp::LOAD };
+                let attachment = |on: bool| {
+                    vk::RenderingAttachmentInfo::default()
+                        .image_view(view)
+                        .image_layout(vk::ImageLayout::GENERAL)
+                        .load_op(op(on))
+                        .store_op(vk::AttachmentStoreOp::STORE)
+                        .clear_value(vk::ClearValue { depth_stencil: value })
+                };
+                let (d, st) = (attachment(mask.contains(vk::ImageAspectFlags::DEPTH)), attachment(mask.contains(vk::ImageAspectFlags::STENCIL)));
+                let mut info = vk::RenderingInfo::default().render_area(rect).layer_count(1).depth_attachment(&d);
+                if aspects.contains(vk::ImageAspectFlags::STENCIL) {
+                    info = info.stencil_attachment(&st);
+                }
+                unsafe {
+                    self.device.cmd_begin_rendering(self.cmd, &info);
+                    self.device.cmd_end_rendering(self.cmd);
+                }
+            }
+            None => {
+                let range = [vk::ImageSubresourceRange { aspect_mask: mask, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 }];
+                let image = self.images[&key].image;
+                unsafe { self.device.cmd_clear_depth_stencil_image(self.cmd, image, vk::ImageLayout::GENERAL, &value, &range) };
+            }
+        }
         self.barrier();
         self.touch(key);
-        self.images.get_mut(&key).unwrap().note_clear(crate::display::FRAMES.load(std::sync::atomic::Ordering::Relaxed));
+        if area.is_none() {
+            self.images.get_mut(&key).unwrap().note_clear(crate::display::FRAMES.load(std::sync::atomic::Ordering::Relaxed));
+        }
     }
 
-    pub fn clear(&mut self, gpu: &Gpu, mem: &GuestMemory, s: &Surface, color: [u32; 4]) {
+    pub fn clear(&mut self, gpu: &Gpu, mem: &GuestMemory, regs: &[u32], s: &Surface, color: [u32; 4]) {
         let Some((key, fmt)) = self.surface_image(gpu, mem, s, false) else { return };
+        let Some(area) = clear_area(regs, key) else { return };
         self.begin();
         self.end_rendering();
         let value = match fmt.kind {
@@ -366,12 +395,32 @@ impl Renderer {
             Kind::Sint => vk::ClearColorValue { int32: color.map(|c| f32::from_bits(c) as i32) },
             Kind::Uint => vk::ClearColorValue { uint32: color.map(|c| f32::from_bits(c) as u32) },
         };
-        let range = [vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 }];
-        let image = self.images[&key].image;
-        unsafe { self.device.cmd_clear_color_image(self.cmd, image, vk::ImageLayout::GENERAL, &value, &range) };
+        match area {
+            Some(rect) => {
+                let view = self.view(key, fmt.vk, IDENTITY);
+                let attachment = [vk::RenderingAttachmentInfo::default()
+                    .image_view(view)
+                    .image_layout(vk::ImageLayout::GENERAL)
+                    .load_op(vk::AttachmentLoadOp::CLEAR)
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .clear_value(vk::ClearValue { color: value })];
+                let info = vk::RenderingInfo::default().render_area(rect).layer_count(1).color_attachments(&attachment);
+                unsafe {
+                    self.device.cmd_begin_rendering(self.cmd, &info);
+                    self.device.cmd_end_rendering(self.cmd);
+                }
+            }
+            None => {
+                let range = [vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 }];
+                let image = self.images[&key].image;
+                unsafe { self.device.cmd_clear_color_image(self.cmd, image, vk::ImageLayout::GENERAL, &value, &range) };
+            }
+        }
         self.barrier();
         self.touch(key);
-        self.images.get_mut(&key).unwrap().note_clear(crate::display::FRAMES.load(std::sync::atomic::Ordering::Relaxed));
+        if area.is_none() {
+            self.images.get_mut(&key).unwrap().note_clear(crate::display::FRAMES.load(std::sync::atomic::Ordering::Relaxed));
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -487,4 +536,23 @@ pub(super) fn same_class(a: vk::Format, b: vk::Format) -> bool {
         _ => 100 + f.as_raw() as u32,
     };
     class(a) == class(b)
+}
+
+const CLEAR_FLAGS: usize = 0x43e;
+const CLEAR_SCISSOR: u32 = 0x100;
+
+fn clear_area(regs: &[u32], key: ImageKey) -> Option<Option<vk::Rect2D>> {
+    if regs[CLEAR_FLAGS] & CLEAR_SCISSOR == 0 || regs[reg::SCISSOR] & 1 == 0 {
+        return Some(None);
+    }
+    let (h, v) = (regs[reg::SCISSOR + 1], regs[reg::SCISSOR + 2]);
+    let (x0, x1) = ((h & 0xffff).min(key.width), (h >> 16).min(key.width));
+    let (y0, y1) = ((v & 0xffff).min(key.height), (v >> 16).min(key.height));
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    if (x0, y0, x1, y1) == (0, 0, key.width, key.height) {
+        return Some(None);
+    }
+    Some(Some(vk::Rect2D { offset: vk::Offset2D { x: x0 as i32, y: y0 as i32 }, extent: vk::Extent2D { width: x1 - x0, height: y1 - y0 } }))
 }
