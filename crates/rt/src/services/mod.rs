@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::cpu::Cpu;
 
 pub mod acc;
+pub mod friend;
 pub mod am;
 pub mod csrng;
 pub mod fs;
@@ -138,6 +139,7 @@ pub trait Service: Send + Sync {
 pub fn open(name: &str) -> Arc<dyn Service> {
     match name {
         "lm" => Arc::new(lm::Lm),
+        "friend:u" => Arc::new(friend::FriendServiceCreator),
         "apm" | "apm:am" => Arc::new(apm::Apm),
         "appletOE" => Arc::new(am::AppletOe),
         "irs" => Arc::new(irs::Irs),
