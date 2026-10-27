@@ -1,6 +1,10 @@
 use super::*;
 
 pub(super) fn media(pc: u32, word: u32, cond: Cond) -> Result<Insn, DecodeError> {
+    if cond == Cond::Al && word & 0x0ff0_00f0 == 0x07f0_00f0 {
+        let imm = ((word >> 4) & 0xfff0) | (word & 0xf);
+        return Ok(insn(pc, word, cond, Opcode::Udf, false, vec![Operand::Imm(imm)]));
+    }
     let nibble = (word >> 4) & 0xf;
     if nibble & 1 == 0 {
         return Err(DecodeError::Unallocated);

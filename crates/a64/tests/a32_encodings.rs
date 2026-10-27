@@ -212,6 +212,9 @@ fn cases_found_by_the_llvm_differential_match_the_assembler() {
         (0xeee40b10, "vdup.8 q2, r0"),
         (0xf420071f, "vld1.8 {d0}, [r0:64]"),
         (0xf451f004, "pli [r1, #-0x4]"),
+        (0xe7f36dfd, "udf #0x36dd"),
+        (0xe7f0bef3, "udf #0xbe3"),
+        (0xe7f000f0, "udf #0x0"),
         (0xec9d8b04, "vldmia sp, {d8, d9}"),
     ]);
 }
@@ -228,6 +231,7 @@ fn undefined_encodings_found_by_the_llvm_differential_are_refused() {
         (0xf3bd0301, DecodeError::Unallocated),
         (0xf43d5a3f, DecodeError::Unsupported),
         (0xf411f004, DecodeError::Unsupported),
+        (0x07f000f0, DecodeError::Unallocated),
         (0xeef0bef0, DecodeError::Unsupported),
         (0xeeec0f10, DecodeError::Unsupported),
         (0xeeb30a60, DecodeError::Unsupported),

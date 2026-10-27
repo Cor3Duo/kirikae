@@ -35,6 +35,7 @@ pub enum Opcode {
     Bx,
     Blx,
     Bkpt,
+    Udf,
     Svc,
     Ldr,
     Str,
