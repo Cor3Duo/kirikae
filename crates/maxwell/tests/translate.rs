@@ -32,6 +32,7 @@ fn program(header: Vec<u8>, insns: &[u64]) -> Vec<u8> {
 
 const NOP: u64 = 0x50b0_0000_0000_0000 | PT | (0xf << 8);
 const EXIT: u64 = 0xe300_0000_0000_0000 | PT | 0xf;
+const KIL: u64 = 0xe330_0000_0000_0000 | PT | 0xf;
 
 fn mov32i(rd: u64, imm: u32) -> u64 {
     0x0100_0000_0000_0000 | (imm as u64) << 20 | PT | rd
@@ -98,6 +99,18 @@ fn straight_line_fragment_shader() {
     assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
     assert_eq!(shader.inputs, 1);
     validate(&shader.spirv);
+}
+
+#[test]
+fn kil_leaves_the_dispatcher() {
+    for kil in [KIL, KIL & !PT] {
+        let code = program(fragment_header(1), &[isetp_lt(0, 0, 1), bra(0x8, 0), kil, EXIT]);
+        let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
+        let text = disassemble(&shader.spirv);
+        let lines: Vec<&str> = text.lines().map(str::trim).collect();
+        let at = lines.iter().position(|l| l.starts_with("OpKill")).expect("OpKill");
+        assert!(lines[at - 1].starts_with("OpStore"), "{text}");
+    }
 }
 
 #[test]
