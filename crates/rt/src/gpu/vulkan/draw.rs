@@ -50,10 +50,6 @@ pub(super) struct Bound {
     pub(super) descriptors: Option<(vk::PipelineLayout, Vec<Descriptor>)>,
 }
 
-/// Vulkan's depth test, write and compare op for DEPTH_TEST_ENABLE, DEPTH_WRITE_ENABLE and DEPTH_TEST_FUNC.
-/// A fragment shader that exports depth still writes it with the test off (games build downsampled depth buffers
-/// that way), which Vulkan only does with the test on, so that case passes always instead.
-/// Without a depth export the test-off write is dropped: forcing it there hides geometry that should be drawn.
 fn depth_state(test: bool, write: bool, func: u32, exports_depth: bool) -> (bool, bool, vk::CompareOp) {
     if !test && write && exports_depth {
         return (true, true, vk::CompareOp::ALWAYS);
@@ -599,7 +595,6 @@ mod tests {
 
     #[test]
     fn only_depth_exports_write_with_the_test_off() {
-        // A depth downsample: test off, write on, the fragment shader exports depth.
         assert_eq!(depth_state(false, true, 8, true), (true, true, CompareOp::ALWAYS));
         assert_eq!(depth_state(false, true, 8, false), (false, true, CompareOp::ALWAYS));
         assert_eq!(depth_state(true, true, 4, true), (true, true, CompareOp::LESS_OR_EQUAL));
