@@ -56,8 +56,8 @@ def build_report():
                 trivial = [cid for cid in impl if arms[cid]]
                 extra = sorted(c for c in arms if c not in documented)
             else:
-                impl, trivial, extra = dict.fromkeys(arms, ""), [c for c, t in arms.items() if t], []
-            total = documented if documented is not None else dict.fromkeys(arms, "")
+                impl, trivial, extra = {}, [], sorted(arms)
+            total = documented if documented is not None else {}
             groups.append(
                 {
                     "name": key[1],

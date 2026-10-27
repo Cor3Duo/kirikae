@@ -206,6 +206,92 @@ def arms_in(src, regex, constants):
                 d[cid] = d.get(cid, True) and is_trivial(body)
     return found
 
+SERVICE_DISPATCH = r"match (?:req\.cmd|\(self\.name, req\.cmd\)|cmd)\s*\{"
+CALLEE = re.compile(r"(?<!fn )(?<![\w.])(?:(self)\.(\w+)|([a-z_]\w*)::(\w+)|([a-z_]\w*))\s*\(")
+
+def command_arms(scope, sources, consts_of, struct):
+    return struct_method_arms(scope, sources, consts_of, struct, "command")
+
+def method_body(scope, sources, struct, method):
+    for path in scope:
+        src = sources[path]
+        for m in re.finditer(r"impl\s+" + re.escape(struct) + r"\s*\{", src):
+            block = src[m.end() - 1 : matching(src, m.end() - 1) + 1]
+            body = fn_body(block, method)
+            if body:
+                return path, body
+    return None
+
+def struct_method_arms(scope, sources, consts_of, struct, method):
+    found = method_body(scope, sources, struct, method)
+    if not found:
+        return {}
+    path, body = found
+    return arms_in(body, SERVICE_DISPATCH, consts_of[path])
+
+def module_scope(path, sources):
+    folder = path.parent / path.stem
+    scope = [path]
+    scope += sorted(p for p in sources if p.parent == folder and p != path)
+    scope += sorted(p for p in sources if p.parent == path.parent and p != path and p.parent != folder)
+    return scope
+
+def module_source(path, name, sources):
+    for cand in (
+        path.parent / f"{name}.rs",
+        path.parent / name / "mod.rs",
+        path.parent / path.stem / f"{name}.rs",
+        path.parent / path.stem / name / "mod.rs",
+    ):
+        if cand in sources:
+            return cand
+    return None
+
+def local_scope(path, sources):
+    folder = path.parent / path.stem
+    return [path] + sorted(p for p in sources if p.parent == folder and p != path)
+
+def free_fn_body(scope, sources, name):
+    for path in scope:
+        body = fn_body(sources[path], name)
+        if body:
+            return path, body
+    return None
+
+def callee_bodies(block, path, sources, struct):
+    scope = module_scope(path, sources)
+    local = local_scope(path, sources)
+    out = []
+    for m in CALLEE.finditer(block):
+        self_, method, module, qualified, bare = m.groups()
+        if self_:
+            found = method_body(scope, sources, struct, method)
+        elif module:
+            target = module_source(path, module, sources)
+            found = free_fn_body([target], sources, qualified) if target else None
+        else:
+            found = free_fn_body(local, sources, bare)
+        if found:
+            name = method or qualified or bare or ""
+            out.append((name, found[0], found[1]))
+    return out
+
+def delegated_arms(block, path, sources, consts_of, struct, depth=3):
+    merged = {}
+    if depth <= 0:
+        return merged
+    for name, target, body in callee_bodies(block, path, sources, struct):
+        if name.endswith("_command_name") or name.endswith("_name"):
+            continue
+        merge_arms(merged, arms_in(body, SERVICE_DISPATCH, consts_of[target]))
+        merge_arms(merged, delegated_arms(body, target, sources, consts_of, struct, depth - 1))
+    return merged
+
+def merge_arms(dst, src):
+    for iface, ids in src.items():
+        dst.setdefault(iface, {}).update(ids)
+    return dst
+
 def fn_body(src, name):
     m = re.search(r"\bfn " + re.escape(name) + r"\s*\(", src)
     if not m:
@@ -213,60 +299,94 @@ def fn_body(src, name):
     brace = src.index("{", matching(src, m.end() - 1))
     return src[brace : matching(src, brace) + 1]
 
-def scan_code():
-    found = {}
-    mod = strip_comments((SERVICES / "mod.rs").read_text(encoding="utf-8"))
+def arc_struct(arm):
+    m = re.match(r"\s*Arc::new\(\s*([A-Za-z_][\w:]*)", arm)
+    if not m:
+        return None
+    segments = [s for s in m.group(1).split("::") if s and s[0].isupper()]
+    return segments[-1] if segments else None
+
+def service_registry(src):
+    body = fn_body(src, "host_object") or fn_body(src, "open")
+    if not body:
+        return {}
+    m = re.search(r"match\s+name\s*\{", body)
+    if not m:
+        return {}
     names_of = {}
-    for line in fn_body(mod, "open").splitlines():
-        if "=>" in line and "Arc::new" in line:
-            pat, expr = line.split("=>", 1)
-            m = re.search(r"Arc::new\((?:\w+::)*(\w+)", expr)
-            if m:
-                names_of.setdefault(m.group(1), []).extend(re.findall(r'"([^"]+)"', pat))
+    for pattern, arm in match_arms(body, m.end() - 1):
+        struct = arc_struct(arm)
+        if not struct:
+            continue
+        for name in re.findall(r'"([^"]+)"', pattern.split(" if ")[0]):
+            names_of.setdefault(struct, []).append(name)
+    return names_of
+
+def nvdrv_scope(services, sources):
+    return [p for p in sorted(sources) if p == services / "nvdrv.rs" or p.parent == services / "nvdrv"]
+
+def scan_code(services=None, horizon=None):
+    services = Path(services or SERVICES)
+    horizon = Path(horizon or HORIZON)
+    sources = {p: strip_comments(p.read_text(encoding="utf-8")) for p in sorted(services.rglob("*.rs"))}
+    consts_of = {p: consts(src) for p, src in sources.items()}
+    RUNTIME_ALIASES.clear()
+    found = {}
+    names_of = service_registry(sources.get(services / "mod.rs", ""))
 
     for names in names_of.values():
         for n in names:
             RUNTIME_ALIASES.setdefault(n, names[0])
 
-    for path in sorted(SERVICES.glob("*.rs")):
-        src = strip_comments(path.read_text(encoding="utf-8"))
-        constants = consts(src)
+    for path in sorted(sources):
+        src = sources[path]
         for m in re.finditer(r"impl Service for (\w+)\s*\{", src):
             struct = m.group(1)
             block = src[m.end() - 1 : matching(src, m.end() - 1) + 1]
             lit = re.search(r'fn name\(&self\) -> String \{\s*"([^"]+)"\.into\(\)', block)
-            if lit:
-                default = lit.group(1)
-            elif struct in names_of:
-                default = names_of[struct][0]
-            else:
+            defaults = [lit.group(1)] if lit else names_of.get(struct, [])
+            if not defaults:
                 continue
-            for iface, ids in arms_in(block, r"match (?:req\.cmd|\(self\.name, req\.cmd\))\s*\{", constants).items():
-                found.setdefault(("services", iface or default), {}).update(ids)
+            scope = module_scope(path, sources)
+            arms = arms_in(block, SERVICE_DISPATCH, consts_of[path])
+            merge_arms(arms, command_arms(scope, sources, consts_of, struct))
+            merge_arms(arms, delegated_arms(block, path, sources, consts_of, struct))
+            for iface, ids in arms.items():
+                for default in defaults if iface is None else [iface]:
+                    found.setdefault(("services", default), {}).update(ids)
         for stub in re.findall(r'Stub::new\("([^"]+)"\)', src):
             found.setdefault(("services", stub), {})
         if path.name == "vi.rs":
             body = fn_body(src, "transact")
-            for ids in arms_in(body, r"match code\s*\{", constants).values():
-                found.setdefault(("services", "vi/IGraphicBufferProducer"), {}).update(ids)
-        if path.name == "nvdrv.rs":
-            for fn, devs in NV_DEVICES.items():
-                body = fn_body(src, fn)
-                for ids in arms_in(body, r"match nr\s*\{", constants).values():
-                    for dev in [devs] if isinstance(devs, str) else devs:
-                        found.setdefault(("ioctl", dev), {}).update(ids)
+            if body:
+                for ids in arms_in(body, r"match code\s*\{", consts_of[path]).values():
+                    found.setdefault(("services", "vi/IGraphicBufferProducer"), {}).update(ids)
 
-    src = strip_comments(HORIZON.read_text(encoding="utf-8"))
-    body = fn_body(src, "dispatch")
-    for ids in arms_in(body, r"match imm\s*\{", consts(src)).values():
-        found.setdefault(("svc", "SVCs"), {}).update(ids)
+    ioctls = nvdrv_scope(services, sources)
+    for fn, devs in NV_DEVICES.items():
+        for path in ioctls:
+            body = fn_body(sources[path], fn)
+            if not body:
+                continue
+            for ids in arms_in(body, r"match nr\s*\{", consts_of[path]).values():
+                for dev in [devs] if isinstance(devs, str) else devs:
+                    found.setdefault(("ioctl", dev), {}).update(ids)
+
+    if horizon.exists():
+        src = strip_comments(horizon.read_text(encoding="utf-8"))
+        body = fn_body(src, "dispatch")
+        if body:
+            for ids in arms_in(body, r"match imm\s*\{", consts(src)).values():
+                found.setdefault(("svc", "SVCs"), {}).update(ids)
     return {(sec, ALIASES.get(name, name)): ids for (sec, name), ids in found.items()}
 
-def read_reference():
+def read_reference(path=None):
     ref, cur = {}, None
-    if not REFERENCE.exists():
+    REF_NAMES.clear()
+    path = Path(path or REFERENCE)
+    if not path.exists():
         return ref
-    for raw in REFERENCE.read_text(encoding="utf-8").splitlines():
+    for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line:
             continue

@@ -184,7 +184,7 @@ def section_table(section):
         if section["id"] == "shaders":
             pass
         elif not g["referenced"]:
-            missing += '<div class="muted">no reference list: total = handled commands</div>'
+            missing += '<div class="muted">no reference list: not counted</div>'
         if g["undocumented"]:
             ids = ", ".join(hex(c) if hexa else str(c) for c in g["undocumented"])
             missing += f'<div class="muted">handled but undocumented: {ids}</div>'
@@ -252,9 +252,13 @@ def render_html(report):
     parts += [section_table(s) for s in report["sections"]]
     parts.append(
         "<h2>How it is counted</h2><p>A command counts as implemented when the runtime has its own arm for it in the "
-        "<code>match</code> of the service (<code>crates/rt/src/services</code>), the SVC (<code>horizon.rs</code>) or the device "
-        "ioctl (<code>services/nvdrv.rs</code>); anything that falls to the default arm goes to the stub, which answers with zeros "
-        "and warns. The <em>Constant</em> column sets apart implemented commands whose body only returns success or fixed values. "
+        "<code>match</code> of the service (<code>crates/rt/src/services/**/*.rs</code>), the SVC (<code>horizon.rs</code>) or the "
+        "device ioctl (<code>services/nvdrv.rs</code> and <code>services/nvdrv/*.rs</code>); anything that falls to the default arm "
+        "goes to the stub, which answers with zeros and warns. A service split into a folder counts like a single file: the "
+        "scanner follows the inherent <code>impl</code> and the free function a <code>call</code> delegates to across the module. "
+        "A struct the registry constructs under several names (<code>bsd:u</code>, <code>bsd:s</code>, <code>bsd:a</code>) is "
+        "one dispatch, so each name is counted against its own reference table with the same arms. "
+        "The <em>Constant</em> column sets apart implemented commands whose body only returns success or fixed values. "
         "Ioctls are compared by the low byte of their number, which is how the devices dispatch them.</p>"
         "<p>The totals are the commands documented on <a href=\"https://switchbrew.org\">Switchbrew</a> "
         "(<code>tools/reference/horizon.txt</code>, IDs and names only) for the interfaces Kirikae exposes or games ask for, "
