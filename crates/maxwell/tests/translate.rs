@@ -89,8 +89,6 @@ fn validate(spirv: &[u32]) {
     variables_first(spirv);
 }
 
-/// spirv-val (and so Vulkan's validation layer) needs every OpVariable at the start of a function's first block;
-/// naga doesn't check that.
 fn variables_first(spirv: &[u32]) {
     let mut loader = rspirv::dr::Loader::new();
     rspirv::binary::parse_words(spirv, &mut loader).unwrap();
@@ -138,7 +136,6 @@ fn loop_with_branches() {
 
 #[test]
 fn forward_branches_need_no_loop() {
-    // The branch at 0x18 skips the MOV at 0x28 and lands on the EXIT at 0x30.
     let code = program(fragment_header(1), &[mov32i(1, 10), isetp_lt(0, 0, 1), bra(0x10, 0), mov32i(2, 1), EXIT]);
     let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
     assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);

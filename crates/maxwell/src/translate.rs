@@ -607,11 +607,8 @@ impl<'a> Translator<'a> {
         Ok(())
     }
 
-    /// Initial values for the registers, flags and outputs. SPIR-V wants every OpVariable at the very start of the
-    /// entry block, so this runs only once all of them are declared.
     fn init_state(&mut self) -> R {
         let f = self.b.constant_false(self.t.bool);
-        // Predicates start false too: a shader can test one before setting it, and an uninitialised variable is undefined.
         for v in self.cc.into_iter().chain(self.preds.clone()) {
             self.b.store(v, f, None, [])?;
         }
@@ -662,9 +659,6 @@ impl<'a> Translator<'a> {
         self.b.store(pc_var, entry_c, None, [])?;
 
         if program.forward_only(STACK_DEPTH as usize) {
-            // Control only moves forward, so one pass over the blocks in address order, each guarded by
-            // `pc == k`, runs them in the right order. NVIDIA's compiler hangs the GPU on some shaders when they
-            // go through the dispatcher loop instead.
             for (k, (_, insns)) in blocks.iter().enumerate() {
                 let pc = self.b.load(self.t.u32, None, pc_var, None, [])?;
                 let kc = self.u(k as u32);
@@ -710,7 +704,6 @@ impl<'a> Translator<'a> {
         Ok(())
     }
 
-    /// One block's instructions; unless one of them jumps, it falls through to the next block. Ends at `merge`.
     fn block(&mut self, pc_var: Word, merge: Word, insns: &[(u32, Insn)]) -> R {
         self.ended = false;
         let mut last = 0;

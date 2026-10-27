@@ -85,8 +85,6 @@ pub fn scan_with(code: &[u8], cbuf: &dyn Fn(u32, u32) -> Option<u32>) -> Program
                         break;
                     }
                 }
-                // KIL ends no block: it translates to a guarded OpKill in place, and splitting there would give a
-                // branch-free shader blocks to dispatch for nothing.
                 _ => {}
             }
             pc = fall;
@@ -150,9 +148,6 @@ impl Program {
         out
     }
 
-    /// Whether every path only ever moves to higher addresses: each BRA, and each SYNC/BRK through the target its
-    /// SSY/PBK pushed. Such a program runs its blocks once each in address order, with no dispatcher loop. Explores
-    /// every predicate outcome with the SSY and PBK stacks, so an empty or overfull stack counts as not forward.
     pub fn forward_only(&self, depth: usize) -> bool {
         if !self.brx.is_empty() {
             return false;
