@@ -18,6 +18,7 @@ pub mod mii;
 pub mod mm;
 pub mod nfp;
 pub mod nvdrv;
+pub mod ssl;
 pub mod omm;
 pub mod pctl;
 pub mod pdm;
@@ -25,7 +26,6 @@ pub mod pl;
 pub mod ro;
 pub mod set;
 pub mod sm;
-pub mod ssl;
 pub mod stub;
 pub mod time;
 pub mod vi;
@@ -153,6 +153,8 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "hid" => Arc::new(hid::Hid),
         "hwopus" => Arc::new(hwopus::HwOpus),
         "acc:u0" => Arc::new(acc::Account { name: "acc:u0" }),
+        "ssl" => Arc::new(ssl::Ssl::new("ssl")),
+        "ssl:s" => Arc::new(ssl::Ssl::new("ssl:s")),
         "acc:u1" => Arc::new(acc::Account { name: "acc:u1" }),
         "time:u" => Arc::new(time::Time { name: "time:u" }),
         "time:a" => Arc::new(time::Time { name: "time:a" }),
@@ -166,8 +168,6 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "pl:u" => Arc::new(pl::Pl),
         "ldr:ro" | "ro:1" => Arc::new(ro::Ro),
         "set" => Arc::new(set::Set),
-        "ssl" => Arc::new(ssl::Ssl::new("ssl")),
-        "ssl:s" => Arc::new(ssl::Ssl::new("ssl:s")),
         "mm:u" => Arc::new(mm::Mm),
         "mii:u" | "mii:e" => Arc::new(mii::Mii::new(name)),
         "nfp:user" => Arc::new(nfp::Nfp),
