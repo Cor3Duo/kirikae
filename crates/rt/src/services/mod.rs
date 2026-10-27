@@ -5,6 +5,7 @@ use crate::cpu::Cpu;
 pub mod acc;
 pub mod am;
 pub mod csrng;
+pub mod aoc;
 pub mod fs;
 #[cfg(test)]
 pub(crate) mod harness;
@@ -28,7 +29,6 @@ pub mod sm;
 pub mod stub;
 pub mod time;
 pub mod vi;
-pub mod aoc;
 pub mod bt;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -141,6 +141,7 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "lm" => Arc::new(lm::Lm),
         "apm" | "apm:am" => Arc::new(apm::Apm),
         "appletOE" => Arc::new(am::AppletOe),
+        "aoc:u" => Arc::new(aoc::AddOnContentManager::new()),
         "irs" => Arc::new(irs::Irs),
         "csrng" => Arc::new(csrng::Csrng),
         "omm" => Arc::new(omm::Omm),
@@ -172,7 +173,6 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "vi:m" => Arc::new(vi::Vi { name: "vi:m" }),
         "vi:s" => Arc::new(vi::Vi { name: "vi:s" }),
         "vi:u" => Arc::new(vi::Vi { name: "vi:u" }),
-        "aoc:u" => Arc::new(aoc::AddOnContentManager::new()),
         "bt" => Arc::new(bt::Bt),
         _ => Arc::new(stub::Stub::new(name)),
     }
