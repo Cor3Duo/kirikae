@@ -220,7 +220,7 @@ fn unconditional(pc: u32, word: u32) -> Result<Insn, DecodeError> {
             ))
         }
         0b001 => neon::decode(pc, word),
-        0b010 if word & 0x0100_0000 == 0 => neon::decode(pc, word),
+        0b010 if word & 0x0110_0000 == 0 => neon::decode(pc, word),
         0b010 => hint_space(pc, word),
         _ => Err(DecodeError::Unsupported),
     }
@@ -245,7 +245,7 @@ fn hint_space(pc: u32, word: u32) -> Result<Insn, DecodeError> {
         return Ok(insn(pc, word, Cond::Al, opcode, false, operands));
     }
     let op1 = (word >> 20) & 0x1f;
-    if op1 & 0b10111 == 0b10101 && (word >> 12) & 0xf == 0xf {
+    if op1 & 0b00111 == 0b00101 && (word >> 12) & 0xf == 0xf {
         let mem = Mem {
             base: reg((word >> 16) & 0xf),
             offset: Offset::Imm((word & 0xfff) as u16),
@@ -258,7 +258,7 @@ fn hint_space(pc: u32, word: u32) -> Result<Insn, DecodeError> {
             pc,
             word,
             Cond::Al,
-            Opcode::Pld,
+            if word & 0x0100_0000 == 0 { Opcode::Pli } else { Opcode::Pld },
             false,
             vec![Operand::Mem(mem)],
         ));

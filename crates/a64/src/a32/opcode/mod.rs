@@ -193,6 +193,7 @@ pub enum Opcode {
     Clrex,
     Sb,
     Pld,
+    Pli,
     Vldr,
     Vstr,
     Vldm,

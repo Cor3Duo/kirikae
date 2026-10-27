@@ -372,6 +372,9 @@ fn other(
                 vec![dest, single(vm, mbit), Operand::Convert(convert)],
             )
         }
+        (0x2, _) | (0x3, _) | (0x9, _) | (0xa, _) | (0xb, _) | (0xe, _) | (0xf, _) => {
+            return Err(DecodeError::Unsupported);
+        }
         (0xc | 0xd, _) => {
             let signed = vn == 0xd;
             let (convert, src) = match (double, signed) {
@@ -386,7 +389,6 @@ fn other(
                 vec![single(vd, dbit), src, Operand::Convert(convert)],
             )
         }
-        (0xe, _) => return Err(DecodeError::Unsupported),
         _ => return Err(DecodeError::Unallocated),
     };
     Ok(vinsn(pc, word, cond, opcode, None, operands))
@@ -398,8 +400,11 @@ fn register_transfer(pc: u32, word: u32, cond: Cond) -> Result<Insn, DecodeError
     let rt = reg((word >> 12) & 0xf);
     let vn = (word >> 16) & 0xf;
     if (word >> 21) & 0b111 == 0b111 {
-        if cp != 0b1010 {
+        if cp == 0b1011 {
             return element_transfer(pc, word, cond, rt, vn);
+        }
+        if cp != 0b1010 {
+            return Err(DecodeError::Unsupported);
         }
         let Some(sys) = VfpSys::from_field((word >> 16) & 0xf) else {
             return Err(DecodeError::Unsupported);
