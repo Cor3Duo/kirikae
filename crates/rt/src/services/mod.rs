@@ -17,11 +17,11 @@ pub mod lm;
 pub mod mii;
 pub mod mm;
 pub mod nfp;
-pub mod ngc;
 pub mod nvdrv;
 pub mod omm;
 pub mod pctl;
 pub mod pdm;
+pub mod ngc;
 pub mod pl;
 pub mod ro;
 pub mod set;
@@ -144,7 +144,6 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "irs" => Arc::new(irs::Irs),
         "csrng" => Arc::new(csrng::Csrng),
         "omm" => Arc::new(omm::Omm),
-        "ngc:u" => Arc::new(ngc::Ngc),
         "pctl" => Arc::new(pctl::Pctl { name: "pctl" }),
         "pdm:qry" => Arc::new(pdm::PdmQry),
         "pctl:s" => Arc::new(pctl::Pctl { name: "pctl:s" }),
@@ -158,6 +157,7 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "time:u" => Arc::new(time::Time { name: "time:u" }),
         "time:a" => Arc::new(time::Time { name: "time:a" }),
         "time:s" => Arc::new(time::Time { name: "time:s" }),
+        "ngc:u" => Arc::new(ngc::Ngc),
         "nvdrv" => Arc::new(nvdrv::Nvdrv { name: "nvdrv" }),
         "nvdrv:a" => Arc::new(nvdrv::Nvdrv { name: "nvdrv:a" }),
         "nvdrv:s" => Arc::new(nvdrv::Nvdrv { name: "nvdrv:s" }),
