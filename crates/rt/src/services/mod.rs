@@ -3,9 +3,9 @@ use std::sync::Arc;
 use crate::cpu::Cpu;
 
 pub mod acc;
+pub mod friend;
 pub mod am;
 pub mod csrng;
-pub mod friend;
 pub mod fs;
 #[cfg(test)]
 pub(crate) mod harness;
@@ -139,6 +139,7 @@ pub trait Service: Send + Sync {
 pub fn open(name: &str) -> Arc<dyn Service> {
     match name {
         "lm" => Arc::new(lm::Lm),
+        "friend:u" => Arc::new(friend::FriendServiceCreator),
         "apm" | "apm:am" => Arc::new(apm::Apm),
         "appletOE" => Arc::new(am::AppletOe),
         "irs" => Arc::new(irs::Irs),
@@ -150,7 +151,6 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "pctl:r" => Arc::new(pctl::Pctl { name: "pctl:r" }),
         "pctl:a" => Arc::new(pctl::Pctl { name: "pctl:a" }),
         "fsp-srv" => Arc::new(fs::FsProxy),
-        "friend:u" => Arc::new(friend::FriendServiceCreator),
         "hid" => Arc::new(hid::Hid),
         "hwopus" => Arc::new(hwopus::HwOpus),
         "acc:u0" => Arc::new(acc::Account { name: "acc:u0" }),
