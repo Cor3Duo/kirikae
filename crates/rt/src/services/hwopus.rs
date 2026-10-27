@@ -184,10 +184,8 @@ fn samples(payload: &[u8], sample_rate: u32) -> Result<u32, u32> {
         _ => u32::from(payload.get(1).ok_or(OPUS_INVALID_PACKET)? & 0x3f),
     };
     let samples = units * frames * sample_rate / 400;
-    if samples * 25 > sample_rate * 3 {
+    if frames == 0 || samples * 25 > sample_rate * 3 {
         Err(OPUS_INVALID_PACKET)
-    } else if samples == 0 {
-        Err(OPUS_BAD_ARG)
     } else {
         Ok(samples)
     }
@@ -218,7 +216,7 @@ mod tests {
         assert_eq!(frame(&packet(4, &[0xf8]), 48000, 2, 0x10000), Err(INVALID_LENGTH), "payload shorter than the header says");
         assert_eq!(frame(&packet(0, &[]), 48000, 2, 0x10000), Err(OPUS_BAD_ARG), "no TOC byte");
         assert_eq!(frame(&packet(1, &[0xfb]), 48000, 2, 0x10000), Err(OPUS_INVALID_PACKET), "code 3 without its count byte");
-        assert_eq!(frame(&packet(2, &[0xfb, 0x00]), 48000, 2, 0x10000), Err(OPUS_BAD_ARG), "code 3 with no frames");
+        assert_eq!(frame(&packet(2, &[0xfb, 0x00]), 48000, 2, 0x10000), Err(OPUS_INVALID_PACKET), "code 3 with no frames");
         assert_eq!(frame(&packet(2, &[0xfb, 0x31]), 48000, 2, 0x10000), Err(OPUS_INVALID_PACKET), "more than 120 ms");
         assert_eq!(frame(&packet(1, &[0xf8]), 48000, 2, 960 * 4 - 1), Err(INVALID_LENGTH), "output too small");
         assert_eq!(frame(&packet(1, &[0xf8]), 48000, 2, 960 * 4), Ok((9, 960)));
