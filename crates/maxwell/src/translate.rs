@@ -539,35 +539,8 @@ impl<'a> Translator<'a> {
         for k in 0..4 {
             self.cc[k] = self.b.variable(self.t.fn_bool, None, StorageClass::Function, None);
         }
-        let f = self.b.constant_false(self.t.bool);
-        for k in 0..4 {
-            let v = self.cc[k];
-            self.b.store(v, f, None, [])?;
-        }
-        let zero = self.u(0);
-        for k in 0..255 {
-            let v = self.regs[k];
-            self.b.store(v, zero, None, [])?;
-        }
-        if self.opts.stage == Stage::Vertex {
-            let (z, o) = (self.f(0.0), self.f(1.0));
-            let v4f = self.t.v4f;
-            let init = self.b.constant_composite(v4f, [z, z, z, o]);
-            let position = self.builtin(BuiltIn::Position, v4f, true);
-            self.b.store(position, init, None, [])?;
-            for g in 0..32 {
-                if (0..4).any(|c| self.header.vtg_output(g, c)) {
-                    let (var, _) = self.io_var(g as u32, true);
-                    self.b.store(var, init, None, [])?;
-                }
-            }
-        }
         if self.opts.debug_probe.is_some() {
-            let vars = [(); 6].map(|_| self.b.variable(self.t.fn_u32, None, StorageClass::Function, None));
-            for var in vars {
-                self.b.store(var, zero, None, [])?;
-            }
-            self.probe = Some(vars);
+            self.probe = Some([(); 6].map(|_| self.b.variable(self.t.fn_u32, None, StorageClass::Function, None)));
         }
         let local_size = if self.opts.stage == Stage::Compute { self.opts.local_memory } else { self.header.local_memory_size() };
         let local_words = local_size.div_ceil(4).min(0x4000);
@@ -589,6 +562,7 @@ impl<'a> Translator<'a> {
         if program.branches() {
             self.dispatcher(program)?;
         } else {
+            self.init_state()?;
             for (_, block) in program.blocks() {
                 for (pc, i) in block {
                     self.insn(pc, &i)?;
@@ -642,6 +616,35 @@ impl<'a> Translator<'a> {
         Ok(())
     }
 
+    fn init_state(&mut self) -> R {
+        let f = self.b.constant_false(self.t.bool);
+        for v in self.cc.into_iter().chain(self.preds.clone()) {
+            self.b.store(v, f, None, [])?;
+        }
+        let zero = self.u(0);
+        for k in 0..255 {
+            let v = self.regs[k];
+            self.b.store(v, zero, None, [])?;
+        }
+        if self.opts.stage == Stage::Vertex {
+            let (z, o) = (self.f(0.0), self.f(1.0));
+            let v4f = self.t.v4f;
+            let init = self.b.constant_composite(v4f, [z, z, z, o]);
+            let position = self.builtin(BuiltIn::Position, v4f, true);
+            self.b.store(position, init, None, [])?;
+            for g in 0..32 {
+                if (0..4).any(|c| self.header.vtg_output(g, c)) {
+                    let (var, _) = self.io_var(g as u32, true);
+                    self.b.store(var, init, None, [])?;
+                }
+            }
+        }
+        for var in self.probe.into_iter().flatten() {
+            self.b.store(var, zero, None, [])?;
+        }
+        Ok(())
+    }
+
     fn dispatcher(&mut self, program: &Program) -> R {
         let blocks = program.blocks();
         for (k, (leader, _)) in blocks.iter().enumerate() {
@@ -654,6 +657,7 @@ impl<'a> Translator<'a> {
         let arr_ptr = self.b.type_pointer(None, StorageClass::Function, arr);
         let ssy = (self.b.variable(arr_ptr, None, StorageClass::Function, None), self.b.variable(self.t.fn_u32, None, StorageClass::Function, None));
         let pbk = (self.b.variable(arr_ptr, None, StorageClass::Function, None), self.b.variable(self.t.fn_u32, None, StorageClass::Function, None));
+        self.init_state()?;
         let zero = self.u(0);
         self.b.store(ssy.1, zero, None, [])?;
         self.b.store(pbk.1, zero, None, [])?;
@@ -662,6 +666,23 @@ impl<'a> Translator<'a> {
         let entry = self.block_ids[&program.leaders.first().copied().unwrap_or(cfg::ENTRY)];
         let entry_c = self.u(entry);
         self.b.store(pc_var, entry_c, None, [])?;
+
+        if program.forward_only(STACK_DEPTH as usize) {
+            for (k, (_, insns)) in blocks.iter().enumerate() {
+                let pc = self.b.load(self.t.u32, None, pc_var, None, [])?;
+                let kc = self.u(k as u32);
+                let here = self.b.i_equal(self.t.bool, None, pc, kc)?;
+                let (body, skip) = (self.b.id(), self.b.id());
+                self.b.selection_merge(skip, SelectionControl::NONE)?;
+                self.b.branch_conditional(here, body, skip, [])?;
+                self.b.begin_block(Some(body))?;
+                self.dispatch_merge = Some(skip);
+                self.block(pc_var, skip, insns)?;
+                self.b.begin_block(Some(skip))?;
+            }
+            self.dispatch_merge = None;
+            return Ok(());
+        }
 
         let (header, body, cont, merge) = (self.b.id(), self.b.id(), self.b.id(), self.b.id());
         self.b.branch(header)?;
@@ -678,21 +699,7 @@ impl<'a> Translator<'a> {
         self.dispatch_merge = Some(sw_merge);
         for (k, (_, insns)) in blocks.iter().enumerate() {
             self.b.begin_block(Some(labels[k]))?;
-            self.ended = false;
-            let mut last = 0;
-            for (pc, i) in insns {
-                last = *pc;
-                self.insn(*pc, i)?;
-                if self.ended {
-                    break;
-                }
-            }
-            if !self.ended {
-                let fall = self.block_number(cfg::next(last));
-                let c = self.u(fall);
-                self.b.store(pc_var, c, None, [])?;
-                self.b.branch(sw_merge)?;
-            }
+            self.block(pc_var, sw_merge, insns)?;
         }
         self.b.begin_block(Some(sw_merge))?;
         self.b.branch(cont)?;
@@ -703,6 +710,25 @@ impl<'a> Translator<'a> {
         self.b.branch_conditional(more, header, merge, [])?;
         self.b.begin_block(Some(merge))?;
         self.dispatch_merge = None;
+        Ok(())
+    }
+
+    fn block(&mut self, pc_var: Word, merge: Word, insns: &[(u32, Insn)]) -> R {
+        self.ended = false;
+        let mut last = 0;
+        for (pc, i) in insns {
+            last = *pc;
+            self.insn(*pc, i)?;
+            if self.ended {
+                break;
+            }
+        }
+        if !self.ended {
+            let fall = self.block_number(cfg::next(last));
+            let c = self.u(fall);
+            self.b.store(pc_var, c, None, [])?;
+            self.b.branch(merge)?;
+        }
         Ok(())
     }
 

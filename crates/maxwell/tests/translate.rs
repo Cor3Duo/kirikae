@@ -87,6 +87,21 @@ fn validate(spirv: &[u32]) {
 {}", disassemble(spirv)),
     };
     naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&module).expect("SPIR-V validates");
+    variables_first(spirv);
+}
+
+fn variables_first(spirv: &[u32]) {
+    let mut loader = rspirv::dr::Loader::new();
+    rspirv::binary::parse_words(spirv, &mut loader).unwrap();
+    let module = loader.module();
+    let is_var = |i: &rspirv::dr::Instruction| i.class.opcode == rspirv::spirv::Op::Variable;
+    for f in &module.functions {
+        for (k, block) in f.blocks.iter().enumerate() {
+            let leading = block.instructions.iter().take_while(|i| is_var(i)).count();
+            let late = block.instructions.iter().skip(if k == 0 { leading } else { 0 }).any(is_var);
+            assert!(!late, "OpVariable after other instructions in block {k}\n{}", disassemble(spirv));
+        }
+    }
 }
 
 #[test]
@@ -129,6 +144,28 @@ fn loop_with_branches() {
     let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
     assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
     validate(&shader.spirv);
+    assert!(disassemble(&shader.spirv).contains("OpLoopMerge"), "a backward branch needs the dispatcher loop");
+}
+
+#[test]
+fn forward_branches_need_no_loop() {
+    let code = program(fragment_header(1), &[mov32i(1, 10), isetp_lt(0, 0, 1), bra(0x10, 0), mov32i(2, 1), EXIT]);
+    let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
+    assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
+    validate(&shader.spirv);
+    let text = disassemble(&shader.spirv);
+    assert!(!text.contains("OpLoopMerge") && text.contains("OpBranchConditional"), "{text}");
+}
+
+#[test]
+fn discard_keeps_a_shader_straight_line() {
+    const KIL_P0: u64 = 0xe330_0000_0000_000f;
+    let code = program(fragment_header(1), &[mov32i(1, 10), isetp_lt(0, 0, 1), KIL_P0, mov32i(2, 0), EXIT]);
+    let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
+    assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
+    validate(&shader.spirv);
+    let text = disassemble(&shader.spirv);
+    assert!(text.contains("OpKill") && !text.contains("OpLoopMerge"), "{text}");
 }
 
 #[test]

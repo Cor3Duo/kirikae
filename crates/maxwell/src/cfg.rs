@@ -79,9 +79,9 @@ pub fn scan_with(code: &[u8], cbuf: &dyn Fn(u32, u32) -> Option<u32>) -> Program
                         break;
                     }
                 }
-                "exit" | "sync" | "brk" | "kil" => {
+                "exit" | "sync" | "brk" => {
                     leaders.insert(fall);
-                    if unconditional(&i) && i.name() != "kil" {
+                    if unconditional(&i) {
                         break;
                     }
                 }
@@ -146,5 +146,72 @@ impl Program {
             out.last_mut().unwrap().1.push((pc, i));
         }
         out
+    }
+
+    pub fn forward_only(&self, depth: usize) -> bool {
+        if !self.brx.is_empty() {
+            return false;
+        }
+        let start = self.leaders.first().copied().unwrap_or(ENTRY);
+        let mut seen = std::collections::HashSet::new();
+        let mut work = vec![(start, Vec::<u32>::new(), Vec::<u32>::new())];
+        while let Some(state) = work.pop() {
+            if seen.len() > 4096 {
+                return false;
+            }
+            if !seen.insert(state.clone()) {
+                continue;
+            }
+            let (mut pc, mut ssy, mut pbk) = state;
+            while let Some(i) = self.insns.get(&pc) {
+                let fall = next(pc);
+                let conditional = !unconditional(i);
+                match i.name() {
+                    "bra" | "ssy" | "pbk" if i.bit(5) => return false,
+                    "bra" => {
+                        let target = i.branch_target(pc);
+                        if target <= pc {
+                            return false;
+                        }
+                        work.push((target, ssy.clone(), pbk.clone()));
+                        if !conditional {
+                            break;
+                        }
+                    }
+                    "ssy" | "pbk" => {
+                        let target = i.branch_target(pc);
+                        let stack = if i.name() == "ssy" { &mut ssy } else { &mut pbk };
+                        if target <= pc || stack.len() == depth {
+                            return false;
+                        }
+                        stack.push(target);
+                    }
+                    "sync" | "brk" => {
+                        if conditional {
+                            work.push((fall, ssy.clone(), pbk.clone()));
+                        }
+                        let stack = if i.name() == "sync" { &mut ssy } else { &mut pbk };
+                        match stack.pop() {
+                            Some(target) if target > pc => work.push((target, ssy, pbk)),
+                            _ => return false,
+                        }
+                        break;
+                    }
+                    "exit" => {
+                        if conditional {
+                            work.push((fall, ssy, pbk));
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+                pc = fall;
+                if self.leaders.contains(&pc) {
+                    work.push((pc, ssy, pbk));
+                    break;
+                }
+            }
+        }
+        true
     }
 }
