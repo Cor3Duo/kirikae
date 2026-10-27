@@ -79,7 +79,7 @@ mod tests {
     #[test]
     fn check_finds_nothing_and_mask_returns_the_text_unchanged() {
         let entries: &'static [crate::abi::Entry] = Box::leak(vec![crate::abi::Entry { addr: 0x1000_0000, func: check_and_mask }].into_boxed_slice());
-        let exe = kirikae_loader::Executable { modules: Vec::new(), entry: entries[0].addr, title_id: None, main_stack_size: None, system_resource_size: 0, romfs: None };
+        let exe = kirikae_loader::Executable { entry: entries[0].addr, ..Default::default() };
         let result = crate::process::run_executable(&exe, entries, crate::process::RunOptions { capture_output: true }).expect("the fake guest runs");
         assert_eq!(result.exit_code, 0);
         assert_eq!(*SEEN.lock().unwrap(), vec![0, 1, 0, 1]);
