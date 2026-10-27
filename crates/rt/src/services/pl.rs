@@ -23,9 +23,28 @@ fn host_font() -> Option<Vec<u8>> {
         candidates.extend(["segoeui.ttf", "arial.ttf"].map(|f| fonts.join(f)));
     }
     candidates.extend(
-        ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/System/Library/Fonts/Supplemental/Arial.ttf"].map(Into::into),
+        [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/DejaVuSans.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+        ]
+        .map(Into::into),
     );
+    candidates.extend(fontconfig_sans());
     candidates.iter().find_map(|p| std::fs::read(p).ok())
+}
+
+fn fontconfig_sans() -> Option<std::path::PathBuf> {
+    let out = std::process::Command::new("fc-match")
+        .args(["--format=%{file}", "sans-serif:fontformat=TrueType"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let path = String::from_utf8(out.stdout).ok()?;
+    (out.status.success() && path.ends_with(".ttf")).then(|| path.into())
 }
 
 fn fonts(c: &Cpu) -> Arc<Fonts> {
