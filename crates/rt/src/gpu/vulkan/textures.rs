@@ -48,6 +48,8 @@ pub(super) const TWIN: u64 = 1 << 60;
 
 pub(super) const FEEDBACK: u64 = 1 << 59;
 
+pub(super) const ARRAY_VOLUME: u64 = 1 << 58;
+
 pub(super) const DERIVED: u64 = CROP | GATHER | TWIN | FEEDBACK;
 
 pub(super) const CROP_SIZES: usize = 3;
