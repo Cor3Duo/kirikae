@@ -235,12 +235,8 @@ mod tests {
     fn every_port_opens_a_session() {
         let entries: &'static [Entry] = Box::leak(vec![Entry { addr: 0x1000_0000, func: open_all }].into_boxed_slice());
         let exe = kirikae_loader::Executable {
-            modules: Vec::new(),
             entry: entries[0].addr,
-            title_id: None,
-            main_stack_size: None,
-            system_resource_size: 0,
-            romfs: None,
+            ..Default::default()
         };
         let result = run_executable(&exe, entries, RunOptions { capture_output: true }).expect("the fake guest runs");
         assert_eq!(result.exit_code, 0);
