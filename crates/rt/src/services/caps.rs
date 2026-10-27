@@ -85,7 +85,7 @@ mod tests {
     #[test]
     fn every_save_command_returns_a_zero_sized_album_entry() {
         extern "C" fn probe(c: &mut Cpu) {
-            let keys = ["cmd201", "cmd203", "cmd205", "cmd210"];
+            let keys = ["caps/cmd201", "caps/cmd203", "caps/cmd205", "caps/cmd210"];
             for (key, cmd) in keys.into_iter().zip([201u32, 203, 205, 210]) {
                 let reply = CapsSu.call(
                     c,
@@ -109,7 +109,7 @@ mod tests {
             addr: harness::ENTRY,
             func: probe,
         }]);
-        for key in ["cmd201", "cmd203", "cmd205", "cmd210"] {
+        for key in ["caps/cmd201", "caps/cmd203", "caps/cmd205", "caps/cmd210"] {
             assert_eq!(
                 harness::observed(key),
                 vec![0, APPLICATION_ALBUM_ENTRY_SIZE as u64, 1],
@@ -129,7 +129,7 @@ mod tests {
                     ..Default::default()
                 },
             );
-            harness::record("caps/unknown", &[reply.result as u64, reply.data.len() as u64]);
+            harness::record("caps/su-unknown", &[reply.result as u64, reply.data.len() as u64]);
             c.halt();
         }
         harness::run(vec![Entry {
@@ -137,7 +137,7 @@ mod tests {
             func: probe,
         }]);
         assert_eq!(
-            harness::observed("caps/unknown"),
+            harness::observed("caps/su-unknown"),
             vec![crate::services::result::CMIF_UNKNOWN_COMMAND as u64, 0]
         );
     }
@@ -246,7 +246,7 @@ mod tests {
                     ..Default::default()
                 },
             );
-            harness::record("caps/unknown", &[reply.result as u64, reply.data.len() as u64]);
+            harness::record("caps/u-unknown", &[reply.result as u64, reply.data.len() as u64]);
             c.halt();
         }
         harness::run(vec![Entry {
@@ -254,7 +254,7 @@ mod tests {
             func: probe,
         }]);
         assert_eq!(
-            harness::observed("caps/unknown"),
+            harness::observed("caps/u-unknown"),
             vec![crate::services::result::CMIF_UNKNOWN_COMMAND as u64, 0]
         );
     }
