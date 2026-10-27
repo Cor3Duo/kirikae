@@ -36,4 +36,4 @@ jobs:
         run: cargo clippy --release --workspace --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test --release --workspace -- --skip register_operands
+        run: cargo test --release --workspace
