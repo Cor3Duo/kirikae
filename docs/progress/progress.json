@@ -5,7 +5,7 @@
    "id": "services",
    "title": "Horizon services",
    "unit": "IPC commands",
-   "implemented": 403,
+   "implemented": 417,
    "total": 1302,
    "groups": [
     {
@@ -1125,6 +1125,7 @@
       100
      ],
      "constant": [
+      19,
       40,
       44
      ],
@@ -1391,68 +1392,27 @@
      "official": "nn::aocsrv::detail::IAddOnContentManager",
      "url": "https://switchbrew.org/wiki/NS_services",
      "referenced": true,
-     "implemented": [],
+     "implemented": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      50
+     ],
      "constant": [],
      "missing": [
       {
-       "id": 0,
-       "name": "CountAddOnContentByApplicationId"
-      },
-      {
-       "id": 1,
-       "name": "ListAddOnContentByApplicationId"
-      },
-      {
-       "id": 2,
-       "name": "CountAddOnContent"
-      },
-      {
-       "id": 3,
-       "name": "ListAddOnContent"
-      },
-      {
-       "id": 4,
-       "name": "GetAddOnContentBaseIdByApplicationId"
-      },
-      {
-       "id": 5,
-       "name": "GetAddOnContentBaseId"
-      },
-      {
-       "id": 6,
-       "name": "PrepareAddOnContentByApplicationId"
-      },
-      {
-       "id": 7,
-       "name": "PrepareAddOnContent"
-      },
-      {
-       "id": 8,
-       "name": "GetAddOnContentListChangedEvent"
-      },
-      {
-       "id": 9,
-       "name": "GetAddOnContentLostErrorCode"
-      },
-      {
-       "id": 10,
-       "name": "GetAddOnContentListChangedEventWithProcessId"
-      },
-      {
-       "id": 11,
-       "name": "NotifyMountAddOnContent"
-      },
-      {
-       "id": 12,
-       "name": "NotifyUnmountAddOnContent"
-      },
-      {
        "id": 13,
        "name": "IsAddOnContentMountedForDebug"
-      },
-      {
-       "id": 50,
-       "name": "CheckAddOnContentMountStatus"
       },
       {
        "id": 100,
@@ -1485,6 +1445,22 @@
      ],
      "undocumented": [],
      "total": 22
+    },
+    {
+     "name": "aoc:u/IPurchaseEventManager",
+     "family": "aoc",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      0,
+      1,
+      2
+     ],
+     "total": 0
     },
     {
      "name": "apm",
@@ -1722,6 +1698,113 @@
      "total": 0
     },
     {
+     "name": "btm:u",
+     "family": "btm",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      0
+     ],
+     "total": 0
+    },
+    {
+     "name": "btm:u/IBtmUserCore",
+     "family": "btm",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37
+     ],
+     "total": 0
+    },
+    {
+     "name": "caps:su",
+     "family": "caps",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      32,
+      201,
+      203,
+      205,
+      210
+     ],
+     "total": 0
+    },
+    {
+     "name": "caps:u",
+     "family": "caps",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      32,
+      102,
+      103,
+      104,
+      105,
+      110,
+      120,
+      130,
+      140,
+      141,
+      142,
+      143,
+      144,
+      145,
+      146,
+      147,
+      60002
+     ],
+     "total": 0
+    },
+    {
      "name": "csrng",
      "family": "csrng",
      "official": "",
@@ -1755,6 +1838,95 @@
      ],
      "undocumented": [],
      "total": 2
+    },
+    {
+     "name": "ectx:aw/IContextRegistrar",
+     "family": "ectx",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      0
+     ],
+     "total": 0
+    },
+    {
+     "name": "friend:u",
+     "family": "friend",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      0,
+      1,
+      2
+     ],
+     "total": 0
+    },
+    {
+     "name": "friend:u/IFriendService",
+     "family": "friend",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      0,
+      1,
+      10100,
+      10101,
+      10102,
+      10110,
+      10400,
+      10500,
+      10600,
+      10601,
+      10610,
+      20100,
+      20101,
+      20103,
+      20104,
+      20200,
+      20201,
+      20300,
+      20400,
+      20401,
+      20500,
+      20600,
+      20700,
+      20800,
+      20801,
+      20900,
+      30100,
+      30110,
+      30120,
+      30121
+     ],
+     "total": 0
+    },
+    {
+     "name": "friend:u/INotificationService",
+     "family": "friend",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      0,
+      1,
+      2
+     ],
+     "total": 0
     },
     {
      "name": "fs/IDirectory",
@@ -3169,6 +3341,63 @@
      "total": 0
     },
     {
+     "name": "ldn:u",
+     "family": "ldn",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      0,
+      1
+     ],
+     "total": 0
+    },
+    {
+     "name": "ldn:u/IUserLocalCommunicationService",
+     "family": "ldn",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      100,
+      101,
+      102,
+      103,
+      104,
+      200,
+      201,
+      202,
+      203,
+      204,
+      205,
+      206,
+      207,
+      208,
+      209,
+      300,
+      301,
+      302,
+      303,
+      304,
+      400,
+      401,
+      402
+     ],
+     "total": 0
+    },
+    {
      "name": "ldr:ro",
      "family": "ldr",
      "official": "",
@@ -3302,6 +3531,54 @@
      "total": 8
     },
     {
+     "name": "nfc/ISession",
+     "family": "nfc",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      100,
+      400,
+      401,
+      402,
+      403,
+      404,
+      405,
+      406,
+      407,
+      408,
+      409,
+      410,
+      411,
+      412,
+      500,
+      510,
+      1000,
+      1001,
+      1300,
+      1301,
+      1302
+     ],
+     "total": 0
+    },
+    {
      "name": "nfp:user",
      "family": "nfp",
      "official": "nn::nfp::detail::IUserManager",
@@ -3412,6 +3689,121 @@
      ],
      "undocumented": [],
      "total": 30
+    },
+    {
+     "name": "ngc:u",
+     "family": "ngc",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      0,
+      1,
+      2
+     ],
+     "total": 0
+    },
+    {
+     "name": "nifm/IGeneralService",
+     "family": "nifm",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      1,
+      4,
+      5,
+      12,
+      15,
+      17,
+      18,
+      20,
+      21,
+      22
+     ],
+     "total": 0
+    },
+    {
+     "name": "nifm/IRequest",
+     "family": "nifm",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18
+     ],
+     "total": 0
+    },
+    {
+     "name": "nifm:a",
+     "family": "nifm",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      4,
+      5
+     ],
+     "total": 0
+    },
+    {
+     "name": "nifm:s",
+     "family": "nifm",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      4,
+      5
+     ],
+     "total": 0
+    },
+    {
+     "name": "nifm:u",
+     "family": "nifm",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      4,
+      5
+     ],
+     "total": 0
     },
     {
      "name": "nvdrv",
@@ -4448,6 +4840,135 @@
      ],
      "undocumented": [],
      "total": 5
+    },
+    {
+     "name": "ssl",
+     "family": "ssl",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      0,
+      1,
+      2,
+      3,
+      5,
+      6,
+      7,
+      8,
+      9,
+      11,
+      100,
+      101,
+      102
+     ],
+     "total": 0
+    },
+    {
+     "name": "ssl/ISslConnection",
+     "family": "ssl",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37
+     ],
+     "total": 0
+    },
+    {
+     "name": "ssl/ISslContext",
+     "family": "ssl",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+     ],
+     "total": 0
+    },
+    {
+     "name": "ssl:s",
+     "family": "ssl",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      0,
+      1,
+      2,
+      3,
+      5,
+      6,
+      7,
+      8,
+      9,
+      11,
+      100,
+      101,
+      102
+     ],
+     "total": 0
     },
     {
      "name": "time/ISteadyClock",
