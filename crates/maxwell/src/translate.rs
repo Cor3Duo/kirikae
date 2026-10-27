@@ -162,6 +162,7 @@ mod attr {
     pub const POSITION: u32 = 0x70;
     pub const GENERIC: u32 = 0x80;
     pub const GENERIC_END: u32 = 0x280;
+    pub const POINT_COORD: u32 = 0x2e0;
     pub const INSTANCE_ID: u32 = 0x2f8;
     pub const VERTEX_ID: u32 = 0x2fc;
     pub const FRONT_FACING: u32 = 0x3fc;
@@ -2482,6 +2483,11 @@ impl<'a> Translator<'a> {
                 let v4f = self.t.v4f;
                 let var = self.builtin(BuiltIn::FragCoord, v4f, false);
                 self.component(var, Kind::Float, StorageClass::Input, (addr - attr::POSITION) / 4)
+            }
+            attr::POINT_COORD | 0x2e4 if self.opts.stage == Stage::Fragment => {
+                let v2f = self.t.v2f;
+                let var = self.builtin(BuiltIn::PointCoord, v2f, false);
+                self.component(var, Kind::Float, StorageClass::Input, (addr - attr::POINT_COORD) / 4)
             }
             attr::VERTEX_ID | attr::INSTANCE_ID if self.opts.stage == Stage::Vertex => {
                 let which = if addr == attr::VERTEX_ID { BuiltIn::VertexIndex } else { BuiltIn::InstanceIndex };

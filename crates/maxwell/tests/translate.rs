@@ -179,6 +179,16 @@ fn texture_and_constant_buffer() {
     validate(&shader.spirv);
 }
 
+#[test]
+fn point_sprite_coordinates() {
+    let code = program(fragment_header(1), &[ipa(0, 0x2e0, 0xff), ipa(1, 0x2e4, 0xff), EXIT]);
+    let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
+    assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
+    let text = disassemble(&shader.spirv);
+    assert!(text.contains("BuiltIn PointCoord"), "{text}");
+    validate(&shader.spirv);
+}
+
 fn tmml_2d_array(rd: u64, ra: u64, handle: u64) -> u64 {
     0xdf58_0000_0000_0000 | handle << 36 | 0b11 << 31 | 1 << 29 | 1 << 28 | PT | ra << 8 | rd
 }
