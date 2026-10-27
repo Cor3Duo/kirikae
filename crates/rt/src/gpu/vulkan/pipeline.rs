@@ -151,7 +151,6 @@ pub(super) struct PipelineCompiler {
     pub(super) pending: FastSet<PipelineKey>,
     pub(super) failed: HashMap<PipelineKey, String>,
     pub(super) workers: Vec<std::thread::JoinHandle<()>>,
-    /// Set by `stop`: workers leave the rest of the queue uncompiled instead of draining it.
     stopping: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -206,7 +205,6 @@ impl PipelineCompiler {
         out
     }
 
-    /// Waits only for the pipelines being compiled right now; what is still queued would be thrown away anyway.
     pub(super) fn stop(&mut self) -> Vec<Built> {
         self.stopping.store(true, std::sync::atomic::Ordering::Relaxed);
         self.queue = None;

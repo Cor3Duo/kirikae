@@ -251,7 +251,6 @@ impl ApplicationHandler<Shown> for App {
         match event {
             WindowEvent::CloseRequested => {
                 self.p.terminate(0);
-                // While the window still exists: the swapchain's surface must go before it does.
                 self.p.gpu.shutdown();
                 el.exit();
             }

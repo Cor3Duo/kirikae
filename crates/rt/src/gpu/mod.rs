@@ -338,10 +338,6 @@ impl Gpu {
         guard.0.as_mut().map(f)
     }
 
-    /// Destroys the Vulkan device while the driver can still clean up: `process::exit` skips destructors, and a
-    /// driver's worker threads crash during exit if the device is still alive (seen with NVIDIA). The renderer is
-    /// dropped under its lock, so a second caller (the window closing while the game exits) waits for the device to
-    /// be gone instead of exiting halfway through its destruction.
     pub fn shutdown(&self) {
         let mut guard = self.renderer.lock().unwrap();
         guard.1 = true;
