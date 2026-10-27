@@ -3,6 +3,8 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::Error;
 
 pub const CONTENT_PROGRAM: u8 = 0;
+pub const CONTENT_META: u8 = 1;
+pub const CONTENT_CONTROL: u8 = 2;
 pub const FS_ROMFS: u8 = 0;
 pub const FS_PFS0: u8 = 1;
 const MEDIA: u64 = 0x200;

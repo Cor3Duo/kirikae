@@ -31,14 +31,7 @@ pub fn run(entries: Vec<Entry>) {
 
 pub fn run_with_title(entries: Vec<Entry>, title_id: Option<u64>) {
     let entries: &'static [Entry] = Box::leak(entries.into_boxed_slice());
-    let exe = kirikae_loader::Executable {
-        modules: Vec::new(),
-        entry: entries[0].addr,
-        title_id,
-        main_stack_size: None,
-        system_resource_size: 0,
-        romfs: None,
-    };
+    let exe = kirikae_loader::Executable { entry: entries[0].addr, title_id, ..Default::default() };
     let result = run_executable(&exe, entries, RunOptions { capture_output: true }).expect("the fake guest runs");
     assert_eq!(result.exit_code, 0, "the guest entry did not halt cleanly");
 }

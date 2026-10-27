@@ -1,5 +1,7 @@
+pub mod cnmt;
 pub mod dynamic;
 pub mod lz4;
+pub mod nacp;
 pub mod nca;
 pub mod nro;
 pub mod nso;

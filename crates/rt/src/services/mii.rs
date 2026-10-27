@@ -94,14 +94,7 @@ mod tests {
     #[test]
     fn both_ports_open_the_database() {
         let entries: &'static [Entry] = Box::leak(vec![Entry { addr: 0x1000_0000, func: open_both }].into_boxed_slice());
-        let exe = kirikae_loader::Executable {
-            modules: Vec::new(),
-            entry: entries[0].addr,
-            title_id: None,
-            main_stack_size: None,
-            system_resource_size: 0,
-            romfs: None,
-        };
+        let exe = kirikae_loader::Executable { entry: entries[0].addr, ..Default::default() };
         let result = run_executable(&exe, entries, RunOptions { capture_output: true }).expect("the fake guest runs");
         assert_eq!(result.exit_code, 0);
         assert_eq!(*OPENED.lock().unwrap(), vec![("mii:u".to_string(), 1), ("mii:e".to_string(), 1)]);
