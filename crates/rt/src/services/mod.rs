@@ -17,6 +17,7 @@ pub mod irs;
 pub mod caps;
 pub mod apm;
 pub mod audio;
+pub mod btm;
 pub mod lm;
 pub mod mii;
 pub mod mm;
@@ -160,6 +161,7 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "caps:u" => Arc::new(caps::CapsU),
         "pdm:qry" => Arc::new(pdm::PdmQry),
         "pctl:s" => Arc::new(pctl::Pctl { name: "pctl:s" }),
+        "btm:u" => Arc::new(btm::BtmU),
         "pctl:r" => Arc::new(pctl::Pctl { name: "pctl:r" }),
         "pctl:a" => Arc::new(pctl::Pctl { name: "pctl:a" }),
         "fsp-srv" => Arc::new(fs::FsProxy),
