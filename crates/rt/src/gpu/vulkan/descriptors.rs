@@ -137,10 +137,11 @@ impl Renderer {
                         (_, true) => vk::ImageViewType::TYPE_2D_ARRAY,
                         _ => vk::ImageViewType::TYPE_2D,
                     };
-                    if t.dim == TexDim::D1 || t.dim == TexDim::D3 || t.shadow {
+                    if t.dim == TexDim::D3 || t.shadow {
                         return Err(format!("texture: {why}"));
                     }
-                    (self.placeholder(view_type)?, self.sampler(&tic::Sampler::default()))
+                    let view = if t.dim == TexDim::D1 { self.line_placeholder(t.array)? } else { self.placeholder(view_type)? };
+                    (view, self.sampler(&tic::Sampler::default()))
                 }
             };
             out.push(Descriptor::Image(t.binding, view));

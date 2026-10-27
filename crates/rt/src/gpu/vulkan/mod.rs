@@ -21,6 +21,7 @@ mod submit;
 mod textures;
 mod tiling;
 mod volumes;
+mod lines;
 
 pub use images::{Surface, color_surface};
 pub use present::Presented;
@@ -33,6 +34,7 @@ use present::Swapchain;
 use submit::{Batch, Garbage, IN_FLIGHT, RING_SIZE, Ring};
 use textures::{TexEntry, TexKey};
 use volumes::Volume;
+use lines::{Line, LineKey};
 
 pub struct Renderer {
     entry: ash::Entry,
@@ -113,6 +115,7 @@ pub struct Renderer {
     target_memo: [(TargetAsk, ImageKey); 4],
     generation: u64,
     volumes: HashMap<(u64, vk::Format), Volume>,
+    lines: HashMap<LineKey, Line>,
     retired: Vec<ImageKey>,
     pipeline_cache: vk::PipelineCache,
     compiler: Option<PipelineCompiler>,
@@ -208,6 +211,13 @@ impl Drop for Renderer {
                 }
                 d.destroy_image(v.image, None);
                 d.free_memory(v.memory, None);
+            }
+            for l in self.lines.values() {
+                for view in l.views.values() {
+                    d.destroy_image_view(*view, None);
+                }
+                d.destroy_image(l.image, None);
+                d.free_memory(l.memory, None);
             }
             if let Some((buffer, memory, ..)) = self.readback.take() {
                 d.destroy_buffer(buffer, None);
@@ -484,6 +494,7 @@ impl Renderer {
             target_memo: [((u64::MAX, vk::Format::UNDEFINED, 0, 0, u64::MAX), ImageKey { cpu: 0, format: vk::Format::UNDEFINED, width: 0, height: 0 }); 4],
             generation: 0,
             volumes: HashMap::default(),
+            lines: HashMap::default(),
             retired: Vec::new(),
             pipeline_cache,
             compiler,
