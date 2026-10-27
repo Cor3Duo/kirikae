@@ -69,7 +69,7 @@ mod tests {
                 all.push(reply.data.len() as u64);
                 all.push(reply.copy_handles.len() as u64 + reply.objects.len() as u64);
             }
-            harness::record("gatt", &all);
+            harness::record("bt/gatt", &all);
             c.halt();
         }
         harness::run(vec![Entry {
@@ -82,7 +82,7 @@ mod tests {
             expected.extend([DEVICE_ALREADY_DISCONNECTED as u64, 0, 0]);
         }
         assert_eq!(
-            harness::observed("gatt"),
+            harness::observed("bt/gatt"),
             expected,
             "GATT commands name a disconnected device and carry no output"
         );
@@ -115,7 +115,7 @@ mod tests {
             );
             let bytes = c.process().memory.read(addr, LE_EVENT_INFO_SIZE).unwrap();
             harness::record(
-                "event_info",
+                "bt/event_info",
                 &[
                     reply.result as u64,
                     u64::from(u32::from_le_bytes(reply.data[..4].try_into().unwrap())),
@@ -129,7 +129,7 @@ mod tests {
             func: probe,
         }]);
         assert_eq!(
-            harness::observed("event_info"),
+            harness::observed("bt/event_info"),
             vec![0, BLE_EVENT_NONE as u64, 1],
             "GetLeEventInfo returns BleEventType 0 and leaves no event in the buffer"
         );
@@ -145,7 +145,7 @@ mod tests {
                 _ => true,
             };
             harness::record(
-                "event",
+                "bt/event",
                 &[
                     reply.result as u64,
                     handle as u64,
@@ -159,7 +159,7 @@ mod tests {
             addr: harness::ENTRY,
             func: probe,
         }]);
-        let event = harness::observed("event");
+        let event = harness::observed("bt/event");
         assert_eq!(event[0], 0, "RegisterBleEvent succeeds");
         assert_ne!(event[1], 0, "it returns a handle");
         assert_eq!(
@@ -179,7 +179,7 @@ mod tests {
                     ..Default::default()
                 },
             );
-            harness::record("unknown", &[reply.result as u64, reply.data.len() as u64]);
+            harness::record("bt/unknown", &[reply.result as u64, reply.data.len() as u64]);
             c.halt();
         }
         harness::run(vec![Entry {
@@ -187,7 +187,7 @@ mod tests {
             func: probe,
         }]);
         assert_eq!(
-            harness::observed("unknown"),
+            harness::observed("bt/unknown"),
             vec![crate::services::result::CMIF_UNKNOWN_COMMAND as u64, 0]
         );
     }
