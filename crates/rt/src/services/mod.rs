@@ -21,6 +21,7 @@ pub mod btm;
 pub mod lm;
 pub mod mii;
 pub mod mm;
+pub mod ldn;
 pub mod nfp;
 pub mod nvdrv;
 pub mod ssl;
@@ -166,6 +167,7 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "pctl:a" => Arc::new(pctl::Pctl { name: "pctl:a" }),
         "fsp-srv" => Arc::new(fs::FsProxy),
         "hid" => Arc::new(hid::Hid),
+        "ldn:u" => Arc::new(ldn::Ldn),
         "hwopus" => Arc::new(hwopus::HwOpus),
         "acc:u0" => Arc::new(acc::Account { name: "acc:u0" }),
         "ssl" => Arc::new(ssl::Ssl::new("ssl")),
