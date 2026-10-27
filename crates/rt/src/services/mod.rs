@@ -17,6 +17,7 @@ pub mod lm;
 pub mod mii;
 pub mod mm;
 pub mod nfp;
+pub mod nifm;
 pub mod nvdrv;
 pub mod omm;
 pub mod pctl;
@@ -168,6 +169,7 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "mm:u" => Arc::new(mm::Mm),
         "mii:u" | "mii:e" => Arc::new(mii::Mii::new(name)),
         "nfp:user" => Arc::new(nfp::Nfp),
+        "nifm:u" | "nifm:s" | "nifm:a" => Arc::new(nifm::Nifm::new(name)),
         "vi:m" => Arc::new(vi::Vi { name: "vi:m" }),
         "vi:s" => Arc::new(vi::Vi { name: "vi:s" }),
         "vi:u" => Arc::new(vi::Vi { name: "vi:u" }),
