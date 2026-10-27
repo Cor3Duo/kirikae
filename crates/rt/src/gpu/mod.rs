@@ -338,6 +338,12 @@ impl Gpu {
         guard.0.as_mut().map(f)
     }
 
+    pub fn shutdown(&self) {
+        let mut guard = self.renderer.lock().unwrap();
+        guard.1 = true;
+        drop(guard.0.take());
+    }
+
     pub fn guest_memory_written(&self, cpu: u64, len: u64) {
         let mut written = self.written.lock().unwrap();
         if !written.contains(&(cpu, len)) {

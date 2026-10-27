@@ -584,6 +584,7 @@ pub fn run_executable(exe: &Executable, entries: &'static [Entry], opts: RunOpti
         }
     }
 
+    process.gpu.shutdown();
     let output = match &mut *process.sink.lock().unwrap() {
         Sink::Capture(buf) => std::mem::take(buf),
         Sink::Stdout => Vec::new(),
