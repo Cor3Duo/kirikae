@@ -11,6 +11,7 @@ pub(crate) mod harness;
 pub mod hid;
 pub mod hwopus;
 pub mod irs;
+pub mod caps;
 pub mod apm;
 pub mod audio;
 pub mod lm;
@@ -29,7 +30,6 @@ pub mod stub;
 pub mod time;
 pub mod vi;
 pub mod bt;
-pub mod caps;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Buf {
@@ -145,6 +145,8 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "csrng" => Arc::new(csrng::Csrng),
         "omm" => Arc::new(omm::Omm),
         "pctl" => Arc::new(pctl::Pctl { name: "pctl" }),
+        "caps:su" => Arc::new(caps::CapsSu),
+        "caps:u" => Arc::new(caps::CapsU),
         "pdm:qry" => Arc::new(pdm::PdmQry),
         "pctl:s" => Arc::new(pctl::Pctl { name: "pctl:s" }),
         "pctl:r" => Arc::new(pctl::Pctl { name: "pctl:r" }),
@@ -173,8 +175,6 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "vi:s" => Arc::new(vi::Vi { name: "vi:s" }),
         "vi:u" => Arc::new(vi::Vi { name: "vi:u" }),
         "bt" => Arc::new(bt::Bt),
-        "caps:su" => Arc::new(caps::CapsSu),
-        "caps:u" => Arc::new(caps::CapsU),
         _ => Arc::new(stub::Stub::new(name)),
     }
 }
