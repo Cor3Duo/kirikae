@@ -23,6 +23,7 @@ pub mod ssl;
 pub mod omm;
 pub mod pctl;
 pub mod pdm;
+pub mod ngc;
 pub mod pl;
 pub mod ro;
 pub mod set;
@@ -161,6 +162,7 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "time:u" => Arc::new(time::Time { name: "time:u" }),
         "time:a" => Arc::new(time::Time { name: "time:a" }),
         "time:s" => Arc::new(time::Time { name: "time:s" }),
+        "ngc:u" => Arc::new(ngc::Ngc),
         "nvdrv" => Arc::new(nvdrv::Nvdrv { name: "nvdrv" }),
         "nvdrv:a" => Arc::new(nvdrv::Nvdrv { name: "nvdrv:a" }),
         "nvdrv:s" => Arc::new(nvdrv::Nvdrv { name: "nvdrv:s" }),
