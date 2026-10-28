@@ -6,7 +6,7 @@ use crate::gpu::fxhash::FastMap as HashMap;
 use crate::gpu::threed::{CB_SLOTS, address, reg};
 use crate::gpu::{Gpu, formats, tic};
 use crate::mem::GuestMemory;
-use super::readback::read_surface;
+use super::readback::{bytes_per_pixel, read_surface};
 use super::submit::Garbage;
 use super::textures::{CROP, DERIVED, FEEDBACK, Source, read_texture};
 use super::{Renderer, find_memory};
@@ -498,6 +498,12 @@ impl Renderer {
             },
         };
         let view_format = match key.format {
+            _ if image.raw != 0 => {
+                if aspect_of(key.format) != vk::ImageAspectFlags::COLOR || bytes_per_pixel(key.format) != Some(image.raw as u32) {
+                    return Err(format!("raw {}-byte image access to {:?}", image.raw, key.format));
+                }
+                raw_format(image.raw)
+            }
             vk::Format::R8G8B8A8_SRGB => vk::Format::R8G8B8A8_UNORM,
             vk::Format::B8G8R8A8_SRGB => vk::Format::B8G8R8A8_UNORM,
             f => f,
@@ -516,6 +522,16 @@ impl Renderer {
 }
 
 pub(super) const IDENTITY: [vk::ComponentSwizzle; 4] = [vk::ComponentSwizzle::IDENTITY; 4];
+
+pub(super) fn raw_format(bytes: u8) -> vk::Format {
+    match bytes {
+        1 => vk::Format::R8_UINT,
+        2 => vk::Format::R16_UINT,
+        4 => vk::Format::R32_UINT,
+        8 => vk::Format::R32G32_UINT,
+        _ => vk::Format::R32G32B32A32_UINT,
+    }
+}
 
 pub(super) fn aspect_of(f: vk::Format) -> vk::ImageAspectFlags {
     match f {

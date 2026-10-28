@@ -6,7 +6,7 @@ use crate::gpu::threed::{CB_SLOTS, address, reg};
 use crate::gpu::tic::{Layout, TextureHeader};
 use crate::gpu::{Gpu, formats, tic};
 use crate::mem::GuestMemory;
-use super::images::{IDENTITY, ImageKey, aspect_of, same_class};
+use super::images::{IDENTITY, ImageKey, aspect_of, raw_format, same_class};
 use super::readback::bytes_per_pixel;
 use super::tiling::{deswizzle, layer_alignment, layer_size, level_offset};
 use super::{Renderer, hash64};
@@ -460,12 +460,21 @@ impl Renderer {
     }
 
     pub(super) fn placeholder(&mut self, view_type: vk::ImageViewType) -> Result<vk::ImageView, String> {
+        self.placeholder_as(view_type, vk::Format::R8G8B8A8_UNORM)
+    }
+
+    pub(super) fn storage_placeholder(&mut self, raw: u8) -> Result<vk::ImageView, String> {
+        let format = if raw == 4 { raw_format(raw) } else { vk::Format::R8G8B8A8_UNORM };
+        self.placeholder_as(vk::ImageViewType::TYPE_2D, format)
+    }
+
+    fn placeholder_as(&mut self, view_type: vk::ImageViewType, format: vk::Format) -> Result<vk::ImageView, String> {
         let key = ImageKey { cpu: u64::MAX - 1, format: vk::Format::R8G8B8A8_UNORM, width: 1, height: 1 };
         if !self.images.contains_key(&key) {
             self.create_image(key, 1, 6).map_err(|e| format!("image: {e:?}"))?;
             self.upload_layers(key, 1, &vec![(1, 1, vec![0; 4]); 6]);
         }
-        Ok(self.view_of(key, key.format, IDENTITY, view_type))
+        Ok(self.view_of(key, format, IDENTITY, view_type))
     }
 
     pub(super) fn note_placeholder(&mut self, why: &str) {
