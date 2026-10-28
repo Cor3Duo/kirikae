@@ -226,6 +226,7 @@ struct Translator<'a> {
     block_ids: HashMap<u32, u32>,
     dispatch_merge: Option<Word>,
     ended: bool,
+    storage_1d: bool,
     unsupported: Vec<&'static str>,
     shader: Shader,
     storage_images: bool,
@@ -331,6 +332,7 @@ impl<'a> Translator<'a> {
             block_ids: HashMap::new(),
             dispatch_merge: None,
             ended: false,
+            storage_1d: false,
             unsupported: Vec::new(),
             shader: Shader::default(),
         }
@@ -3202,9 +3204,10 @@ impl<'a> Translator<'a> {
         if !self.storage_images {
             self.storage_images = true;
             self.b.capability(Capability::StorageImageWriteWithoutFormat);
-            if dim == TexDim::D1 {
-                self.b.capability(Capability::Image1D);
-            }
+        }
+        if dim == TexDim::D1 && !self.storage_1d {
+            self.storage_1d = true;
+            self.b.capability(Capability::Image1D);
         }
         let image_ty = self.b.type_image(self.t.f32, d, 0, array as u32, 0, 2, ImageFormat::Unknown, None);
         if let Some(&(_, var)) = self.images.iter().find(|(u, _)| u.slot == slot && u.handle == handle && u.dim == dim && u.array == array) {
@@ -3801,7 +3804,7 @@ impl<'a> Translator<'a> {
             }
             t.r(r)
         };
-        let lod = match i.bits(55, 3) {
+        let lod = match i.bits(55, 2) {
             1 => Lod::Zero,
             2 => {
                 let v = take_b(self)?;
@@ -3811,11 +3814,7 @@ impl<'a> Translator<'a> {
                 let v = take_b(self)?;
                 Lod::Level(self.cast_f(v)?)
             }
-            0 => Lod::Implicit,
-            _ => {
-                self.unsupported.push("tex (lod mode)");
-                Lod::Implicit
-            }
+            _ => Lod::Implicit,
         };
         let offset = if i.bit(54) { Some(take_b(self)?) } else { None };
         let dref = if shadow { Some(take_b(self)?) } else { None };
