@@ -322,3 +322,17 @@ fn half_pair_operands() {
     assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
     validate(&shader.spirv);
 }
+
+#[test]
+fn a_128_bit_constant_load_fills_four_registers() {
+    let sized = |size: u64| ldc(4, 2, 0x10) & !(7 << 48) | size << 48;
+    let stores = |size: u64| {
+        let code = program(fragment_header(1), &[sized(size), EXIT]);
+        let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
+        assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
+        validate(&shader.spirv);
+        disassemble(&shader.spirv).matches("OpStore").count()
+    };
+    assert_eq!(stores(5), stores(4) + 1);
+    assert_eq!(stores(6), stores(4) + 3);
+}
