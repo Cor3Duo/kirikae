@@ -1249,14 +1249,20 @@ impl<'a> Translator<'a> {
             }
             "iadd" | "iadd32i" => {
                 let a = self.r(i.ra())?;
-                let (b, neg_a, neg_b, x, cc) = if i.name() == "iadd" {
-                    (self.src_b(i)?, i.bit(49), i.bit(48), i.bit(43), i.bit(47))
+                let (b, neg_a, neg_b, x, cc, sat) = if i.name() == "iadd" {
+                    (self.src_b(i)?, i.bit(49), i.bit(48), i.bit(43), i.bit(47), i.bit(50))
                 } else {
-                    (self.u(i.imm32()), i.bit(56), false, i.bit(53), i.bit(52))
+                    (self.u(i.imm32()), i.bit(56), false, i.bit(53), i.bit(52), i.bit(54))
                 };
-                let a = self.ineg(a, neg_a)?;
-                let b = self.ineg(b, neg_b)?;
-                let v = self.add_with_flags(a, b, x, cc)?;
+                let (a, b, carry_in) = if x {
+                    (self.inot(a, neg_a)?, self.inot(b, neg_b)?, Some(self.carry_flag()?))
+                } else if neg_a != neg_b {
+                    (self.inot(a, neg_a)?, self.inot(b, neg_b)?, Some(self.u(1)))
+                } else {
+                    (self.ineg(a, neg_a)?, self.ineg(b, neg_b)?, None)
+                };
+                let v = self.add_with_flags(a, b, carry_in, cc)?;
+                let v = if sat { self.saturate_add(a, b, v)? } else { v };
                 self.set(i.rd(), v)
             }
             "iadd3" => {
@@ -1278,7 +1284,8 @@ impl<'a> Translator<'a> {
                     2 => ab = self.b.shift_left_logical(u, None, ab, sixteen)?,
                     _ => {}
                 }
-                let v = self.add_with_flags(ab, c, i.bit(48), i.bit(47))?;
+                let carry_in = if i.bit(48) { Some(self.carry_flag()?) } else { None };
+                let v = self.add_with_flags(ab, c, carry_in, i.bit(47))?;
                 self.set(i.rd(), v)
             }
             "iscadd" => {
@@ -1663,31 +1670,53 @@ impl<'a> Translator<'a> {
         }
     }
 
-    fn add_with_flags(&mut self, a: Word, b: Word, x: bool, cc: bool) -> R<Word> {
+    fn add_with_flags(&mut self, a: Word, b: Word, carry_in: Option<Word>, cc: bool) -> R<Word> {
         let u = self.t.u32;
-        if !x && !cc {
+        if carry_in.is_none() && !cc {
             return Ok(self.b.i_add(u, None, a, b)?);
         }
         let mut v = self.b.i_add(u, None, a, b)?;
         let mut carry = self.b.u_less_than(self.t.bool, None, v, a)?;
-        if x {
-            let cin = self.cc_flag(2)?;
-            let cin = self.b2u(cin, 1, 0)?;
+        if let Some(cin) = carry_in {
             let v2 = self.b.i_add(u, None, v, cin)?;
             let c2 = self.b.u_less_than(self.t.bool, None, v2, v)?;
             carry = self.b.logical_or(self.t.bool, None, carry, c2)?;
             v = v2;
         }
         if cc {
-            let zero = self.u(0);
-            let c = carry;
-            let xa = self.b.bitwise_xor(u, None, a, v)?;
-            let xb = self.b.bitwise_xor(u, None, b, v)?;
-            let both = self.b.bitwise_and(u, None, xa, xb)?;
-            let o = self.b.s_less_than(self.t.bool, None, both, zero)?;
-            self.set_cc(v, Some(c), Some(o))?;
+            let o = self.signed_overflow(a, b, v)?;
+            self.set_cc(v, Some(carry), Some(o))?;
         }
         Ok(v)
+    }
+
+    fn carry_flag(&mut self) -> R<Word> {
+        let c = self.cc_flag(2)?;
+        self.b2u(c, 1, 0)
+    }
+
+    fn signed_overflow(&mut self, a: Word, b: Word, v: Word) -> R<Word> {
+        let u = self.t.u32;
+        let zero = self.u(0);
+        let xa = self.b.bitwise_xor(u, None, a, v)?;
+        let xb = self.b.bitwise_xor(u, None, b, v)?;
+        let both = self.b.bitwise_and(u, None, xa, xb)?;
+        Ok(self.b.s_less_than(self.t.bool, None, both, zero)?)
+    }
+
+    fn saturate_add(&mut self, a: Word, b: Word, v: Word) -> R<Word> {
+        let overflow = self.signed_overflow(a, b, v)?;
+        let zero = self.u(0);
+        let wrapped_negative = self.b.s_less_than(self.t.bool, None, v, zero)?;
+        let clamped = self.b2u(wrapped_negative, i32::MAX as u32, i32::MIN as u32)?;
+        Ok(self.b.select(self.t.u32, None, overflow, clamped, v)?)
+    }
+
+    fn inot(&mut self, v: Word, on: bool) -> R<Word> {
+        if !on {
+            return Ok(v);
+        }
+        Ok(self.b.not(self.t.u32, None, v)?)
     }
 
     fn ineg(&mut self, v: Word, neg: bool) -> R<Word> {
