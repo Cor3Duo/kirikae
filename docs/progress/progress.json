@@ -1,5 +1,5 @@
 {
- "generated": "2026-10-27",
+ "generated": "2026-10-28",
  "sections": [
   {
    "id": "services",
@@ -1673,6 +1673,116 @@
      ],
      "undocumented": [],
      "total": 15
+    },
+    {
+     "name": "bcat/IDeliveryCacheDirectoryService",
+     "family": "bcat",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      0,
+      1,
+      2
+     ],
+     "total": 0
+    },
+    {
+     "name": "bcat/IDeliveryCacheFileService",
+     "family": "bcat",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      0
+     ],
+     "total": 0
+    },
+    {
+     "name": "bcat/IDeliveryCacheStorageService",
+     "family": "bcat",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      0,
+      1,
+      10
+     ],
+     "total": 0
+    },
+    {
+     "name": "bcat:a",
+     "family": "bcat",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      0,
+      1,
+      2
+     ],
+     "total": 0
+    },
+    {
+     "name": "bcat:m",
+     "family": "bcat",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      0,
+      1,
+      2
+     ],
+     "total": 0
+    },
+    {
+     "name": "bcat:s",
+     "family": "bcat",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      0,
+      1,
+      2
+     ],
+     "total": 0
+    },
+    {
+     "name": "bcat:u",
+     "family": "bcat",
+     "official": "",
+     "url": "",
+     "referenced": false,
+     "implemented": [],
+     "constant": [],
+     "missing": [],
+     "undocumented": [
+      0,
+      1,
+      2
+     ],
+     "total": 0
     },
     {
      "name": "bt",
