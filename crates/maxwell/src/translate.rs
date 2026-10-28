@@ -2254,17 +2254,17 @@ impl<'a> Translator<'a> {
                     *used = u32::MAX;
                 }
                 match i.bits(48, 3) {
-                    5 => {
-                        let w0 = self.cbuf_at(slot, addr)?;
+                    size @ 4..=6 => {
                         let four = self.u(4);
-                        let a1 = self.b.i_add(self.t.u32, None, addr, four)?;
-                        let w1 = self.cbuf_at(slot, a1)?;
-                        self.set(i.rd(), w0)?;
-                        self.set(i.rd().wrapping_add(1), w1)
-                    }
-                    4 => {
-                        let w = self.cbuf_at(slot, addr)?;
-                        self.set(i.rd(), w)
+                        let mut at = addr;
+                        for k in 0..1u8 << (size - 4) {
+                            if k > 0 {
+                                at = self.b.i_add(self.t.u32, None, at, four)?;
+                            }
+                            let w = self.cbuf_at(slot, at)?;
+                            self.set(i.rd().wrapping_add(k), w)?;
+                        }
+                        Ok(())
                     }
                     size => {
                         let three = self.u(3);
