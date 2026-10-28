@@ -322,6 +322,12 @@ impl Gpu {
     pub(super) fn report(&self, mem: &GuestMemory, regs: &[u32]) {
         let addr = address(regs, reg::REPORT_SEMAPHORE);
         let (payload, control) = (regs[reg::REPORT_SEMAPHORE + 2], regs[reg::REPORT_SEMAPHORE + 3]);
+        if crate::nvn::shadow::ON.load(Ordering::Relaxed) {
+            crate::nvn::shadow::cp_report(addr, payload, control);
+        }
+        if crate::nvn::exec::CHECK.load(Ordering::Relaxed) {
+            crate::nvn::exec::cp_report(addr, payload, control);
+        }
         let value = match control & 3 {
             0 => payload as u64,
             2 => match control >> 23 & 0x1f {

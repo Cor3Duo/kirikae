@@ -95,7 +95,30 @@ pub fn cp_draw(regs: &[u32], cbs: &Bindings, draw: &crate::gpu::threed::Draw) {
     }
 }
 
+struct ReportCheck {
+    expected: std::collections::VecDeque<(u64, u32, u32)>,
+    checked: u64,
+    differ: u64,
+}
+
+static REPORTS: Mutex<ReportCheck> = Mutex::new(ReportCheck { expected: std::collections::VecDeque::new(), checked: 0, differ: 0 });
+
+pub fn expect_report(at: u64, payload: u32, control: u32) {
+    REPORTS.lock().unwrap().expected.push_back((at, payload, control));
+}
+
+pub fn cp_report(at: u64, payload: u32, control: u32) {
+    let mut r = REPORTS.lock().unwrap();
+    if let Some(e) = r.expected.pop_front() {
+        r.checked += 1;
+        if e != (at, payload, control) {
+            r.differ += 1;
+        }
+    }
+}
+
 pub fn segment_done() {
+    REPORTS.lock().unwrap().expected.clear();
     let mut g = DRAWS.lock().unwrap();
     if let Some(c) = g.as_mut() {
         c.left += c.expected.len() as u64;
@@ -135,6 +158,7 @@ pub enum Step {
     Write { at: u64, words: Vec<u32> },
     Draw(crate::gpu::threed::Draw),
     Clear(u32),
+    Report { at: u64, payload: u32, control: u32 },
 }
 
 #[derive(Default)]
@@ -284,6 +308,11 @@ pub fn report() {
             b.join("; ")
         );
     }
+    let rp = REPORTS.lock().unwrap();
+    if rp.checked > 0 {
+        eprintln!("kirikae:         nvn exec reports: {} checked, {} differ", rp.checked, rp.differ);
+    }
+    drop(rp);
     let w = *WRITES.lock().unwrap();
     eprintln!("kirikae:         nvn exec writes: {} segments, {} words, {} differ from the command processor", w.0, w.1, w.2);
     let r = REASONS.lock().unwrap();

@@ -98,6 +98,8 @@ struct Model {
     stage_constants: HashMap<u64, u64>,
     predicted: Option<Cached>,
     support: (Option<u64>, [Option<u64>; 5]),
+    report_rules: HashMap<u64, (u64, u32, u32)>,
+    reports_pending: VecDeque<(u64, u64)>,
     unsupported: std::collections::HashSet<u64>,
     unsupported_calls: HashMap<&'static str, u64>,
     stats: Stats,
@@ -339,6 +341,7 @@ pub fn cp_entry(va: u64, words: u64) -> Option<Plan> {
 pub fn cp_entry_done(plan: Plan, draws: u64, clears: u64) {
     let uploads = std::mem::take(&mut *UPLOADS.lock().unwrap());
     with(|m| {
+        m.reports_pending.clear();
         if super::exec::ON.load(Ordering::Relaxed) {
             m.segment_end();
         }
@@ -503,6 +506,8 @@ const STORAGE_BUFFERS: u64 = 0x110;
 const MAX_UNIFORM_UPDATE: u64 = 0x10000;
 
 const PROGRAM_HEADER: u64 = 0x30;
+
+const COMPUTE_STAGE: u8 = 5;
 
 const CONTROL_CONSTANTS: u64 = 0x700;
 
@@ -1141,6 +1146,14 @@ pub fn cp_dispatch(grid: [u32; 3]) {
     with(|m| m.decoded(Work::Dispatch(grid), 0));
 }
 
+pub fn cp_report(address: u64, payload: u32, control: u32) {
+    with(|m| {
+        if let Some((counter, at)) = m.reports_pending.pop_front() {
+            m.report_rules.entry(counter).or_insert((address.wrapping_sub(at), payload, control));
+        }
+    });
+}
+
 pub fn report() {
     if !ON.load(Ordering::Relaxed) {
         return;
@@ -1233,9 +1246,9 @@ pub fn exec_steps(plan: &Plan, regs: &[u32], cbs: &Bindings, read: &dyn Fn(u64, 
         let mut why = match () {
             _ if slot0.is_none() => Some("driver constants unknown".to_string()),
             _ if cmds.iter().any(|c| matches!(c, Cmd::Dispatch(_))) => Some("dispatch".to_string()),
-            _ if cmds.iter().any(|c| matches!(c, Cmd::Report { .. })) => Some("report".to_string()),
             _ => None,
         };
+        let cmds_reports: VecDeque<(u64, u64)> = cmds.iter().filter_map(|c| if let Cmd::Report { counter, address } = c { Some((*counter, *address)) } else { None }).collect();
         let mut steps = Vec::new();
         let mut works = Vec::new();
         let mut last = None;
@@ -1323,15 +1336,20 @@ pub fn exec_steps(plan: &Plan, regs: &[u32], cbs: &Bindings, read: &dyn Fn(u64, 
                 }
                 Cmd::Texture { stage, index, handle } => match stage_group(*stage).and_then(|g| slot2[g as usize]) {
                     Some(s2) => steps.push(Step::Write { at: s2 + TEXTURE_HANDLES + 8 * *index as u64, words: vec![*handle as u32] }),
-                    None => why = Some("texture handles unknown".to_string()),
+                    None => why = Some(format!("texture handles unknown for stage {stage}")),
                 },
                 Cmd::UniformUpdate { address, data } => {
                     steps.push(Step::Write { at: *address, words: data.as_chunks::<4>().0.iter().map(|w| u32::from_le_bytes(*w)).collect() });
                 }
+                Cmd::Storage { stage: COMPUTE_STAGE, .. } => why = Some("compute storage buffer".to_string()),
                 Cmd::Storage { index, address, size, .. } => {
                     steps.push(Step::Write { at: base + STORAGE_BUFFERS + 0x10 * *index as u64, words: vec![*address as u32, (*address >> 32) as u32, *size as u32] });
                 }
                 Cmd::Multisample(_) => steps.push(Step::Write { at: base + 0x620, words: vec![0; 8] }),
+                Cmd::Report { counter, address } => match m.report_rules.get(counter) {
+                    Some(&(offset, payload, control)) => steps.push(Step::Report { at: address.wrapping_add(offset), payload, control }),
+                    None => why = Some(format!("report counter {counter:#x} not learned")),
+                },
                 _ => {}
             }
         }
@@ -1353,8 +1371,11 @@ pub fn exec_steps(plan: &Plan, regs: &[u32], cbs: &Bindings, read: &dyn Fn(u64, 
         }
         if why.is_none() {
             m.stats.executed += works.len() as u64;
-        } else if super::exec::ON.load(Ordering::Relaxed) && why.as_deref().is_some_and(|w| w.contains(": ")) {
-            m.expected.extend(works);
+        } else {
+            if super::exec::ON.load(Ordering::Relaxed) && why.as_deref().is_some_and(|w| w.contains(": ")) {
+                m.expected.extend(works);
+            }
+            m.reports_pending = cmds_reports;
         }
         super::exec::counted(why.as_deref());
         why.is_none().then_some(steps)

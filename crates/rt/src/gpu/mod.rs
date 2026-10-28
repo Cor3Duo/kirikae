@@ -448,6 +448,7 @@ impl Gpu {
                 }
                 Step::Bind { group, slot, binding } => cbs[group][slot] = binding,
                 Step::Draw(d) => crate::nvn::exec::expect_draw(regs.clone(), cbs, d),
+                Step::Report { at, payload, control } => crate::nvn::exec::expect_report(at, payload, control),
                 Step::Clear(v) => crate::nvn::exec::expect_draw(regs.clone(), [[None; threed::CB_SLOTS]; 5], threed::Draw { topology: crate::nvn::exec::CLEAR, first: v, count: 0, index_size: None, instance: 0 }),
                 Step::Write { at, words } => {
                     for (i, w) in words.into_iter().enumerate() {
@@ -484,6 +485,12 @@ impl Gpu {
                     self.draw(mem, &eng.regs[&CLASS_3D], &cbs, d);
                 }
                 Step::Clear(v) => self.clear(mem, &eng.regs[&CLASS_3D], v),
+                Step::Report { at, payload, control } => {
+                    let regs = eng.regs.get_mut(&CLASS_3D).expect("3D registers");
+                    let r = threed::reg::REPORT_SEMAPHORE;
+                    regs[r..r + 4].copy_from_slice(&[(at >> 32) as u32 & 0xff, at as u32, payload, control]);
+                    self.report(mem, &eng.regs[&CLASS_3D]);
+                }
             }
         }
         true
