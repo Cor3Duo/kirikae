@@ -3401,7 +3401,7 @@ impl<'a> Translator<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn gather(&mut self, handle: u32, dim: TexDim, array: bool, coords: Vec<Word>, layer: Option<Word>, component: u32, dref: Option<Word>, offset: Option<Word>) -> R<[Word; 4]> {
+    fn gather(&mut self, handle: u32, dim: TexDim, array: bool, coords: Vec<Word>, layer: Option<Word>, component: u32, dref: Option<Word>, offsets: &[Word]) -> R<[Word; 4]> {
         let (image_var, sampler_var, image_ty, sampled_ty) = self.texture(None, handle, dim, array, dref.is_some());
         let img = self.b.load(image_ty, None, image_var, None, [])?;
         let sampler_ty = self.b.type_sampler();
@@ -3420,50 +3420,57 @@ impl<'a> Translator<'a> {
             let vty = self.b.type_vector(self.t.f32, comps.len() as u32);
             self.b.composite_construct(vty, None, comps)?
         };
-        let (ops, extra) = match offset {
-            None => (None, vec![]),
-            Some(packed) => {
-                let pi = self.cast_i(packed)?;
-                let mut c = Vec::new();
-                for k in 0..2 {
-                    let off = self.u(8 * k);
-                    let six = self.u(6);
-                    c.push(self.b.bit_field_s_extract(self.t.i32, None, pi, off, six)?);
-                }
-                let ty = self.b.type_vector(self.t.i32, 2);
-                let v = self.b.composite_construct(ty, None, c)?;
-                if !self.gather_extended {
-                    self.gather_extended = true;
-                    self.b.capability(Capability::ImageGatherExtended);
-                }
-                (Some(ImageOperands::OFFSET), vec![Operand::IdRef(v)])
-            }
+        let texel_offsets = match offsets {
+            [] => vec![None],
+            &[packed] => vec![Some(self.gather_offset(packed, 0)?)],
+            _ => (0..4).map(|k| self.gather_offset(offsets[k / 2], 16 * (k as u32 % 2)).map(Some)).collect::<R<_>>()?,
         };
-        let v = match dref {
-            Some(d) => {
-                let df = self.cast_f(d)?;
-                self.b.image_dref_gather(self.t.v4f, None, image, coord, df, ops, extra)?
-            }
-            None => {
-                let c = self.u(component);
-                self.b.image_gather(self.t.v4f, None, image, coord, c, ops, extra)?
-            }
-        };
+        let mut gathered = Vec::new();
+        for offset in texel_offsets {
+            let (ops, extra) = match offset {
+                None => (None, vec![]),
+                Some(v) => (Some(ImageOperands::OFFSET), vec![Operand::IdRef(v)]),
+            };
+            gathered.push(match dref {
+                Some(d) => {
+                    let df = self.cast_f(d)?;
+                    self.b.image_dref_gather(self.t.v4f, None, image, coord, df, ops, extra)?
+                }
+                None => {
+                    let c = self.u(component);
+                    self.b.image_gather(self.t.v4f, None, image, coord, c, ops, extra)?
+                }
+            });
+        }
         let mut out = [0; 4];
         for (c, o) in out.iter_mut().enumerate() {
+            let v = gathered[c.min(gathered.len() - 1)];
             let f = self.b.composite_extract(self.t.f32, None, v, [c as u32])?;
             *o = self.cast_u(f)?;
         }
         Ok(out)
     }
 
+    fn gather_offset(&mut self, packed: Word, shift: u32) -> R<Word> {
+        let pi = self.cast_i(packed)?;
+        let mut c = Vec::new();
+        for k in 0..2 {
+            let off = self.u(shift + 8 * k);
+            let six = self.u(6);
+            c.push(self.b.bit_field_s_extract(self.t.i32, None, pi, off, six)?);
+        }
+        let ty = self.b.type_vector(self.t.i32, 2);
+        let v = self.b.composite_construct(ty, None, c)?;
+        if !self.gather_extended {
+            self.gather_extended = true;
+            self.b.capability(Capability::ImageGatherExtended);
+        }
+        Ok(v)
+    }
+
     fn tld4(&mut self, i: &Insn) -> R {
         if i.op.value != 0xc838000000000000 {
             self.unsupported.push("tld4 (bindless)");
-            return Ok(());
-        }
-        if i.bits(54, 2) == 2 {
-            self.unsupported.push("tld4 (per-texel offsets)");
             return Ok(());
         }
         let handle = i.bits(36, 13) as u32;
@@ -3496,9 +3503,12 @@ impl<'a> Translator<'a> {
             }
             t.r(r)
         };
-        let offset = if i.bits(54, 2) == 1 { Some(take_b(self)?) } else { None };
+        let mut offsets = Vec::new();
+        for _ in 0..i.bits(54, 2).min(2) {
+            offsets.push(take_b(self)?);
+        }
         let dref = if i.bit(50) { Some(take_b(self)?) } else { None };
-        let result = self.gather(handle, dim, array, coords, layer, i.bits(56, 2) as u32, dref, offset)?;
+        let result = self.gather(handle, dim, array, coords, layer, i.bits(56, 2) as u32, dref, &offsets)?;
         let mut reg = i.rd();
         for (c, &value) in result.iter().enumerate() {
             if i.bit(31 + c as u32) && reg != RZ {
@@ -3523,7 +3533,7 @@ impl<'a> Translator<'a> {
             let dref = if dc { Some(self.r(if aoffi { next(rb) } else { rb })?) } else { None };
             (y, offset, dref)
         };
-        let result = self.gather(handle, TexDim::D2, false, vec![x, y], None, i.bits(52, 2) as u32, dref, offset)?;
+        let result = self.gather(handle, TexDim::D2, false, vec![x, y], None, i.bits(52, 2) as u32, dref, offset.as_slice())?;
         let (rd, rd2) = (i.rd(), i.rd2());
         if i.bit(55) {
             for (pair, reg) in result.chunks(2).zip([rd, rd2]) {
