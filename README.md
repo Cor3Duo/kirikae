@@ -239,7 +239,7 @@ model fully understands straight from it and leaves only the rest to the command
 | `KIRIKAE_NVN=exec` / `check` | runs the command list segments the model supports on the host instead of the command processor (falls back per segment) / runs everything on the command processor but checks every draw, clear, register and buffer write the host would have produced |
 | `KIRIKAE_NO_CHECKED=1` | re-checks every constant buffer and vertex stream on each draw instead of reusing checks within a batch |
 | `KIRIKAE_NO_BUFFER_CACHE=1` | copies vertex, index and constant buffers on every draw, without the GPU-side cache |
-| `KIRIKAE_SAVES=<folder>` | save folder; each game uses `<folder>\<title id>` (default `%APPDATA%\kirikae\saves`) |
+| `KIRIKAE_SAVES=<folder>` | save folder; each game uses `<folder>\<title id>` (default `%APPDATA%\kirikae\saves`, or `$XDG_DATA_HOME/kirikae/saves` or `~/.local/share/kirikae/saves` on Linux) |
 | `KIRIKAE_SHARED_FONT=<file.ttf>` | font used instead of the system fonts |
 | `KIRIKAE_MUTE=1` | does not open the audio device (audio is still mixed, so the game runs normally) |
 | `KIRIKAE_AUDIO_DUMP=<file.wav>` | writes everything the audio renderer mixes to a 16-bit stereo WAV |

@@ -27,11 +27,13 @@ fn data_root() -> PathBuf {
     if let Some(dir) = std::env::var_os("KIRIKAE_SAVES") {
         return PathBuf::from(dir);
     }
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .unwrap_or_else(|| PathBuf::from("."));
+    let base = data_dir(std::env::var_os("APPDATA"), std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME")).unwrap_or_else(|| PathBuf::from("."));
     base.join("kirikae").join("saves")
+}
+
+fn data_dir(appdata: Option<std::ffi::OsString>, xdg: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let set = |v: Option<std::ffi::OsString>| v.filter(|v| !v.is_empty()).map(PathBuf::from);
+    set(appdata).or_else(|| set(xdg)).or_else(|| set(home).map(|h| h.join(".local/share")))
 }
 
 pub fn saves_root(title: u64) -> PathBuf {
@@ -501,6 +503,15 @@ impl Service for HostDir {
 mod tests {
     use super::*;
     use kirikae_loader::romfs;
+
+    #[test]
+    fn saves_follow_the_platform_data_directory() {
+        let os = |s: &str| Some(std::ffi::OsString::from(s));
+        assert_eq!(data_dir(os("C:\\Roaming"), os("/xdg"), os("/home/u")), Some(PathBuf::from("C:\\Roaming")));
+        assert_eq!(data_dir(None, os("/xdg"), os("/home/u")), Some(PathBuf::from("/xdg")));
+        assert_eq!(data_dir(None, os(""), os("/home/u")), Some(Path::new("/home/u").join(".local/share")));
+        assert_eq!(data_dir(None, None, None), None);
+    }
 
     #[test]
     fn only_fat_bis_partitions_open() {
