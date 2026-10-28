@@ -251,7 +251,7 @@ model fully understands straight from it and leaves only the rest to the command
 | `KIRIKAE_NO_VULKAN=1` | no rendering (CPU presentation of the window buffers only) |
 | `KIRIKAE_NPAD=handheld` | connects the handheld controller instead of a Pro Controller as player 1 |
 | `KIRIKAE_INPUT=<script>` | presses buttons on a schedule, for windowless tests: `40:A,45-47:LUP+B` (seconds since `hid` starts; buttons `A B X Y L R ZL ZR PLUS MINUS UP DOWN LEFT RIGHT LSTICK RSTICK`, stick directions `LUP`, `RLEFT`, ...) |
-| `KIRIKAE_PIPELINE_CACHE=<file>` | where to keep the pipeline cache (empty: none; default under `%LOCALAPPDATA%\kirikae`) |
+| `KIRIKAE_PIPELINE_CACHE=<file>` | where to keep the pipeline cache (empty: none; default under `%LOCALAPPDATA%\kirikae`, or `$XDG_CACHE_HOME/kirikae` or `~/.cache/kirikae` on Linux) |
 
 </details>
 
