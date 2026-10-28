@@ -105,23 +105,73 @@ mod sys {
 
 #[cfg(unix)]
 mod sys {
-    extern "C" fn handler(_sig: libc::c_int, info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
+    use std::sync::OnceLock;
+
+    const SIGNALS: [libc::c_int; 2] = [libc::SIGSEGV, libc::SIGBUS];
+    static PREVIOUS: OnceLock<[libc::sigaction; 2]> = OnceLock::new();
+
+    extern "C" fn handler(sig: libc::c_int, info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
         // SAFETY: the kernel passes a valid siginfo for SA_SIGINFO handlers.
         let addr = unsafe { (*info).si_addr() } as usize;
         super::report(addr);
+        let previous = SIGNALS.iter().position(|&s| s == sig).and_then(|k| PREVIOUS.get().map(|p| p[k]));
         unsafe {
-            libc::signal(libc::SIGSEGV, libc::SIG_DFL);
-            libc::signal(libc::SIGBUS, libc::SIG_DFL);
+            match previous {
+                Some(old) => libc::sigaction(sig, &old, std::ptr::null_mut()),
+                None => libc::sigaction(sig, &default_action(), std::ptr::null_mut()),
+            };
         }
     }
 
+    fn default_action() -> libc::sigaction {
+        // SAFETY: an all-zero sigaction is SIG_DFL with an empty mask and no flags.
+        let mut sa: libc::sigaction = unsafe { std::mem::zeroed() };
+        sa.sa_sigaction = libc::SIG_DFL;
+        sa
+    }
+
     pub fn install() {
+        let mut previous = [default_action(); 2];
         unsafe {
-            let mut sa: libc::sigaction = std::mem::zeroed();
-            sa.sa_sigaction = handler as *const () as usize;
-            sa.sa_flags = libc::SA_SIGINFO;
-            libc::sigaction(libc::SIGSEGV, &sa, std::ptr::null_mut());
-            libc::sigaction(libc::SIGBUS, &sa, std::ptr::null_mut());
+            for (sig, old) in SIGNALS.iter().zip(&mut previous) {
+                libc::sigaction(*sig, std::ptr::null(), old);
+            }
+        }
+        let _ = PREVIOUS.set(previous);
+        let mut sa = default_action();
+        sa.sa_sigaction = handler as *const () as usize;
+        sa.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
+        unsafe {
+            for sig in SIGNALS {
+                libc::sigaction(sig, &sa, std::ptr::null_mut());
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[allow(unconditional_recursion)]
+        fn overflow(n: u64) -> u64 {
+            let frame = std::hint::black_box([n; 64]);
+            overflow(frame[1] + 1) + frame[0]
+        }
+
+        #[test]
+        fn a_host_stack_overflow_is_still_reported() {
+            if std::env::var_os("KIRIKAE_FAULT_CHILD").is_some() {
+                super::install();
+                overflow(0);
+                return;
+            }
+            let exe = std::env::current_exe().unwrap();
+            let out = std::process::Command::new(exe)
+                .args(["--exact", "fault::sys::tests::a_host_stack_overflow_is_still_reported", "--nocapture", "--test-threads=1"])
+                .env("KIRIKAE_FAULT_CHILD", "1")
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(!out.status.success());
+            assert!(stderr.contains("has overflowed its stack"), "{stderr}");
         }
     }
 }
