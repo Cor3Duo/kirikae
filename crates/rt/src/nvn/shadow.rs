@@ -1334,6 +1334,7 @@ pub fn exec_steps(plan: &Plan, regs: &[u32], cbs: &Bindings, read: &dyn Fn(u64, 
                         steps.push(Step::Clear(cl.what | layer << 10));
                     }
                 }
+                Cmd::Texture { stage: COMPUTE_STAGE, .. } => {}
                 Cmd::Texture { stage, index, handle } => match stage_group(*stage).and_then(|g| slot2[g as usize]) {
                     Some(s2) => steps.push(Step::Write { at: s2 + TEXTURE_HANDLES + 8 * *index as u64, words: vec![*handle as u32] }),
                     None => why = Some(format!("texture handles unknown for stage {stage}")),
