@@ -17,6 +17,7 @@ pub mod irs;
 pub mod caps;
 pub mod apm;
 pub mod audio;
+pub mod bcat;
 pub mod btm;
 pub mod lm;
 pub mod mii;
@@ -184,6 +185,7 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "nvdrv:t" => Arc::new(nvdrv::Nvdrv { name: "nvdrv:t" }),
         "audren:u" => Arc::new(audio::AudioRendererManager),
         "audout:u" => Arc::new(audio::AudioOutManager),
+        "bcat:u" | "bcat:s" | "bcat:m" | "bcat:a" => Arc::new(bcat::Bcat::new(name)),
         "nfc:user" => Arc::new(nfc::Nfc::user()),
         "nfc:sys" => Arc::new(nfc::Nfc::system()),
         "nfc:mf:u" => Arc::new(nfc::Nfc::mifare()),
