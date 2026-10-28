@@ -1963,7 +1963,7 @@ impl<'a> Translator<'a> {
         let src = match i.bits(10, 2) {
             1 => {
                 let raw = self.src_b(i)?;
-                self.unpack_half(raw, false)?
+                self.unpack_half(raw, i.bit(41))?
             }
             2 => b,
             _ => {
@@ -2043,18 +2043,30 @@ impl<'a> Translator<'a> {
             v
         };
         let v = self.ineg(v, i.bit(45))?;
-        let v = match i.bits(8, 2) {
-            0 => {
-                let m = self.u(0xff);
-                self.b.bitwise_and(self.t.u32, None, v, m)?
-            }
-            1 => {
-                let m = self.u(0xffff);
-                self.b.bitwise_and(self.t.u32, None, v, m)?
-            }
-            _ => v,
+        let width = match i.bits(8, 2) {
+            0 => 8,
+            1 => 16,
+            _ => 32,
         };
+        let v = if i.bit(50) { self.saturate_int(v, i.bit(13), i.bit(12), width)? } else { v };
+        let v = self.int_source(v, i.bits(8, 2), i.bit(12), 0)?;
         self.set(i.rd(), v)
+    }
+
+    fn saturate_int(&mut self, v: Word, src_signed: bool, dst_signed: bool, width: u32) -> R<Word> {
+        let max = if dst_signed { (1u32 << (width - 1)) - 1 } else { u32::MAX >> (32 - width) };
+        let hi = self.u(max);
+        if !src_signed {
+            return self.ext(self.t.u32, glsl::UMIN, &[v, hi]);
+        }
+        let lo = self.u(if dst_signed { (-1i32 << (width - 1)) as u32 } else { 0 });
+        let (vi, lo) = (self.cast_i(v)?, self.cast_i(lo)?);
+        let mut r = self.ext(self.t.i32, glsl::SMAX, &[vi, lo])?;
+        if dst_signed || width < 32 {
+            let hi = self.cast_i(hi)?;
+            r = self.ext(self.t.i32, glsl::SMIN, &[r, hi])?;
+        }
+        self.cast_u(r)
     }
 
     fn pack_half(&mut self, f: Word) -> R<Word> {
