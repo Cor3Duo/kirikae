@@ -464,8 +464,16 @@ impl Renderer {
     }
 
     pub(super) fn storage_placeholder(&mut self, raw: u8) -> Result<vk::ImageView, String> {
-        let format = if raw == 4 { raw_format(raw) } else { vk::Format::R8G8B8A8_UNORM };
-        self.placeholder_as(vk::ImageViewType::TYPE_2D, format)
+        if raw == 0 {
+            return self.placeholder_as(vk::ImageViewType::TYPE_2D, vk::Format::R8G8B8A8_UNORM);
+        }
+        let format = raw_format(raw);
+        let key = ImageKey { cpu: u64::MAX - 1, format, width: 1, height: 1 };
+        if !self.images.contains_key(&key) {
+            self.create_image(key, 1, 1).map_err(|e| format!("image: {e:?}"))?;
+            self.upload_layers(key, 1, &[(1, 1, vec![0; raw as usize])]);
+        }
+        Ok(self.view_of(key, format, IDENTITY, vk::ImageViewType::TYPE_2D))
     }
 
     fn placeholder_as(&mut self, view_type: vk::ImageViewType, format: vk::Format) -> Result<vk::ImageView, String> {
