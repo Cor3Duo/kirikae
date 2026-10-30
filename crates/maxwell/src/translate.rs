@@ -1217,6 +1217,7 @@ impl<'a> Translator<'a> {
             "vote" => self.vote(i),
             "shfl" => self.shfl(i),
             "red" | "atom" => self.atomic(pc, i),
+            "atoms" => self.atoms(i),
             "isetp" | "iset" => self.icompare(i),
             "psetp" => {
                 let (a, na) = i.pred(12, 15);
@@ -2393,9 +2394,13 @@ impl<'a> Translator<'a> {
         let addr = self.b.i_add(self.t.u32, None, base, off)?;
         let two = self.u(2);
         let w = self.b.shift_right_logical(self.t.u32, None, addr, two)?;
+        Ok(Some(self.shared_word(var, elem, w)?))
+    }
+
+    fn shared_word(&mut self, var: Word, elem: Word, w: Word) -> R<Word> {
         let max = self.u(self.opts.shared_memory.div_ceil(4).clamp(1, 0x4000) - 1);
         let w = self.ext(self.t.u32, glsl::UMIN, &[w, max])?;
-        Ok(Some(self.b.access_chain(elem, None, var, [w])?))
+        Ok(self.b.access_chain(elem, None, var, [w])?)
     }
 
     fn local_address(&mut self, i: &Insn, extra: u32) -> R<Word> {
@@ -3014,10 +3019,22 @@ impl<'a> Translator<'a> {
         let zero = self.u(0);
         let ptr_ty = self.b.type_pointer(None, StorageClass::StorageBuffer, u);
         let ptr = self.b.access_chain(ptr_ty, None, var, [zero, word])?;
-        let scope = self.u(1);
+        let device = self.u(1);
+        let Some(old) = self.atomic_op(op, size == 1, ptr, device, data)? else {
+            self.unsupported.push("red/atom (inc/dec)");
+            return Ok(());
+        };
+        self.storage_written.insert(slot);
+        if i.name() == "atom" {
+            self.set(i.rd(), old)?;
+        }
+        Ok(())
+    }
+
+    fn atomic_op(&mut self, op: u64, signed: bool, ptr: Word, scope: Word, data: Word) -> R<Option<Word>> {
+        let u = self.t.u32;
         let semantics = self.u(0);
-        let signed = size == 1;
-        let old = match op {
+        Ok(Some(match op {
             0 => self.b.atomic_i_add(u, None, ptr, scope, semantics, data)?,
             1 if signed => self.b.atomic_s_min(u, None, ptr, scope, semantics, data)?,
             1 => self.b.atomic_u_min(u, None, ptr, scope, semantics, data)?,
@@ -3027,16 +3044,38 @@ impl<'a> Translator<'a> {
             6 => self.b.atomic_or(u, None, ptr, scope, semantics, data)?,
             7 => self.b.atomic_xor(u, None, ptr, scope, semantics, data)?,
             8 => self.b.atomic_exchange(u, None, ptr, scope, semantics, data)?,
-            _ => {
-                self.unsupported.push("red/atom (inc/dec)");
-                return Ok(());
-            }
-        };
-        self.storage_written.insert(slot);
-        if i.name() == "atom" {
-            self.set(i.rd(), old)?;
+            _ => return Ok(None),
+        }))
+    }
+
+    fn atoms(&mut self, i: &Insn) -> R {
+        if i.op.value == 0xee00000000000000 {
+            self.unsupported.push("atoms (cas)");
+            return Ok(());
         }
-        Ok(())
+        let size = i.bits(28, 2);
+        if size > 1 {
+            self.unsupported.push("atoms (64-bit)");
+            return Ok(());
+        }
+        let Some((var, elem)) = self.shared else {
+            self.unsupported.push("atoms (no shared memory)");
+            return Ok(());
+        };
+        let u = self.t.u32;
+        let a = self.r(i.ra())?;
+        let two = self.u(2);
+        let w = self.b.shift_right_logical(u, None, a, two)?;
+        let imm = self.u((((i.bits(30, 22) as u32) << 10) as i32 >> 10) as u32);
+        let w = self.b.i_add(u, None, w, imm)?;
+        let ptr = self.shared_word(var, elem, w)?;
+        let data = self.r(i.rb())?;
+        let workgroup = self.u(2);
+        let Some(old) = self.atomic_op(i.bits(52, 4), size == 1, ptr, workgroup, data)? else {
+            self.unsupported.push("atoms (inc/dec)");
+            return Ok(());
+        };
+        self.set(i.rd(), old)
     }
 
     fn brx(&mut self, pc: u32, i: &Insn) -> R {
