@@ -238,6 +238,24 @@ fn texture_gather_per_texel_offsets() {
 }
 
 #[test]
+fn shared_memory_atomics_return_the_old_value() {
+    let atoms = |op: u64, size: u64| 0xec00_0000_0000_0000u64 | op << 52 | 4 << 30 | size << 28 | 2 << 20 | PT | 5;
+    let translated = |word: u64| {
+        let code = program(vec![0; kirikae_maxwell::sph::SIZE], &[mov32i(0, 0), mov32i(2, 1), word, EXIT]);
+        translate(&code, &Options { shared_memory: 0x100, ..options(Stage::Compute) }, &kirikae_maxwell::NoEnv).unwrap()
+    };
+    for (op, size, spirv) in [(0, 0, "OpAtomicIAdd"), (1, 1, "OpAtomicSMin"), (2, 0, "OpAtomicUMax"), (6, 0, "OpAtomicOr"), (8, 0, "OpAtomicExchange")] {
+        let shader = translated(atoms(op, size));
+        assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
+        let text = disassemble(&shader.spirv);
+        assert!(text.contains(spirv) && text.contains("Workgroup"), "{spirv}: {text}");
+        validate(&shader.spirv);
+    }
+    assert_eq!(translated(atoms(0, 2)).unsupported, ["atoms (64-bit)"]);
+    assert_eq!(translated(atoms(3, 0)).unsupported, ["atoms (inc/dec)"]);
+}
+
+#[test]
 fn compute_shared_memory() {
     let sts = 0xef58_0000_0000_0000u64 | 5 << 48 | 0x10 << 20 | PT | 2;
     let bar = 0xf0a8_1000_0000_0000u64 | PT;
