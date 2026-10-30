@@ -1572,6 +1572,7 @@ impl<'a> Translator<'a> {
             "tld4s" => self.tld4s(i),
             "hadd2" | "hmul2" | "hfma2" => self.half(i),
             "hsetp2" => self.hsetp2(i),
+            "hset2" => self.hset2(i),
             name => {
                 self.unsupported.push(name);
                 Ok(())
@@ -2201,12 +2202,12 @@ impl<'a> Translator<'a> {
         self.store_halves(i.rd(), v, ops.mode as u64, ops.sat)
     }
 
-    fn hsetp2(&mut self, i: &Insn) -> R {
+    fn half_compare(&mut self, i: &Insn) -> R<(Word, Word, Word, bool)> {
         let ops = i.half_operands();
         let a = self.half_operand(ops.a)?;
         let b = self.half_operand(ops.b)?;
-        let reg_form = i.op.value == 0x5d20000000000000;
-        let (cmp, h_and) = if reg_form { (i.bits(35, 4), i.bit(49)) } else { (i.bits(49, 4), i.bit(53)) };
+        let reg_form = matches!(i.op.value, 0x5d20000000000000 | 0x5d18000000000000);
+        let (cmp, flag) = if reg_form { (i.bits(35, 4), i.bit(49)) } else { (i.bits(49, 4), i.bit(53)) };
         let f = self.t.f32;
         let (a0, a1) = (self.b.composite_extract(f, None, a, [0])?, self.b.composite_extract(f, None, a, [1])?);
         let (b0, b1) = (self.b.composite_extract(f, None, b, [0])?, self.b.composite_extract(f, None, b, [1])?);
@@ -2214,6 +2215,23 @@ impl<'a> Translator<'a> {
         let c1 = self.fcmp(cmp, a1, b1)?;
         let (p, n) = i.pred(39, 42);
         let pv = self.p(p, n)?;
+        Ok((c0, c1, pv, flag))
+    }
+
+    fn hset2(&mut self, i: &Insn) -> R {
+        let (c0, c1, pv, bool_float) = self.half_compare(i)?;
+        let op = i.bits(45, 2);
+        let r0 = self.bool_op(op, c0, pv)?;
+        let r1 = self.bool_op(op, c1, pv)?;
+        let one = if bool_float { 0x3c00 } else { 0xffff };
+        let low = self.b2u(r0, one, 0)?;
+        let high = self.b2u(r1, one << 16, 0)?;
+        let v = self.b.bitwise_or(self.t.u32, None, low, high)?;
+        self.set(i.rd(), v)
+    }
+
+    fn hsetp2(&mut self, i: &Insn) -> R {
+        let (c0, c1, pv, h_and) = self.half_compare(i)?;
         let op = i.bits(45, 2);
         let (r0, r1) = if h_and {
             let both = self.b.logical_and(self.t.bool, None, c0, c1)?;
