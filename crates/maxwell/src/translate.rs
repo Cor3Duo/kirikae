@@ -1447,10 +1447,7 @@ impl<'a> Translator<'a> {
             "st" => self.store(i),
             "ldg" | "stg" => self.global_memory(pc, i),
             "r2p" => {
-                if i.bit(40) {
-                    self.unsupported.push("r2p (condition codes)");
-                    return Ok(());
-                }
+                let cc = i.bit(40);
                 let a = self.r(i.ra())?;
                 let mask = match i.form() {
                     Form::Imm => i.simm20() as u32,
@@ -1460,7 +1457,7 @@ impl<'a> Translator<'a> {
                     }
                 };
                 let byte = i.bits(41, 2) as u32;
-                for k in 0..7u8 {
+                for k in 0..if cc { 4 } else { 7u8 } {
                     if mask >> k & 1 == 0 {
                         continue;
                     }
@@ -1468,15 +1465,16 @@ impl<'a> Translator<'a> {
                     let v = self.b.bitwise_and(u, None, a, bit)?;
                     let zero = self.u(0);
                     let p = self.b.i_not_equal(self.t.bool, None, v, zero)?;
-                    self.setp(k, p)?;
+                    if cc {
+                        self.b.store(self.cc[k as usize], p, None, [])?;
+                    } else {
+                        self.setp(k, p)?;
+                    }
                 }
                 Ok(())
             }
             "p2r" => {
-                if i.bit(40) {
-                    self.unsupported.push("p2r (condition codes)");
-                    return Ok(());
-                }
+                let cc = i.bit(40);
                 let a = self.r(i.ra())?;
                 let mask = match i.form() {
                     Form::Imm => i.simm20() as u32 & 0xff,
@@ -1488,11 +1486,11 @@ impl<'a> Translator<'a> {
                 let byte = i.bits(41, 2) as u32;
                 let keep = self.u(!(mask << (byte * 8)));
                 let mut v = self.b.bitwise_and(u, None, a, keep)?;
-                for k in 0..7u8 {
+                for k in 0..if cc { 4 } else { 7u8 } {
                     if mask >> k & 1 == 0 {
                         continue;
                     }
-                    let p = self.p(k, false)?;
+                    let p = if cc { self.cc_flag(k as usize)? } else { self.p(k, false)? };
                     let bit = self.b2u(p, 1 << (byte * 8 + k as u32), 0)?;
                     v = self.b.bitwise_or(u, None, v, bit)?;
                 }
