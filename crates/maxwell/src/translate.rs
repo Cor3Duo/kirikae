@@ -116,6 +116,7 @@ pub struct ImageUse {
     pub handle: u32,
     pub dim: TexDim,
     pub array: bool,
+    pub raw: u8,
     pub binding: u32,
 }
 
@@ -229,6 +230,7 @@ struct Translator<'a> {
     unsupported: Vec<&'static str>,
     shader: Shader,
     storage_images: bool,
+    read_images: Vec<Word>,
 }
 
 pub fn translate(code_with_header: &[u8], opts: &Options, env: &dyn Env) -> Result<Shader, Error> {
@@ -239,6 +241,17 @@ pub fn translate(code_with_header: &[u8], opts: &Options, env: &dyn Env) -> Resu
     t.insns = program.insns.clone();
     t.brx = program.brx.clone();
     t.program(&program)?;
+    for &(_, var) in &t.images {
+        if !t.read_images.contains(&var) {
+            t.b.decorate(var, Decoration::NonReadable, []);
+        }
+    }
+    if t.images.iter().any(|(u, var)| u.raw == 0 && t.read_images.contains(var)) {
+        t.b.capability(Capability::StorageImageReadWithoutFormat);
+    }
+    if t.images.iter().any(|(u, _)| matches!(u.raw, 1 | 2 | 8)) {
+        t.b.capability(Capability::StorageImageExtendedFormats);
+    }
     for &(_, w) in &program.unknown {
         t.unsupported.push(if w == 0 { "(zero word)" } else { "(unknown encoding)" });
     }
@@ -317,6 +330,7 @@ impl<'a> Translator<'a> {
             textures: Vec::new(),
             images: Vec::new(),
             storage_images: false,
+            read_images: Vec::new(),
             local: None,
             shared: None,
             storage: BTreeMap::new(),
@@ -1567,6 +1581,7 @@ impl<'a> Translator<'a> {
             "texs" => self.texs(i),
             "tlds" => self.tlds(i),
             "sust" => self.sust(pc, i),
+            "suld" => self.suld(pc, i),
             "tex" => self.tex(i),
             "tld4" => self.tld4(i),
             "tld4s" => self.tld4s(i),
@@ -3192,7 +3207,7 @@ impl<'a> Translator<'a> {
         (image, sampler, image_ty, sampled_ty)
     }
 
-    fn storage_image(&mut self, slot: Option<u32>, handle: u32, dim: TexDim, array: bool) -> (Word, Word) {
+    fn storage_image(&mut self, slot: Option<u32>, handle: u32, dim: TexDim, array: bool, raw: u8) -> (Word, Word) {
         let d = match dim {
             TexDim::D1 => Dim::Dim1D,
             TexDim::D2 => Dim::Dim2D,
@@ -3206,8 +3221,20 @@ impl<'a> Translator<'a> {
                 self.b.capability(Capability::Image1D);
             }
         }
-        let image_ty = self.b.type_image(self.t.f32, d, 0, array as u32, 0, 2, ImageFormat::Unknown, None);
-        if let Some(&(_, var)) = self.images.iter().find(|(u, _)| u.slot == slot && u.handle == handle && u.dim == dim && u.array == array) {
+        let image_ty = match raw {
+            0 => self.b.type_image(self.t.f32, d, 0, array as u32, 0, 2, ImageFormat::Unknown, None),
+            _ => {
+                let format = match raw {
+                    1 => ImageFormat::R8ui,
+                    2 => ImageFormat::R16ui,
+                    4 => ImageFormat::R32ui,
+                    8 => ImageFormat::Rg32ui,
+                    _ => ImageFormat::Rgba32ui,
+                };
+                self.b.type_image(self.t.u32, d, 0, array as u32, 0, 2, format, None)
+            }
+        };
+        if let Some(&(_, var)) = self.images.iter().find(|(u, _)| u.slot == slot && u.handle == handle && u.dim == dim && u.array == array && u.raw == raw) {
             return (var, image_ty);
         }
         let binding = self.opts.image_binding + self.images.len() as u32;
@@ -3215,24 +3242,19 @@ impl<'a> Translator<'a> {
         let var = self.global(ptr, StorageClass::UniformConstant);
         self.b.decorate(var, Decoration::DescriptorSet, [Operand::LiteralBit32(0)]);
         self.b.decorate(var, Decoration::Binding, [Operand::LiteralBit32(binding)]);
-        self.b.decorate(var, Decoration::NonReadable, []);
-        self.images.push((ImageUse { slot, handle, dim, array, binding }, var));
+        self.images.push((ImageUse { slot, handle, dim, array, raw, binding }, var));
         (var, image_ty)
     }
 
-    fn sust(&mut self, pc: u32, i: &Insn) -> R {
-        if i.bit(52) {
-            self.unsupported.push("sust (raw)");
-            return Ok(());
-        }
+    fn surface(&mut self, pc: u32, i: &Insn, [bindless, buffer]: [&'static str; 2], raw: u8) -> R<Option<(Word, Word, Word)>> {
         let (slot, handle) = if i.bit(51) {
             (None, i.bits(36, 13) as u32)
         } else {
             match self.cbuf_source(pc, i.bits(39, 8) as u8) {
                 Some((slot, offset)) => (Some(slot), offset / 4),
                 None => {
-                    self.unsupported.push("sust (bindless)");
-                    return Ok(());
+                    self.unsupported.push(bindless);
+                    return Ok(None);
                 }
             }
         };
@@ -3243,11 +3265,11 @@ impl<'a> Translator<'a> {
             4 => (TexDim::D2, true, 3),
             5 => (TexDim::D3, false, 3),
             _ => {
-                self.unsupported.push("sust (buffer)");
-                return Ok(());
+                self.unsupported.push(buffer);
+                return Ok(None);
             }
         };
-        let (var, image_ty) = self.storage_image(slot, handle, dim, array);
+        let (var, image_ty) = self.storage_image(slot, handle, dim, array, raw);
         let mut c = Vec::new();
         for k in 0..coords {
             let v = self.r(i.ra().saturating_add(k))?;
@@ -3261,6 +3283,67 @@ impl<'a> Translator<'a> {
                 _ => self.t.v3u,
             };
             self.b.composite_construct(ty, None, c)?
+        };
+        Ok(Some((var, image_ty, coord)))
+    }
+
+    fn suld(&mut self, pc: u32, i: &Insn) -> R {
+        let raw = match (i.bit(52), i.bits(20, 3)) {
+            (false, _) => 0,
+            (true, 0 | 1) => 1,
+            (true, 2 | 3) => 2,
+            (true, 4) => 4,
+            (true, 5) => 8,
+            (true, 6) => 16,
+            _ => {
+                self.unsupported.push("suld (raw size)");
+                return Ok(());
+            }
+        };
+        let Some((var, image_ty, coord)) = self.surface(pc, i, ["suld (bindless)", "suld (buffer)"], raw)? else {
+            return Ok(());
+        };
+        if !self.read_images.contains(&var) {
+            self.read_images.push(var);
+        }
+        let image = self.b.load(image_ty, None, var, None, [])?;
+        if raw != 0 {
+            let texel = self.b.image_read(self.t.v4u, None, image, coord, None, [])?;
+            let signed = match i.bits(20, 3) {
+                1 => Some(8),
+                3 => Some(16),
+                _ => None,
+            };
+            for k in 0..(raw / 4).max(1) {
+                let mut v = self.b.composite_extract(self.t.u32, None, texel, [k as u32])?;
+                if let Some(width) = signed {
+                    let (offset, count) = (self.u(0), self.u(width));
+                    v = self.b.bit_field_s_extract(self.t.u32, None, v, offset, count)?;
+                }
+                self.set(i.rd().saturating_add(k), v)?;
+            }
+            return Ok(());
+        }
+        let texel = self.b.image_read(self.t.v4f, None, image, coord, None, [])?;
+        let mask = i.bits(20, 4) as u32;
+        let mut reg = i.rd();
+        for k in 0..4 {
+            if mask >> k & 1 == 1 {
+                let v = self.b.composite_extract(self.t.f32, None, texel, [k])?;
+                self.setf(reg, v)?;
+                reg = reg.saturating_add(1);
+            }
+        }
+        Ok(())
+    }
+
+    fn sust(&mut self, pc: u32, i: &Insn) -> R {
+        if i.bit(52) {
+            self.unsupported.push("sust (raw)");
+            return Ok(());
+        }
+        let Some((var, image_ty, coord)) = self.surface(pc, i, ["sust (bindless)", "sust (buffer)"], 0)? else {
+            return Ok(());
         };
         let mask = i.bits(20, 4) as u32;
         let mut reg = i.rd();

@@ -252,6 +252,37 @@ fn compute_shared_memory() {
 }
 
 #[test]
+fn a_surface_load_reads_the_image_into_registers() {
+    let surface = |op: u64, handle: u64, mask: u64| op | 1 << 51 | handle << 36 | 3 << 33 | mask << 20 | PT | 4;
+    let (suld, sust) = (0xeb00_0000_0000_0000u64, 0xeb20_0000_0000_0000u64);
+    let code = program(vec![0; kirikae_maxwell::sph::SIZE], &[mov32i(0, 0), mov32i(1, 0), surface(suld, 1, 0xf), surface(sust, 2, 0xf), EXIT]);
+    let shader = translate(&code, &options(Stage::Compute), &kirikae_maxwell::NoEnv).unwrap();
+    assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
+    let text = disassemble(&shader.spirv);
+    assert!(text.contains("OpCapability StorageImageReadWithoutFormat"), "{text}");
+    assert_eq!(text.matches("OpImageRead").count(), 1, "{text}");
+    assert_eq!(text.matches("NonReadable").count(), 1, "only the stored-to image is write-only: {text}");
+}
+
+#[test]
+fn a_raw_surface_load_reads_the_texel_bits_through_a_uint_image() {
+    let suld = |size: u64| 0xeb00_0000_0000_0000u64 | 1 << 52 | 1 << 51 | 1 << 36 | 3 << 33 | size << 20 | PT | 4;
+    let translated = |size: u64| {
+        let code = program(vec![0; kirikae_maxwell::sph::SIZE], &[mov32i(0, 0), mov32i(1, 0), suld(size), EXIT]);
+        translate(&code, &options(Stage::Compute), &kirikae_maxwell::NoEnv).unwrap()
+    };
+    let word = translated(4);
+    assert!(word.unsupported.is_empty(), "{:?}", word.unsupported);
+    assert_eq!(word.images[0].raw, 4);
+    let text = disassemble(&word.spirv);
+    assert!(text.contains("R32ui") && !text.contains("ReadWithoutFormat") && !text.contains("NonReadable"), "{text}");
+    let byte = disassemble(&translated(1).spirv);
+    assert!(byte.contains("R8ui") && byte.contains("OpCapability StorageImageExtendedFormats") && byte.contains("OpBitFieldSExtract"), "{byte}");
+    assert!(disassemble(&translated(6).spirv).contains("Rgba32ui"));
+    assert_eq!(translated(7).unsupported, ["suld (raw size)"]);
+}
+
+#[test]
 fn vertex_shader_passthrough() {
     let code = program(vertex_header(), &[ald(0, 0x80, 4), ast(0, 0x70, 4), ald(4, 0x90, 4), ast(4, 0x80, 4), EXIT]);
     let shader = translate(&code, &options(Stage::Vertex), &kirikae_maxwell::NoEnv).unwrap();
