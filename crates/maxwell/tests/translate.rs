@@ -309,6 +309,22 @@ fn dumped_shaders() {
 }
 
 #[test]
+fn a_half_pair_compare_writes_a_mask_or_ones_per_half() {
+    let hset2 = |bool_float: u64| 0x5d18_0000_0000_0000u64 | bool_float << 49 | 7 << 39 | 1 << 35 | 1 << 20 | PT | 2;
+    let translated = |bool_float: u64| {
+        let code = program(fragment_header(1), &[mov32i(0, 0x3c00_4000), mov32i(1, 0x4000_3c00), hset2(bool_float), EXIT]);
+        let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
+        assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
+        validate(&shader.spirv);
+        disassemble(&shader.spirv)
+    };
+    let mask = translated(0);
+    assert!(mask.contains("65535") && mask.contains("4294901760"), "{mask}");
+    let ones = translated(1);
+    assert!(ones.contains("15360") && ones.contains("1006632960"), "{ones}");
+}
+
+#[test]
 fn half_pair_operands() {
     use kirikae_maxwell::decode::{HalfOperand, HalfSrc, Insn};
     let reg = |reg, swizzle, neg| HalfOperand { src: HalfSrc::Reg { reg, swizzle }, neg, abs: false };
