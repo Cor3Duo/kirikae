@@ -39,6 +39,8 @@ pub mod reg {
     pub const TOPOLOGY_CONTROL: usize = 0x652;
     pub const TOPOLOGY_OVERRIDE: usize = 0x65c;
     pub const CLEAR_SURFACE: u32 = 0x674;
+    pub const RENDER_ENABLE: usize = 0x554;
+    pub const RENDER_ENABLE_OVERRIDE: usize = 0x651;
     pub const REPORT_SEMAPHORE: usize = 0x6c0;
     pub const REPORT_SEMAPHORE_D: u32 = 0x6c3;
     pub const VERTEX_STREAM: usize = 0x700;
@@ -210,6 +212,12 @@ impl Gpu {
     }
 
     pub(super) fn draw(&self, mem: &GuestMemory, regs: &[u32], cbs: &[[Option<(u64, u32)>; CB_SLOTS]; 5], mut draw: Draw) {
+        if !self.render_enabled(mem, regs) {
+            if trace() {
+                eprintln!("gpu: draw skipped: render enable mode {}", regs[reg::RENDER_ENABLE + 2] & 7);
+            }
+            return;
+        }
         draw.topology = topology(regs[reg::TOPOLOGY_CONTROL], regs[reg::TOPOLOGY_OVERRIDE], draw.topology);
         let n = self.stats.draws.fetch_add(1, Ordering::Relaxed);
         if crate::nvn::exec::CHECK.load(Ordering::Relaxed) {
@@ -275,6 +283,12 @@ impl Gpu {
         if crate::nvn::shadow::ON.load(Ordering::Relaxed) {
             crate::nvn::shadow::cp_clear(regs, v);
         }
+        if !self.render_enabled(mem, regs) {
+            if trace() {
+                eprintln!("gpu: clear {v:#x} skipped: render enable mode {}", regs[reg::RENDER_ENABLE + 2] & 7);
+            }
+            return;
+        }
         if v & 3 != 0 {
             self.with_renderer(|r| r.clear_depth(self, regs, v & 1 == 1, v & 2 == 2));
         }
@@ -317,6 +331,10 @@ impl Gpu {
         }
         let fill: Vec<u8> = pixel.iter().copied().cycle().take(size as usize).collect();
         self.write(mem, addr, &fill);
+    }
+
+    fn render_enabled(&self, mem: &GuestMemory, regs: &[u32]) -> bool {
+        render_enabled(regs, |va| self.read(mem, va, 8).map(|b| u64::from_le_bytes(b[..8].try_into().unwrap())))
     }
 
     pub(super) fn report(&self, mem: &GuestMemory, regs: &[u32]) {
@@ -362,9 +380,83 @@ fn topology(control: u32, forced: u32, begin: u32) -> u32 {
     }
 }
 
+const RENDER_ENABLE_TRUE: u32 = 1;
+
+pub(super) fn initial_registers() -> Vec<u32> {
+    let mut regs = vec![0; 0x1000];
+    regs[reg::RENDER_ENABLE + 2] = RENDER_ENABLE_TRUE;
+    regs
+}
+
+fn render_enabled(regs: &[u32], read: impl Fn(u64) -> Option<u64>) -> bool {
+    match regs[reg::RENDER_ENABLE_OVERRIDE] & 3 {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
+    let at = (regs[reg::RENDER_ENABLE] as u64 & 0xff) << 32 | regs[reg::RENDER_ENABLE + 1] as u64;
+    match regs[reg::RENDER_ENABLE + 2] & 7 {
+        0 => false,
+        2 => read(at).is_none_or(|v| v != 0),
+        3 => read(at).zip(read(at + 16)).is_none_or(|(a, b)| a == b),
+        4 => read(at).zip(read(at + 16)).is_none_or(|(a, b)| a != b),
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::topology;
+    use super::{initial_registers, reg, render_enabled, topology};
+
+    fn condition(mode: u32, at: u64) -> Vec<u32> {
+        let mut regs = initial_registers();
+        regs[reg::RENDER_ENABLE] = (at >> 32) as u32 | 0xff00;
+        regs[reg::RENDER_ENABLE + 1] = at as u32;
+        regs[reg::RENDER_ENABLE + 2] = mode | 0xfff8;
+        regs
+    }
+
+    fn memory(values: &[(u64, u64)]) -> impl Fn(u64) -> Option<u64> + '_ {
+        |va| values.iter().find(|(at, _)| *at == va).map(|(_, v)| *v)
+    }
+
+    #[test]
+    fn the_engine_starts_rendering() {
+        assert!(render_enabled(&initial_registers(), |_| None));
+    }
+
+    #[test]
+    fn false_and_true_ignore_memory() {
+        let mem = memory(&[(0x5_0000_0000, 1)]);
+        assert!(!render_enabled(&condition(0, 0x5_0000_0000), &mem));
+        assert!(render_enabled(&condition(1, 0x5_0000_0000), &mem));
+    }
+
+    #[test]
+    fn conditional_renders_when_the_report_is_nonzero() {
+        assert!(render_enabled(&condition(2, 0x5_0000_0000), memory(&[(0x5_0000_0000, 3)])));
+        assert!(!render_enabled(&condition(2, 0x5_0000_0000), memory(&[(0x5_0000_0000, 0)])));
+    }
+
+    #[test]
+    fn equality_modes_compare_the_values_sixteen_bytes_apart() {
+        let same = [(0x5_0000_0100, 7), (0x5_0000_0108, 1), (0x5_0000_0110, 7)];
+        let differ = [(0x5_0000_0100, 7), (0x5_0000_0108, 7), (0x5_0000_0110, 8)];
+        assert!(render_enabled(&condition(3, 0x5_0000_0100), memory(&same)));
+        assert!(!render_enabled(&condition(3, 0x5_0000_0100), memory(&differ)));
+        assert!(!render_enabled(&condition(4, 0x5_0000_0100), memory(&same)));
+        assert!(render_enabled(&condition(4, 0x5_0000_0100), memory(&differ)));
+    }
+
+    #[test]
+    fn the_override_wins_over_the_condition() {
+        let mut never = condition(1, 0);
+        never[reg::RENDER_ENABLE_OVERRIDE] = 2 | 0xfffc;
+        assert!(!render_enabled(&never, |_| None));
+        let mut always = condition(0, 0);
+        always[reg::RENDER_ENABLE_OVERRIDE] = 1;
+        assert!(render_enabled(&always, |_| None));
+    }
 
     #[test]
     fn topology_override_needs_the_control_bit() {
