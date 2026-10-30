@@ -107,6 +107,7 @@ impl Service for FsProxy {
                 None => Reply::err(TARGET_NOT_FOUND),
             },
             202 => match req.u64(8) {
+                crate::services::ngc::WORD_LIST_DATA => Reply::ok().object(Arc::new(DataStorage(crate::services::ngc::word_list_archive()))),
                 id @ SYSTEM_DATA_FIRST..=SYSTEM_DATA_LAST => {
                     p.warn_once(format!("fsp-srv: system data {id:#018x} is not available; serving an empty archive"));
                     Reply::ok().object(Arc::new(DataStorage(kirikae_loader::romfs::empty())))
