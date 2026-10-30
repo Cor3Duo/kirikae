@@ -335,6 +335,28 @@ fn half_pair_operands() {
 }
 
 #[test]
+fn integer_conversions_saturate_and_pick_the_half() {
+    let i2i = |bits: u64| 0x5ce0_0000_0000_0000u64 | bits | 2 << 10 | 1 << 13 | PT | 1;
+    let f2i = |hi: u64| 0x5cb0_0000_0000_0000u64 | hi << 41 | 2 << 8 | 1 << 10 | 3 << 39 | PT | 2;
+    let ext_insts = |words: &[u64]| {
+        let code = program(fragment_header(1), &[&[mov32i(0, 0x1234_5678)], words, &[EXIT]].concat());
+        let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
+        assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
+        validate(&shader.spirv);
+        let text = disassemble(&shader.spirv);
+        (text.matches("OpExtInst").count(), text)
+    };
+    let (wrapped, _) = ext_insts(&[i2i(1 << 12)]);
+    let (saturated, _) = ext_insts(&[i2i(1 << 12 | 1 << 50)]);
+    assert_eq!(saturated, wrapped + 2, "a signed 8-bit saturate clamps on both sides");
+    let (unsigned, _) = ext_insts(&[i2i(1 << 8 | 1 << 50)]);
+    assert_eq!(unsigned, wrapped + 2, "a signed source clamped into 16 unsigned bits");
+    let (_, low) = ext_insts(&[f2i(0)]);
+    let (_, high) = ext_insts(&[f2i(1)]);
+    assert_ne!(low, high, "the high-half bit selects the other fp16 value");
+}
+
+#[test]
 fn a_128_bit_constant_load_fills_four_registers() {
     let sized = |size: u64| ldc(4, 2, 0x10) & !(7 << 48) | size << 48;
     let stores = |size: u64| {
