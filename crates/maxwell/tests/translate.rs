@@ -169,6 +169,16 @@ fn discard_keeps_a_shader_straight_line() {
 }
 
 #[test]
+fn predicate_moves_reach_the_condition_codes() {
+    let r2p_cc = 0x38f0_0000_0000_0000u64 | 0xf << 20 | 1 << 40 | PT;
+    let p2r_cc = 0x38e8_0000_0000_0000u64 | 0xf << 20 | 1 << 40 | PT | 1;
+    let code = program(fragment_header(1), &[mov32i(0, 0b1010), r2p_cc, p2r_cc, EXIT]);
+    let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
+    assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
+    validate(&shader.spirv);
+}
+
+#[test]
 fn texture_and_constant_buffer() {
     let code = program(fragment_header(1), &[ipa(0, 0x80, 0xff), ipa(1, 0x84, 0xff), texs_2d(4, 0, 1, 3), ldc(8, 1, 0x10), EXIT]);
     let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
