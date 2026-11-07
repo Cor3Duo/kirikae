@@ -210,6 +210,16 @@ fn texture_lod_query() {
 }
 
 #[test]
+fn a_later_1d_storage_image_declares_its_capability() {
+    let sust = |handle: u64, dim: u64| 0xeb20_0000_0000_0000u64 | 1 << 51 | handle << 36 | dim << 33 | 0xf << 20 | PT | 4;
+    let code = program(vec![0; kirikae_maxwell::sph::SIZE], &[mov32i(0, 0), mov32i(1, 0), sust(1, 3), sust(2, 0), EXIT]);
+    let shader = translate(&code, &options(Stage::Compute), &kirikae_maxwell::NoEnv).unwrap();
+    assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
+    let text = disassemble(&shader.spirv);
+    assert!(text.contains("OpCapability Image1D"), "{text}");
+}
+
+#[test]
 fn texture_gathers() {
     let tld4s = 0xdf00_00a0_00a7_0b06;
     let tld4 = 0xc838_0000_0000_0000u64 | 1 << 56 | 1 << 54 | 1 << 50 | 7 << 36 | 0xf << 31 | 1 << 29 | PT | 2 << 20 | 4;
