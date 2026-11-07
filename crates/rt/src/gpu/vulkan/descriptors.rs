@@ -152,7 +152,7 @@ impl Renderer {
                 Ok(v) => v,
                 Err(why) => {
                     self.note_placeholder(&why);
-                    self.placeholder(vk::ImageViewType::TYPE_2D)?
+                    self.storage_placeholder(i.raw)?
                 }
             };
             out.push(Descriptor::StorageImage(i.binding, view));

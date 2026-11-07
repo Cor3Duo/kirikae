@@ -350,7 +350,10 @@ impl Renderer {
             .shader_clip_distance(supported.shader_clip_distance == vk::TRUE)
             .shader_image_gather_extended(supported.shader_image_gather_extended == vk::TRUE)
             .depth_clamp(supported.depth_clamp == vk::TRUE)
-            .depth_bias_clamp(supported.depth_bias_clamp == vk::TRUE);
+            .depth_bias_clamp(supported.depth_bias_clamp == vk::TRUE)
+            .shader_storage_image_read_without_format(supported.shader_storage_image_read_without_format == vk::TRUE)
+            .shader_storage_image_write_without_format(supported.shader_storage_image_write_without_format == vk::TRUE)
+            .shader_storage_image_extended_formats(supported.shader_storage_image_extended_formats == vk::TRUE);
         let mut v13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true);
         let priorities = [1.0];
         let queues = [vk::DeviceQueueCreateInfo::default().queue_family_index(family).queue_priorities(&priorities)];
