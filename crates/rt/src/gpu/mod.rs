@@ -591,7 +591,7 @@ impl Gpu {
             }
             return;
         }
-        let regs = eng.regs.entry(class).or_insert_with(|| vec![0; 0x1000]);
+        let regs = eng.regs.entry(class).or_insert_with(|| if class == CLASS_3D { threed::initial_registers() } else { vec![0; 0x1000] });
         if let Some(r) = regs.get_mut(m as usize) {
             *r = v;
         }
@@ -911,6 +911,15 @@ mod tests {
         let pb = [0x2004_0004u32, 0x5, 0x0000_0100, 0xcafe, 0x2];
         gpu.run_pushbuffer(&mem, &pb);
         assert_eq!(mem.read(0x1000_0100, 4).unwrap(), 0xcafeu32.to_le_bytes());
+    }
+
+    #[test]
+    fn the_3d_engine_starts_with_rendering_enabled() {
+        let mem = GuestMemory::new().unwrap();
+        let gpu = Gpu::default();
+        gpu.run_pushbuffer(&mem, &[0x2001_0000, CLASS_3D, 0x2001_0100, 0]);
+        let eng = gpu.engines.lock().unwrap();
+        assert_eq!(eng.regs[&CLASS_3D][threed::reg::RENDER_ENABLE + 2], 1);
     }
 
     #[test]
