@@ -347,3 +347,21 @@ fn a_128_bit_constant_load_fills_four_registers() {
     assert_eq!(stores(5), stores(4) + 1);
     assert_eq!(stores(6), stores(4) + 3);
 }
+
+#[test]
+fn integer_add_carries_and_saturates() {
+    let iadd = |rd: u64, bits: u64| 0x5c10_0000_0000_0000u64 | bits | 1 << 20 | PT | rd;
+    let translated = |words: &[u64]| {
+        let code = program(fragment_header(1), &[&[mov32i(0, 5), mov32i(1, 0)], words, &[EXIT]].concat());
+        let shader = translate(&code, &options(Stage::Fragment), &kirikae_maxwell::NoEnv).unwrap();
+        assert!(shader.unsupported.is_empty(), "{:?}", shader.unsupported);
+        validate(&shader.spirv);
+        disassemble(&shader.spirv)
+    };
+    let count = |text: &str, op: &str| text.matches(op).count();
+    let plain = translated(&[iadd(2, 0), iadd(3, 0)]);
+    let wide = translated(&[iadd(2, 1 << 48 | 1 << 47), iadd(3, 1 << 48 | 1 << 43)]);
+    assert_eq!(count(&wide, "OpNot"), count(&plain, "OpNot") + 2, "a negated operand is a bitwise NOT plus a carry, with or without .X: {wide}");
+    let saturated = translated(&[iadd(2, 1 << 50), iadd(3, 0)]);
+    assert!(count(&saturated, "OpSelect") > count(&plain, "OpSelect"), "{saturated}");
+}
