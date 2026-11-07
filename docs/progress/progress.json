@@ -1,5 +1,5 @@
 {
- "generated": "2026-10-28",
+ "generated": "2026-11-07",
  "sections": [
   {
    "id": "services",
@@ -6941,7 +6941,7 @@
    "id": "shaders",
    "title": "Maxwell shader instructions",
    "unit": "mnemonics",
-   "implemented": 79,
+   "implemented": 82,
    "total": 146,
    "groups": [
     {
@@ -7009,6 +7009,7 @@
       "hadd2",
       "hfma2",
       "hmul2",
+      "hset2",
       "hsetp2"
      ],
      "constant": [],
@@ -7023,10 +7024,6 @@
       },
       {
        "id": "hmul2_32i",
-       "name": ""
-      },
-      {
-       "id": "hset2",
        "name": ""
       }
      ],
@@ -7185,6 +7182,7 @@
      "referenced": true,
      "implemented": [
       "atom",
+      "atoms",
       "ipa",
       "ld",
       "ldg",
@@ -7196,10 +7194,6 @@
      "missing": [
       {
        "id": "al2p",
-       "name": ""
-      },
-      {
-       "id": "atoms",
        "name": ""
       },
       {
@@ -7233,6 +7227,7 @@
      "url": "",
      "referenced": true,
      "implemented": [
+      "suld",
       "sust",
       "tex",
       "texs",
@@ -7246,10 +7241,6 @@
      "missing": [
       {
        "id": "suatom",
-       "name": ""
-      },
-      {
-       "id": "suld",
        "name": ""
       },
       {
