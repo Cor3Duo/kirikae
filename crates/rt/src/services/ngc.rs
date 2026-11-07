@@ -3,6 +3,28 @@ use crate::services::stub::unimplemented_named;
 use crate::services::{Reply, Request, Service};
 
 const CONTENT_VERSION: u32 = 0;
+pub const WORD_LIST_DATA: u64 = 0x0100_0000_0000_0823;
+const EMPTY_AUTOMATON: usize = 195;
+const LANGUAGES: u32 = 32;
+
+pub fn word_list_archive() -> Vec<u8> {
+    let table = gzip(&[0; EMPTY_AUTOMATON]);
+    let mut files = vec![("version.dat".to_string(), CONTENT_VERSION.to_be_bytes().to_vec())];
+    for set in ["common".to_string()].into_iter().chain((0..LANGUAGES).map(|l| l.to_string())) {
+        for kind in ["b1", "b2", "not_b"] {
+            files.push((format!("ac_{set}_{kind}_nx"), table.clone()));
+        }
+    }
+    kirikae_loader::romfs::from_files(&files)
+}
+
+fn gzip(data: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff];
+    out.extend(miniz_oxide::deflate::compress_to_vec(data, 6));
+    out.extend_from_slice(&crate::usage::crc32(&[data]).to_le_bytes());
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    out
+}
 
 pub struct Ngc;
 
@@ -53,6 +75,32 @@ mod tests {
         assert_eq!(ngc_command_name(0), "GetContentVersion");
         assert_eq!(ngc_command_name(1), "Check");
         assert_eq!(ngc_command_name(99), "unknown");
+    }
+
+    #[test]
+    fn the_word_list_archive_holds_gzipped_empty_tables() {
+        let path = std::env::temp_dir().join(format!("kirikae-ngc-{}.romfs", std::process::id()));
+        let archive = word_list_archive();
+        std::fs::write(&path, &archive).unwrap();
+        let rom = kirikae_loader::romfs::RomFs { path: path.clone(), offset: 0, size: archive.len() as u64, compression: None };
+        let mut r = kirikae_loader::romfs::Reader::open(&rom).unwrap();
+        let mut read = |name: &str| {
+            let f = kirikae_loader::romfs::lookup(&mut r, name).unwrap().unwrap_or_else(|| panic!("{name} is missing"));
+            let mut data = vec![0u8; f.size as usize];
+            r.read_at(f.offset, &mut data).unwrap();
+            data
+        };
+        assert_eq!(read("/version.dat"), CONTENT_VERSION.to_be_bytes());
+        for name in ["/ac_common_b1_nx", "/ac_common_b2_nx", "/ac_common_not_b_nx", "/ac_1_b1_nx", "/ac_31_not_b_nx"] {
+            let gz = read(name);
+            assert_eq!(gz[..3], [0x1f, 0x8b, 8], "{name}");
+            let (body, trailer) = gz[10..].split_at(gz.len() - 18);
+            let table = miniz_oxide::inflate::decompress_to_vec(body).unwrap();
+            assert_eq!(table, [0; EMPTY_AUTOMATON], "{name}");
+            assert_eq!(trailer[..4], crate::usage::crc32(&[&table]).to_le_bytes(), "{name}");
+            assert_eq!(trailer[4..], (EMPTY_AUTOMATON as u32).to_le_bytes(), "{name}");
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     static SEEN: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());

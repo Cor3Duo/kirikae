@@ -462,7 +462,7 @@ pub fn scale(width: u32, height: u32, pixels: &[u32]) -> (u32, u32, Vec<u8>) {
     (dw as u32, dh as u32, out)
 }
 
-fn crc32(chunks: &[&[u8]]) -> u32 {
+pub(crate) fn crc32(chunks: &[&[u8]]) -> u32 {
     static TABLE: std::sync::OnceLock<[u32; 256]> = std::sync::OnceLock::new();
     let table = TABLE.get_or_init(|| {
         let mut t = [0u32; 256];
