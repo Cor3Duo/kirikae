@@ -14,6 +14,7 @@ const TARGET_NOT_FOUND: u32 = 0x7d402;
 const DIRECTORY_NOT_EMPTY: u32 = 0x4d002;
 const OUT_OF_RANGE: u32 = 0x3e402;
 const INVALID_BIS_PARTITION: u32 = 0x2ee202;
+const WRITE_PAST_EOF: u32 = 0x307202;
 
 const SYSTEM_DATA_FIRST: u64 = 0x0100_0000_0000_0800;
 const SYSTEM_DATA_LAST: u64 = 0x0100_0000_0000_0fff;
@@ -27,13 +28,24 @@ fn data_root() -> PathBuf {
     if let Some(dir) = std::env::var_os("KIRIKAE_SAVES") {
         return PathBuf::from(dir);
     }
-    let base = data_dir(std::env::var_os("APPDATA"), std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME")).unwrap_or_else(|| PathBuf::from("."));
+    let base = data_dir(
+        std::env::var_os("APPDATA"),
+        std::env::var_os("XDG_DATA_HOME"),
+        std::env::var_os("HOME"),
+    )
+    .unwrap_or_else(|| PathBuf::from("."));
     base.join("kirikae").join("saves")
 }
 
-fn data_dir(appdata: Option<std::ffi::OsString>, xdg: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> Option<PathBuf> {
+fn data_dir(
+    appdata: Option<std::ffi::OsString>,
+    xdg: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
     let set = |v: Option<std::ffi::OsString>| v.filter(|v| !v.is_empty()).map(PathBuf::from);
-    set(appdata).or_else(|| set(xdg)).or_else(|| set(home).map(|h| h.join(".local/share")))
+    set(appdata)
+        .or_else(|| set(xdg))
+        .or_else(|| set(home).map(|h| h.join(".local/share")))
 }
 
 pub fn saves_root(title: u64) -> PathBuf {
@@ -55,7 +67,10 @@ fn host_path(c: &Cpu, root: &Path, x: Option<&Buf>) -> Option<PathBuf> {
     let raw = c.process().memory.read(b.addr, b.size.min(0x301))?;
     let s = String::from_utf8_lossy(raw.split(|&b| b == 0).next()?).into_owned();
     let rel = Path::new(s.trim_start_matches('/'));
-    if rel.components().any(|c| matches!(c, Component::ParentDir | Component::Prefix(_))) {
+    if rel
+        .components()
+        .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
+    {
         return None;
     }
     Some(root.join(rel))
@@ -73,20 +88,24 @@ impl Service for FsProxy {
         match req.cmd {
             1 => Reply::ok(),
             2 => match &p.romfs {
-                Some(romfs) => match kirikae_loader::romfs::list(&mut romfs.lock().unwrap(), usize::MAX) {
-                    Ok(files) => Reply::ok().object(Arc::new(RomFileSystem::new(files))),
-                    Err(e) => {
-                        p.warn_once(format!("RomFS listing failed: {e}"));
-                        Reply::err(TARGET_NOT_FOUND)
+                Some(romfs) => {
+                    match kirikae_loader::romfs::list(&mut romfs.lock().unwrap(), usize::MAX) {
+                        Ok(files) => Reply::ok().object(Arc::new(RomFileSystem::new(files))),
+                        Err(e) => {
+                            p.warn_once(format!("RomFS listing failed: {e}"));
+                            Reply::err(TARGET_NOT_FOUND)
+                        }
                     }
-                },
+                }
                 None => Reply::err(TARGET_NOT_FOUND),
             },
             11 => match bis_partition(req.u32(0)) {
-                Some(name) => match host_path(c, &data_root().join("nand").join(name), req.x.first()) {
-                    Some(root) => Reply::ok().object(Arc::new(HostFs::new(root))),
-                    None => Reply::err(PATH_NOT_FOUND),
-                },
+                Some(name) => {
+                    match host_path(c, &data_root().join("nand").join(name), req.x.first()) {
+                        Some(root) => Reply::ok().object(Arc::new(HostFs::new(root))),
+                        None => Reply::err(PATH_NOT_FOUND),
+                    }
+                }
                 None => Reply::err(INVALID_BIS_PARTITION),
             },
             18 => {
@@ -98,7 +117,12 @@ impl Service for FsProxy {
                 let a = &req.data;
                 let kind = a.get(0x28).copied().unwrap_or(1);
                 let user = req.u64(0x10) ^ req.u64(0x18);
-                let dir = format!("{}-{user:016x}", ["system", "account", "bcat", "device", "temporary", "cache"].get(kind as usize).unwrap_or(&"other"));
+                let dir = format!(
+                    "{}-{user:016x}",
+                    ["system", "account", "bcat", "device", "temporary", "cache"]
+                        .get(kind as usize)
+                        .unwrap_or(&"other")
+                );
                 Reply::ok().object(Arc::new(HostFs::new(saves_root(p.title_id).join(dir))))
             }
             60..=62 => Reply::ok().object(Arc::new(SaveDataInfoReader)),
@@ -106,14 +130,18 @@ impl Service for FsProxy {
                 Some(_) => Reply::ok().object(Arc::new(RomStorage)),
                 None => Reply::err(TARGET_NOT_FOUND),
             },
-            202 => match req.u64(8) {
-                crate::services::ngc::WORD_LIST_DATA => Reply::ok().object(Arc::new(DataStorage(crate::services::ngc::word_list_archive()))),
-                id @ SYSTEM_DATA_FIRST..=SYSTEM_DATA_LAST => {
-                    p.warn_once(format!("fsp-srv: system data {id:#018x} is not available; serving an empty archive"));
-                    Reply::ok().object(Arc::new(DataStorage(kirikae_loader::romfs::empty())))
+            202 => {
+                match req.u64(8) {
+                    crate::services::ngc::WORD_LIST_DATA => Reply::ok().object(Arc::new(
+                        DataStorage(crate::services::ngc::word_list_archive()),
+                    )),
+                    id @ SYSTEM_DATA_FIRST..=SYSTEM_DATA_LAST => {
+                        p.warn_once(format!("fsp-srv: system data {id:#018x} is not available; serving an empty archive"));
+                        Reply::ok().object(Arc::new(DataStorage(kirikae_loader::romfs::empty())))
+                    }
+                    _ => Reply::err(TARGET_NOT_FOUND),
                 }
-                _ => Reply::err(TARGET_NOT_FOUND),
-            },
+            }
             203 => Reply::err(TARGET_NOT_FOUND),
             1003 | 1004 | 1006 => Reply::ok(),
             1005 => Reply::ok().u32(0),
@@ -132,11 +160,15 @@ impl Service for RomStorage {
 
     fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
         let p = c.process();
-        let Some(romfs) = &p.romfs else { return Reply::err(TARGET_NOT_FOUND) };
+        let Some(romfs) = &p.romfs else {
+            return Reply::err(TARGET_NOT_FOUND);
+        };
         match req.cmd {
             0 => {
                 let (offset, size) = (req.u64(0), req.u64(8));
-                let Some(b) = req.b.first() else { return Reply::err(OUT_OF_RANGE) };
+                let Some(b) = req.b.first() else {
+                    return Reply::err(OUT_OF_RANGE);
+                };
                 let mut buf = vec![0u8; size.min(b.size) as usize];
                 match romfs.lock().unwrap().read_at(offset, &mut buf) {
                     Ok(n) => {
@@ -166,9 +198,13 @@ impl Service for DataStorage {
         match req.cmd {
             0 => {
                 let (offset, size) = (req.u64(0) as usize, req.u64(8) as usize);
-                let Some(b) = req.b.first() else { return Reply::err(OUT_OF_RANGE) };
+                let Some(b) = req.b.first() else {
+                    return Reply::err(OUT_OF_RANGE);
+                };
                 let start = offset.min(self.0.len());
-                let end = start.saturating_add(size.min(b.size as usize)).min(self.0.len());
+                let end = start
+                    .saturating_add(size.min(b.size as usize))
+                    .min(self.0.len());
                 c.process().memory.write(b.addr, &self.0[start..end]);
                 Reply::ok()
             }
@@ -182,7 +218,12 @@ fn rom_path(c: &Cpu, x: Option<&Buf>) -> Option<String> {
     let b = x?;
     let raw = c.process().memory.read(b.addr, b.size.min(0x301))?;
     let s = String::from_utf8_lossy(raw.split(|&b| b == 0).next()?).into_owned();
-    Some(s.split('/').filter(|p| !p.is_empty() && *p != ".").collect::<Vec<_>>().join("/"))
+    Some(
+        s.split('/')
+            .filter(|p| !p.is_empty() && *p != ".")
+            .collect::<Vec<_>>()
+            .join("/"),
+    )
 }
 
 struct RomFileSystem {
@@ -193,18 +234,31 @@ struct RomFileSystem {
 impl RomFileSystem {
     fn new(list: Vec<kirikae_loader::romfs::FileEntry>) -> RomFileSystem {
         let mut files = HashMap::new();
-        let mut dirs: HashMap<String, Vec<(String, u8, u64)>> = HashMap::from([(String::new(), Vec::new())]);
+        let mut dirs: HashMap<String, Vec<(String, u8, u64)>> =
+            HashMap::from([(String::new(), Vec::new())]);
         for f in list {
             let key = f.path.trim_start_matches('/').to_string();
             let mut parent = String::new();
             let parts: Vec<&str> = key.split('/').collect();
             for (i, part) in parts.iter().enumerate() {
-                let path = if parent.is_empty() { part.to_string() } else { format!("{parent}/{part}") };
+                let path = if parent.is_empty() {
+                    part.to_string()
+                } else {
+                    format!("{parent}/{part}")
+                };
                 if i + 1 == parts.len() {
-                    dirs.entry(parent.clone()).or_default().push((part.to_string(), ENTRY_FILE, f.size));
+                    dirs.entry(parent.clone()).or_default().push((
+                        part.to_string(),
+                        ENTRY_FILE,
+                        f.size,
+                    ));
                 } else if !dirs.contains_key(&path) {
                     dirs.insert(path.clone(), Vec::new());
-                    dirs.entry(parent.clone()).or_default().push((part.to_string(), ENTRY_DIRECTORY, 0));
+                    dirs.entry(parent.clone()).or_default().push((
+                        part.to_string(),
+                        ENTRY_DIRECTORY,
+                        0,
+                    ));
                 }
                 parent = path;
             }
@@ -233,13 +287,24 @@ impl RomFileSystem {
             },
             _ => {
                 let filter = req.u32(0);
-                let Some(all) = self.dirs.get(path) else { return Reply::err(PATH_NOT_FOUND) };
+                let Some(all) = self.dirs.get(path) else {
+                    return Reply::err(PATH_NOT_FOUND);
+                };
                 let entries = all
                     .iter()
-                    .filter(|(_, kind, _)| if *kind == ENTRY_DIRECTORY { filter & 1 != 0 } else { filter & 2 != 0 })
+                    .filter(|(_, kind, _)| {
+                        if *kind == ENTRY_DIRECTORY {
+                            filter & 1 != 0
+                        } else {
+                            filter & 2 != 0
+                        }
+                    })
                     .cloned()
                     .collect();
-                Reply::ok().object(Arc::new(HostDir { entries, next: Mutex::new(0) }))
+                Reply::ok().object(Arc::new(HostDir {
+                    entries,
+                    next: Mutex::new(0),
+                }))
             }
         }
     }
@@ -258,7 +323,12 @@ impl Service for RomFileSystem {
             },
             10 => Reply::ok(),
             11 => Reply::ok().u64(0),
-            12 => Reply::ok().u64(c.process().romfs.as_ref().map_or(0, |r| r.lock().unwrap().size())),
+            12 => Reply::ok().u64(
+                c.process()
+                    .romfs
+                    .as_ref()
+                    .map_or(0, |r| r.lock().unwrap().size()),
+            ),
             14 => Reply::ok().bytes(&[0u8; 0x20]),
             _ => unimplemented("fs/IFileSystem(RomFS)", c, req),
         }
@@ -277,14 +347,22 @@ impl Service for RomFile {
 
     fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
         let p = c.process();
-        let Some(romfs) = &p.romfs else { return Reply::err(TARGET_NOT_FOUND) };
+        let Some(romfs) = &p.romfs else {
+            return Reply::err(TARGET_NOT_FOUND);
+        };
         match req.cmd {
             0 => {
                 let (offset, size) = (req.u64(8), req.u64(16));
-                let Some(b) = req.b.first() else { return Reply::err(OUT_OF_RANGE) };
+                let Some(b) = req.b.first() else {
+                    return Reply::err(OUT_OF_RANGE);
+                };
                 let len = size.min(b.size).min(self.size.saturating_sub(offset));
                 let mut buf = vec![0u8; len as usize];
-                match romfs.lock().unwrap().read_at(self.offset + offset, &mut buf) {
+                match romfs
+                    .lock()
+                    .unwrap()
+                    .read_at(self.offset + offset, &mut buf)
+                {
                     Ok(n) => {
                         p.memory.write(b.addr, &buf[..n]);
                         Reply::ok().u64(n as u64)
@@ -370,33 +448,52 @@ impl Service for HostFs {
                 Some(to) => io_result(fs::rename(&p0, to)),
                 None => Reply::err(PATH_NOT_FOUND),
             },
-            7 => {
-                match fs::metadata(&p0) {
-                    Ok(m) => Reply::ok().u32(if m.is_dir() { ENTRY_DIRECTORY } else { ENTRY_FILE } as u32),
-                    Err(_) => Reply::err(PATH_NOT_FOUND),
-                }
-            }
+            7 => match fs::metadata(&p0) {
+                Ok(m) => Reply::ok().u32(if m.is_dir() {
+                    ENTRY_DIRECTORY
+                } else {
+                    ENTRY_FILE
+                } as u32),
+                Err(_) => Reply::err(PATH_NOT_FOUND),
+            },
             8 => {
                 let mode = req.u32(0);
                 match OpenOptions::new().read(true).write(mode & 6 != 0).open(&p0) {
-                    Ok(f) => Reply::ok().object(Arc::new(HostFile { file: Mutex::new(f), append: mode & 4 != 0 })),
+                    Ok(f) => Reply::ok().object(Arc::new(HostFile {
+                        file: Mutex::new(f),
+                        append: mode & 4 != 0,
+                    })),
                     Err(_) => Reply::err(PATH_NOT_FOUND),
                 }
             }
             9 => {
                 let filter = req.u32(0);
-                let Ok(rd) = fs::read_dir(&p0) else { return Reply::err(PATH_NOT_FOUND) };
+                let Ok(rd) = fs::read_dir(&p0) else {
+                    return Reply::err(PATH_NOT_FOUND);
+                };
                 let mut entries: Vec<(String, u8, u64)> = rd
                     .flatten()
                     .filter_map(|e| {
                         let m = e.metadata().ok()?;
-                        let kind = if m.is_dir() { ENTRY_DIRECTORY } else { ENTRY_FILE };
-                        let wanted = if kind == ENTRY_DIRECTORY { filter & 1 != 0 } else { filter & 2 != 0 };
-                        wanted.then(|| (e.file_name().to_string_lossy().into_owned(), kind, m.len()))
+                        let kind = if m.is_dir() {
+                            ENTRY_DIRECTORY
+                        } else {
+                            ENTRY_FILE
+                        };
+                        let wanted = if kind == ENTRY_DIRECTORY {
+                            filter & 1 != 0
+                        } else {
+                            filter & 2 != 0
+                        };
+                        wanted
+                            .then(|| (e.file_name().to_string_lossy().into_owned(), kind, m.len()))
                     })
                     .collect();
                 entries.sort();
-                Reply::ok().object(Arc::new(HostDir { entries, next: Mutex::new(0) }))
+                Reply::ok().object(Arc::new(HostDir {
+                    entries,
+                    next: Mutex::new(0),
+                }))
             }
             10 => Reply::ok(),
             11 | 12 => Reply::ok().u64(SAVE_SPACE),
@@ -404,7 +501,11 @@ impl Service for HostFs {
                 let r = fs::read_dir(&p0).map(|rd| {
                     for e in rd.flatten() {
                         let path = e.path();
-                        let _ = if path.is_dir() { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
+                        let _ = if path.is_dir() {
+                            fs::remove_dir_all(&path)
+                        } else {
+                            fs::remove_file(&path)
+                        };
                     }
                 });
                 io_result(r)
@@ -432,18 +533,31 @@ impl Service for HostFile {
         match req.cmd {
             0 => {
                 let (offset, size) = (req.u64(8), req.u64(16));
-                let Some(b) = req.b.first() else { return Reply::err(OUT_OF_RANGE) };
+                let Some(b) = req.b.first() else {
+                    return Reply::err(OUT_OF_RANGE);
+                };
                 let mut buf = vec![0u8; size.min(b.size) as usize];
-                let n = f.seek(SeekFrom::Start(offset)).and_then(|_| read_full(&mut f, &mut buf)).unwrap_or(0);
+                let n = f
+                    .seek(SeekFrom::Start(offset))
+                    .and_then(|_| read_full(&mut f, &mut buf))
+                    .unwrap_or(0);
                 p.memory.write(b.addr, &buf[..n]);
                 Reply::ok().u64(n as u64)
             }
             1 => {
                 let (offset, size) = (req.u64(8), req.u64(16));
-                let Some(a) = req.a.first() else { return Reply::err(OUT_OF_RANGE) };
+                let Some(a) = req.a.first() else {
+                    return Reply::err(OUT_OF_RANGE);
+                };
                 let data = p.memory.read(a.addr, size.min(a.size)).unwrap_or_default();
-                let at = if self.append { SeekFrom::End(0) } else { SeekFrom::Start(offset) };
-                io_result(f.seek(at).and_then(|_| f.write_all(&data)))
+                let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+                if !self.append && offset.saturating_add(data.len() as u64) > len {
+                    return Reply::err(WRITE_PAST_EOF);
+                }
+                io_result(
+                    f.seek(SeekFrom::Start(offset))
+                        .and_then(|_| f.write_all(&data)),
+                )
             }
             2 => io_result(f.flush()),
             3 => io_result(f.set_len(req.u64(0))),
@@ -477,7 +591,9 @@ impl Service for HostDir {
     fn call(&self, c: &mut Cpu, req: &Request) -> Reply {
         match req.cmd {
             0 => {
-                let Some(b) = req.b.first() else { return Reply::ok().u64(0) };
+                let Some(b) = req.b.first() else {
+                    return Reply::ok().u64(0);
+                };
                 let room = b.size as usize / DIRECTORY_ENTRY_SIZE;
                 let mut next = self.next.lock().unwrap();
                 let batch = &self.entries[(*next).min(self.entries.len())..];
@@ -503,21 +619,101 @@ impl Service for HostDir {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::abi::Entry;
+    use crate::services::harness;
     use kirikae_loader::romfs;
+
+    fn run_probe(
+        c: &mut Cpu,
+        append: bool,
+        offset: u64,
+        size: u64,
+        bytes: &[u8],
+        path_suffix: &str,
+        key: &'static str,
+    ) {
+        let dir = std::env::temp_dir().join(format!(
+            "kirikae-fs-write-{path_suffix}-{}",
+            std::process::id()
+        ));
+        let path = dir.join("save");
+        let f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+
+        let host_file = HostFile {
+            file: Mutex::new(f),
+            append,
+        };
+
+        let addr = c.tpidrro_el0 + 0x200;
+        assert!(c.process().memory.write(addr, bytes));
+
+        let mut data = vec![0u8; 24];
+        data[8..16].copy_from_slice(&offset.to_le_bytes());
+        data[16..24].copy_from_slice(&size.to_le_bytes());
+        let req = Request {
+            cmd: 1,
+            data,
+            a: vec![Buf {
+                addr,
+                size: bytes.len() as u64,
+            }],
+            ..Default::default()
+        };
+
+        let reply = host_file.call(c, &req);
+        let got = fs::read(&path).unwrap();
+        harness::record(key, &[reply.result as u64, got.len() as u64]);
+        c.halt();
+    }
+
+    extern "C" fn probe_seek(c: &mut Cpu) {
+        run_probe(c, true, 0, 16, &[0xAA; 16], "seek", "fs/seek")
+    }
+    extern "C" fn probe_gate(c: &mut Cpu) {
+        run_probe(c, false, 16, 16, &[0xAA; 16], "gate", "fs/gate")
+    }
+    extern "C" fn probe_grow(c: &mut Cpu) {
+        run_probe(c, true, 16, 16, &[0xAA; 16], "grow", "fs/grow")
+    }
 
     #[test]
     fn saves_follow_the_platform_data_directory() {
         let os = |s: &str| Some(std::ffi::OsString::from(s));
-        assert_eq!(data_dir(os("C:\\Roaming"), os("/xdg"), os("/home/u")), Some(PathBuf::from("C:\\Roaming")));
-        assert_eq!(data_dir(None, os("/xdg"), os("/home/u")), Some(PathBuf::from("/xdg")));
-        assert_eq!(data_dir(None, os(""), os("/home/u")), Some(Path::new("/home/u").join(".local/share")));
+        assert_eq!(
+            data_dir(os("C:\\Roaming"), os("/xdg"), os("/home/u")),
+            Some(PathBuf::from("C:\\Roaming"))
+        );
+        assert_eq!(
+            data_dir(None, os("/xdg"), os("/home/u")),
+            Some(PathBuf::from("/xdg"))
+        );
+        assert_eq!(
+            data_dir(None, os(""), os("/home/u")),
+            Some(Path::new("/home/u").join(".local/share"))
+        );
         assert_eq!(data_dir(None, None, None), None);
     }
 
     #[test]
     fn only_fat_bis_partitions_open() {
-        assert_eq!((28..=31).map(bis_partition).collect::<Vec<_>>(), [Some("calibration"), Some("safe"), Some("user"), Some("system")]);
-        assert!([0, 1, 20, 27, 32, 33].into_iter().all(|id| bis_partition(id).is_none()));
+        assert_eq!(
+            (28..=31).map(bis_partition).collect::<Vec<_>>(),
+            [
+                Some("calibration"),
+                Some("safe"),
+                Some("user"),
+                Some("system")
+            ]
+        );
+        assert!(
+            [0, 1, 20, 27, 32, 33]
+                .into_iter()
+                .all(|id| bis_partition(id).is_none())
+        );
     }
 
     #[test]
@@ -530,10 +726,20 @@ mod tests {
         fs::write(src.join("Model/Sub/b.txt"), b"nested file").unwrap();
         let image = dir.join("romfs.bin");
         let size = romfs::build(&src, &image).unwrap();
-        let mut r = romfs::Reader::open(&romfs::RomFs { path: image, offset: 0, size, compression: None }).unwrap();
+        let mut r = romfs::Reader::open(&romfs::RomFs {
+            path: image,
+            offset: 0,
+            size,
+            compression: None,
+        })
+        .unwrap();
         let rom = RomFileSystem::new(romfs::list(&mut r, usize::MAX).unwrap());
 
-        let req = |cmd: u32, filter: u32| Request { cmd, data: filter.to_le_bytes().to_vec(), ..Default::default() };
+        let req = |cmd: u32, filter: u32| Request {
+            cmd,
+            data: filter.to_le_bytes().to_vec(),
+            ..Default::default()
+        };
         let kind = |path: &str| {
             let reply = rom.lookup(&req(7, 0), path);
             (reply.result, reply.data)
@@ -548,12 +754,66 @@ mod tests {
         assert_eq!(rom.lookup(&req(9, 3), "Model").objects.len(), 1);
         assert_eq!(rom.lookup(&req(9, 3), "top.txt").result, PATH_NOT_FOUND);
 
-        assert_eq!(rom.dirs[""], [("Model".to_string(), ENTRY_DIRECTORY, 0), ("top.txt".to_string(), ENTRY_FILE, 9)]);
-        assert_eq!(rom.dirs["Model"], [("Sub".to_string(), ENTRY_DIRECTORY, 0), ("a.bin".to_string(), ENTRY_FILE, 1000)]);
+        assert_eq!(
+            rom.dirs[""],
+            [
+                ("Model".to_string(), ENTRY_DIRECTORY, 0),
+                ("top.txt".to_string(), ENTRY_FILE, 9)
+            ]
+        );
+        assert_eq!(
+            rom.dirs["Model"],
+            [
+                ("Sub".to_string(), ENTRY_DIRECTORY, 0),
+                ("a.bin".to_string(), ENTRY_FILE, 1000)
+            ]
+        );
         let (offset, size) = rom.files["Model/Sub/b.txt"];
         let mut got = vec![0u8; size as usize];
         r.read_at(offset, &mut got).unwrap();
         assert_eq!(got, b"nested file");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saves_lands_at_offset_not_eof() {
+        let dir =
+            std::env::temp_dir().join(format!("kirikae-fs-write-seek-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("save"), vec![7u8; 64]).unwrap();
+        harness::run(vec![Entry {
+            addr: harness::ENTRY,
+            func: probe_seek,
+        }]);
+        assert_eq!(harness::observed("fs/seek"), vec![0, 64]);
+        let _ = fs::remove_file(dir.join("save"));
+    }
+
+    #[test]
+    fn saves_not_appendable_past_eof() {
+        let dir =
+            std::env::temp_dir().join(format!("kirikae-fs-write-gate-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("save"), vec![7u8; 16]).unwrap();
+        harness::run(vec![Entry {
+            addr: harness::ENTRY,
+            func: probe_gate,
+        }]);
+        assert_eq!(harness::observed("fs/gate"), vec![0x307202, 16]);
+        let _ = fs::remove_file(dir.join("save"));
+    }
+
+    #[test]
+    fn saves_appendable_past_eof() {
+        let dir =
+            std::env::temp_dir().join(format!("kirikae-fs-write-grow-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("save"), vec![7u8; 16]).unwrap();
+        harness::run(vec![Entry {
+            addr: harness::ENTRY,
+            func: probe_grow,
+        }]);
+        assert_eq!(harness::observed("fs/grow"), vec![0, 32]);
+        let _ = fs::remove_file(dir.join("save"));
     }
 }
