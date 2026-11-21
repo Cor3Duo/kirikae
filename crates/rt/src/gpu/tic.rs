@@ -90,8 +90,9 @@ pub fn sampler(w: &[u32; 8]) -> Sampler {
         mip: bits(w, 38, 2),
         max_anisotropy: 1 << bits(w, 20, 3),
         border: [w[4], w[5], w[6], w[7]],
-        min_lod: bits(w, 96, 12),
-        max_lod: bits(w, 108, 12),
+        // NVB197 TEXSAMP2 (NVIDIA open-gpu-doc clb197tex.h): MIN_LOD_CLAMP 11:0, MAX_LOD_CLAMP 23:12.
+        min_lod: bits(w, 64, 12),
+        max_lod: bits(w, 76, 12),
         lod_bias: ((bits(w, 44, 13) << 19) as i32) >> 19,
         reduction: bits(w, 42, 2),
     }
@@ -115,5 +116,14 @@ mod tests {
         assert_eq!(h.address, 0x56_0000_0000 | 0x1234 << 9);
         assert_eq!(h.layout, Layout::BlockLinear { block_height_log2: 4, block_depth_log2: 0 });
         assert_eq!((h.width, h.height, h.texture_type), (1920, 1080, 1));
+    }
+
+    #[test]
+    fn sampler_lod_clamps_in_word2() {
+        let mut w = [0u32; 8];
+        w[2] = 0x100 | 0xFFF << 12; // min 1.0, max 15.996 (4.8 fixed point)
+        w[3] = 0xFF << 12 | 0xFF << 20; // sRGB border G/B: must not leak into the clamps
+        let s = sampler(&w);
+        assert_eq!((s.min_lod, s.max_lod), (0x100, 0xFFF));
     }
 }
