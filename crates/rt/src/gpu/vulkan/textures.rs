@@ -159,7 +159,7 @@ impl Renderer {
         self.lap(12, &mut lap);
         let layered = self.layered_image(gpu, mem, cpu, &header, &format)?;
         self.lap(13, &mut lap);
-        let key = match layered.map(|(k, _)| k).or_else(|| self.find_image(cpu, header.width, header.height, format.vk)) {
+        let key = match layered.map(|(k, _)| k).or_else(|| self.find_image(cpu, header.width, header.height, format.vk).filter(|k| same_class(k.format, format.vk) || self.images[k].gpu_dirty)) {
             Some(k) => {
                 if layered.is_none() {
                     self.refresh_texture(gpu, mem, k, &header, &format, layers);
